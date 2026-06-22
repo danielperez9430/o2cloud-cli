@@ -155,3 +155,40 @@ fn extract_oauth_params(url_str: &str) -> Option<(String, String)> {
         .map(|(_, v)| v.to_string())?;
     Some((code, state))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_valid() {
+        let (code, state) = extract_oauth_params(
+            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc123&state=xyz789"
+        ).unwrap();
+        assert_eq!(code, "abc123");
+        assert_eq!(state, "xyz789");
+    }
+
+    #[test]
+    fn test_extract_extra_params() {
+        let (code, state) = extract_oauth_params(
+            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc&other=1&state=xyz&foo=bar"
+        ).unwrap();
+        assert_eq!(code, "abc");
+        assert_eq!(state, "xyz");
+    }
+
+    #[test]
+    fn test_extract_missing_code() {
+        assert!(extract_oauth_params(
+            "https://cloud.o2online.es/ui/html/clientoauth.html?state=xyz"
+        ).is_none());
+    }
+
+    #[test]
+    fn test_extract_non_o2_url() {
+        // extract_oauth_params doesn't filter by host — it just parses query params
+        let result = extract_oauth_params("https://other.site.com/page?code=abc&state=xyz");
+        assert!(result.is_some());
+    }
+}

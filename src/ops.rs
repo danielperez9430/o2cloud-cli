@@ -85,7 +85,7 @@ fn print_folder_contents(
 
     for item in &files {
         let name = item.name.as_deref().unwrap_or("?");
-        let size = item.size.map(|s| format_size(s)).unwrap_or_else(|| "-".into());
+        let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
         println!(
             "  {:<8}  {:>8}  {}",
             item.id, size, name,
@@ -98,12 +98,12 @@ fn print_flat_all(
     folder_name: &HashMap<u64, String>,
     folders: &[crate::api::FolderEntry],
 ) {
-    println!("{:<12} {:>8}  {}", "ID", "SIZE", "PATH");
-    println!("{:<12} {:>8}  {}", "──", "──", "──");
+    println!("{:<12} {:>8}  PATH", "ID", "SIZE");
+    println!("{:<12} {:>8}  ──", "──", "──");
 
     for item in media {
         let name = item.name.as_deref().unwrap_or("?");
-        let size = item.size.map(|s| format_size(s)).unwrap_or_else(|| "-".into());
+        let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
         let path = item.folderid
             .map(|fid| resolve_path(fid, folder_name, folders))
             .unwrap_or_else(|| "/".into());
@@ -157,11 +157,11 @@ fn print_tree(
         let last = idx == total;
         let conn = if last { "└── " } else { "├── " };
         let fname = item.name.as_deref().unwrap_or("?");
-        let size = item.size.map(|s| format_size(s)).unwrap_or_else(|| "-".into());
+        let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
         println!("{}{}📄 {}  ({})", new_prefix, conn, fname, size);
     }
 
-    for (_i, child) in children.iter().enumerate() {
+    for child in children.iter() {
         idx += 1;
         let last = idx == total;
         print_tree(folders, media, folder_name, _folder_parent, child.id, &new_prefix, last);
@@ -194,8 +194,8 @@ fn resolve_target(
     }
 
     // Absolute path → split and traverse
-    let parts: Vec<&str> = if path.starts_with('/') {
-        path[1..].split('/').filter(|s| !s.is_empty()).collect()
+    let parts: Vec<&str> = if let Some(stripped) = path.strip_prefix('/') {
+        stripped.split('/').filter(|s| !s.is_empty()).collect()
     } else {
         path.split('/').filter(|s| !s.is_empty()).collect()
     };
@@ -686,7 +686,7 @@ pub async fn find(
                 .map(|fid| resolve_path(fid, &folder_name, &folders))
                 .unwrap_or_else(|| "/".into());
             let full = if folder_path == "/" { format!("/{}", name) } else { format!("{}/{}", folder_path, name) };
-            let size = item.size.map(|s| format_size(s)).unwrap_or_else(|| "-".into());
+            let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
             println!("📄 {:<12} {:>8}  {}", item.id, size, full);
             found += 1;
         }
@@ -739,10 +739,10 @@ pub async fn delete_target(
             if let Some(item) = media.iter().find(|m| m.name.as_deref() == Some(target)) {
                 return delete_file(client, auth, item.id).await;
             }
-            return Err(O2Error::Auth(format!(
+            Err(O2Error::Auth(format!(
                 "Not found: '{}'. Use a numeric ID or folder path.",
                 target
-            )));
+            )))
         }
     }
 }
@@ -890,4 +890,95 @@ fn mime_type_from_name(name: &str) -> String {
         _ => "application/octet-stream",
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(18), "18 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1048576), "1.0 MB");
+        assert_eq!(format_size(1073741824), "1.0 GB");
+        assert_eq!(format_size(1099511627776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_mime_type_from_name() {
+        assert_eq!(mime_type_from_name("file.txt"), "text/plain");
+        assert_eq!(mime_type_from_name("photo.png"), "image/png");
+        assert_eq!(mime_type_from_name("doc.pdf"), "application/pdf");
+        assert_eq!(mime_type_from_name("movie.mp4"), "video/mp4");
+        assert_eq!(mime_type_from_name("song.mp3"), "audio/mpeg");
+        assert_eq!(mime_type_from_name("script.php"), "application/x-httpd-php");
+        assert_eq!(mime_type_from_name("unknown.xyz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_system_time_to_compact_iso() {
+        use std::time::UNIX_EPOCH;
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(1705314645);
+        assert_eq!(system_time_to_compact_iso(t), "20240115T103045");
+    }
+
+    #[test]
+    fn test_resolve_path() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
+            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+        ];
+        let folder_name: std::collections::HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+        assert_eq!(resolve_path(1, &folder_name, &folders), "/");
+        assert_eq!(resolve_path(2, &folder_name, &folders), "/docs");
+        assert_eq!(resolve_path(3, &folder_name, &folders), "/docs/images");
+    }
+
+    #[test]
+    fn test_resolve_target_by_id() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+            crate::api::FolderEntry { id: 42, name: "stuff".into(), parentid: 1 },
+        ];
+        let folder_name: std::collections::HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let folder_by_name: std::collections::HashMap<String, u64> =
+            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
+
+        assert_eq!(resolve_target(Some("42".into()), &folders, &folder_name, &folder_by_name).unwrap(), 42);
+        assert_eq!(resolve_target(None, &folders, &folder_name, &folder_by_name).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_resolve_target_by_path() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
+            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+        ];
+        let folder_name: std::collections::HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let folder_by_name: std::collections::HashMap<String, u64> =
+            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
+
+        assert_eq!(resolve_target(Some("/docs".into()), &folders, &folder_name, &folder_by_name).unwrap(), 2);
+        assert_eq!(resolve_target(Some("/docs/images".into()), &folders, &folder_name, &folder_by_name).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_resolve_target_not_found() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+        ];
+        let folder_name = std::collections::HashMap::from([(1u64, "/".into())]);
+        let folder_by_name = std::collections::HashMap::from([("/".into(), 1u64)]);
+
+        assert!(resolve_target(Some("/nope".into()), &folders, &folder_name, &folder_by_name).is_err());
+    }
 }

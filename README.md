@@ -1,71 +1,71 @@
 # o2cloud-cli
 
-CLI para O2 Cloud (Telefónica España) — gestiona tu almacenamiento cloud desde la terminal.
+CLI for O2 Cloud (Telefónica España) — manage your cloud storage from the terminal.
 
-## Instalación
+[Español](README.es.md)
+
+## Installation
 
 ```bash
-cargo install --git https://github.com/danielperez9430/o2cloud-cli
+cargo install o2cloud-cli
 ```
 
-O compilar desde fuente:
+Or build from source:
 
 ```bash
 git clone https://github.com/danielperez9430/o2cloud-cli
 cd o2cloud-cli
 cargo build --release
-./target/release/o2cloud-cli --help
+./target/release/o2cloud --help
 ```
 
-## Uso
+## Usage
 
 ```bash
-# Autenticación (abre ventana WebView)
+# Authentication (opens WebView)
 o2cloud login
 
-# Listar archivos
-o2cloud ls                  # raíz
-o2cloud ls /DMHAIR          # carpeta por path
-o2cloud ls -t               # vista de árbol
-o2cloud ls -a               # todos los archivos (plano)
+# List files
+o2cloud ls                  # root
+o2cloud ls /DMHAIR          # folder by path
+o2cloud ls -t               # tree view
+o2cloud ls -a               # all files (flat)
 
-# Buscar
-o2cloud find "consulta"     # búsqueda case-insensitive
+# Search
+o2cloud find "query"        # case-insensitive search
 
-# Subir
-o2cloud upload archivo.txt
-o2cloud upload-dir ./mi-carpeta      # recursivo
-o2cloud upload-zip ./mi-carpeta      # zip + subir
+# Upload
+o2cloud upload file.txt
+o2cloud upload-dir ./my-folder       # recursive
+o2cloud upload-zip ./my-folder       # zip + upload
 
-# Descargar
-o2cloud download 1195003130 -o archivo.txt
+# Download
+o2cloud download 1195003130 -o file.txt
 
-# Borrar (papelera)
-o2cloud rm 1195003130                # archivo por ID
-o2cloud rm /ruta/carpeta -r          # carpeta recursiva
+# Delete (trash)
+o2cloud rm 1195003130                # file by ID
+o2cloud rm /path/to/folder -r        # recursive folder
 
-# Sesión
+# Session
 o2cloud status
 o2cloud logout
 ```
 
-## Requisitos
+## Requirements
 
-- macOS (WebView usa WKWebView nativo)
-- Cuenta de O2 Cloud (Telefónica España)
+- macOS or Linux
+- O2 Cloud account (Telefónica Spain)
+- Linux: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev`
 
-## Cómo funciona
+## How it works
 
-O2 Cloud usa **Synchronoss OneMediaHub v31** como backend. La autenticación va por **Telefónica Mobile Connect** (OAuth2/OpenID Connect). El CLI abre un WebView para que introduzcas tu número y valides por SMS. Tras el login, los tokens se guardan en `~/Library/Application Support/o2cloud-cli/auth.json` y se renuevan silenciosamente.
+O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication goes through **Telefónica Mobile Connect** (OAuth2/OpenID Connect). The CLI opens a WebView where you enter your phone number and verify via SMS. After login, tokens are stored in:
 
-## Licencia
+- macOS: `~/Library/Application Support/o2cloud-cli/auth.json`
+- Linux: `~/.config/o2cloud-cli/auth.json`
+
+Sessions are silently renewed when expired — no need to re-login.
+
+## License
 
 MIT
-
-### Linux
-
-Requiere `libwebkit2gtk-4.1-dev` y `libgtk-3-dev`:
-
-```bash
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev
-```

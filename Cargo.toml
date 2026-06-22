@@ -2,7 +2,7 @@
 name = "o2cloud-cli"
 version = "0.1.0"
 edition = "2021"
-description = "CLI for O2 Cloud (Telefónica España) — manage your cloud storage from the terminal"
+description = "CLI for O2 Cloud (Telefónica Spain) — manage your cloud storage from the terminal"
 license = "MIT"
 repository = "https://github.com/danielperez9430/o2cloud-cli"
 readme = "README.md"

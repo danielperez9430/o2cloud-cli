@@ -56,8 +56,4 @@ impl FileCache {
         );
         self.save()
     }
-
-    pub fn get(&self, id: u64) -> Option<&CachedFile> {
-        self.files.get(&id)
-    }
 }

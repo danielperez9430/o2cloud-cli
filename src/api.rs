@@ -1025,13 +1025,10 @@ pub struct MediaItem {
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
-    pub etag: Option<String>,
-    #[serde(default)]
     pub url: Option<String>,
-    #[serde(default)]
-    pub mediatype: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
+    /// Catch-all for fields we don't use (etag, mediatype, status, date, …).
+    #[serde(flatten)]
+    _rest: serde_json::Value,
 }
 
 fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -1096,10 +1093,9 @@ pub struct UploadMeta {
 
 #[derive(Debug, Deserialize)]
 pub struct UploadMetaResponse {
-    pub success: String,
     pub id: String,
-    #[serde(default)]
-    pub lastupdate: u64,
+    #[serde(flatten)]
+    _rest: serde_json::Value,
 }
 
 fn format_compact_iso_now() -> String {
