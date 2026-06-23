@@ -4,6 +4,9 @@
   <img src="assets/logo.svg" alt="o2cloud-cli" width="600">
 </p>
 
+[![Crates.io](https://img.shields.io/crates/v/o2cloud-cli)](https://crates.io/crates/o2cloud-cli)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+
 CLI for O2 Cloud (Telefónica Spain) — manage your cloud storage from the terminal.
 
 [Español](README.es.md)
