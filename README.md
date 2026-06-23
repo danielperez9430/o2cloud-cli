@@ -1,6 +1,10 @@
 # o2cloud-cli
 
-CLI for O2 Cloud (Telefónica España) — manage your cloud storage from the terminal.
+<p align="center">
+  <img src="assets/logo.svg" alt="o2cloud-cli" width="600">
+</p>
+
+CLI for O2 Cloud (Telefónica Spain) — manage your cloud storage from the terminal.
 
 [Español](README.es.md)
 
