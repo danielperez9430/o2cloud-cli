@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod error;
 mod ops;
+mod util;
 mod webview;
 
 use std::path::PathBuf;

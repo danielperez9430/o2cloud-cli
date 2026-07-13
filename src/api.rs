@@ -583,7 +583,7 @@ impl O2Client {
         auth: &AuthConfig,
     ) -> Result<u64, O2Error> {
         let url = format!("{}/sapi/media/folder", BASE_URL);
-        let now = format_compact_iso_now();
+        let now = crate::util::system_time_to_compact_iso(std::time::SystemTime::now());
 
         #[derive(Serialize)]
         struct FolderCreateRequest {
@@ -1108,36 +1108,6 @@ pub struct UploadMetaResponse {
     pub id: String,
     #[serde(flatten)]
     _rest: serde_json::Value,
-}
-
-fn format_compact_iso_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let days = (secs / 86400) as i64;
-    let (y, m, d) = {
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let yd = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-            if remaining < yd { break; }
-            remaining -= yd;
-            y += 1;
-        }
-        let feb = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 };
-        let md = [31,feb,31,30,31,30,31,31,30,31,30,31];
-        let mut m = 1;
-        let mut rd = remaining;
-        for &mc in &md {
-            if rd < mc { break; }
-            rd -= mc;
-            m += 1;
-        }
-        (y, m, rd + 1)
-    };
-    let t = secs % 86400;
-    format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, m, d, t / 3600, (t % 3600) / 60, t % 60)
 }
 
 #[cfg(test)]
