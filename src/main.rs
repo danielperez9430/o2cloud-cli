@@ -90,6 +90,10 @@ enum Commands {
         /// Recursive: delete folder and all its contents
         #[arg(short, long)]
         recursive: bool,
+
+        /// Skip the confirmation prompt for recursive deletes
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Search files and folders by name
@@ -219,9 +223,9 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::upload_zip(&client, &auth, &local_path, folder).await?;
         }
 
-        Commands::Rm { target, recursive } => {
+        Commands::Rm { target, recursive, yes } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::delete_target(&client, &auth, &target, recursive).await?;
+            ops::delete_target(&client, &auth, &target, recursive, yes).await?;
         }
 
         Commands::Upload { path, folder } => {

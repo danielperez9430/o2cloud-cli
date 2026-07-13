@@ -751,12 +751,14 @@ pub async fn find(
 // ------------------------------------------------------------------
 
 /// Delete a file or folder.  `target` can be a numeric ID or a path.
-/// With `--recursive`, deletes a folder and all its contents.
+/// With `--recursive`, deletes a folder and all its contents; unless
+/// `assume_yes` is set, this prompts for confirmation first.
 pub async fn delete_target(
     client: &O2Client,
     auth: &AuthConfig,
     target: &str,
     recursive: bool,
+    assume_yes: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
@@ -766,6 +768,10 @@ pub async fn delete_target(
         // Is it a folder or a file?
         if folder_name.contains_key(&id) {
             let media = client.get_all_media(auth).await?;
+            if !confirm_recursive_delete(id, &folders, &media, recursive, assume_yes)? {
+                eprintln!("Aborted.");
+                return Ok(());
+            }
             return delete_folder(client, auth, id, &folders, &media, recursive).await;
         } else {
             return delete_file(client, auth, id).await;
@@ -777,6 +783,10 @@ pub async fn delete_target(
     match resolve_target(path, &folders, &folder_name) {
         Ok(folder_id) => {
             let media = client.get_all_media(auth).await?;
+            if !confirm_recursive_delete(folder_id, &folders, &media, recursive, assume_yes)? {
+                eprintln!("Aborted.");
+                return Ok(());
+            }
             return delete_folder(client, auth, folder_id, &folders, &media, recursive).await;
         }
         Err(_) => {
@@ -791,6 +801,63 @@ pub async fn delete_target(
             )))
         }
     }
+}
+
+/// Count all files and subfolders nested (at any depth) under `folder_id`.
+fn count_recursive(
+    folder_id: u64,
+    folders: &[crate::api::FolderEntry],
+    media: &[crate::api::MediaItem],
+) -> (usize, usize) {
+    let mut files = media.iter().filter(|m| m.folderid == Some(folder_id)).count();
+    let mut dirs = 0usize;
+    for child in folders.iter().filter(|f| f.parentid == folder_id) {
+        dirs += 1;
+        let (child_files, child_dirs) = count_recursive(child.id, folders, media);
+        files += child_files;
+        dirs += child_dirs;
+    }
+    (files, dirs)
+}
+
+/// For a recursive delete with non-empty contents, ask the user to
+/// confirm before anything is destroyed. Returns `Ok(true)` if the
+/// delete should proceed. Non-recursive deletes and empty folders
+/// always proceed without prompting.
+fn confirm_recursive_delete(
+    folder_id: u64,
+    folders: &[crate::api::FolderEntry],
+    media: &[crate::api::MediaItem],
+    recursive: bool,
+    assume_yes: bool,
+) -> Result<bool, O2Error> {
+    if !recursive || assume_yes {
+        return Ok(true);
+    }
+    let (files, dirs) = count_recursive(folder_id, folders, media);
+    if files == 0 && dirs == 0 {
+        return Ok(true);
+    }
+
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to delete {} file(s) and {} subfolder(s) without a TTY; \
+                 re-run with --yes (-y) to confirm non-interactively",
+                files, dirs
+            ),
+        )));
+    }
+
+    eprint!(
+        "⚠ This will permanently delete {} file(s) and {} subfolder(s). Continue? [y/N] ",
+        files, dirs
+    );
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).map_err(O2Error::Io)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
 async fn delete_folder(
@@ -924,6 +991,31 @@ mod tests {
         let folder_name = std::collections::HashMap::from([(1u64, "/".into())]);
 
         assert!(resolve_target(Some("/nope".into()), &folders, &folder_name).is_err());
+    }
+
+    #[test]
+    fn test_count_recursive() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
+            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+        ];
+        let media: Vec<crate::api::MediaItem> = serde_json::from_str(
+            r#"[
+                {"id": 100, "name": "a.txt", "folderid": 2, "size": 1},
+                {"id": 101, "name": "b.txt", "folderid": 3, "size": 2},
+                {"id": 102, "name": "c.txt", "folderid": 3, "size": 3}
+            ]"#,
+        )
+        .unwrap();
+
+        // Folder 2 ("docs") contains 1 direct file + 1 subfolder ("images"),
+        // which itself contains 2 files.
+        assert_eq!(count_recursive(2, &folders, &media), (3, 1));
+        // Folder 3 ("images") has no subfolders, just 2 files.
+        assert_eq!(count_recursive(3, &folders, &media), (2, 0));
+        // Root has no direct files, only the "docs" subtree.
+        assert_eq!(count_recursive(1, &folders, &media), (3, 2));
     }
 
     #[test]
