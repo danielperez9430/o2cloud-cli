@@ -3,7 +3,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::api::{O2Client, UploadMeta, UploadMetaResponse};
-use crate::cache::FileCache;
 use crate::config::AuthConfig;
 use crate::error::O2Error;
 
@@ -33,14 +32,12 @@ pub async fn list_folder(
 
     // Build lookup tables
     let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
-    let folder_parent: HashMap<u64, u64> = folders.iter().map(|f| (f.id, f.parentid)).collect();
-    let folder_by_name: HashMap<String, u64> = folders.iter().map(|f| (f.name.clone(), f.id)).collect();
 
     // Resolve target folder
-    let target = resolve_target(path, &folders, &folder_name, &folder_by_name)?;
+    let target = resolve_target(path, &folders, &folder_name)?;
 
     if tree {
-        print_tree(&folders, &media, &folder_name, &folder_parent, target, "", true);
+        print_tree(&folders, &media, &folder_name, target, "", true);
     } else if all {
         print_flat_all(&media, &folder_name, &folders);
     } else {
@@ -117,7 +114,6 @@ fn print_tree(
     folders: &[crate::api::FolderEntry],
     media: &[crate::api::MediaItem],
     folder_name: &HashMap<u64, String>,
-    _folder_parent: &HashMap<u64, u64>,
     current: u64,
     prefix: &str,
     is_last: bool,
@@ -164,7 +160,7 @@ fn print_tree(
     for child in children.iter() {
         idx += 1;
         let last = idx == total;
-        print_tree(folders, media, folder_name, _folder_parent, child.id, &new_prefix, last);
+        print_tree(folders, media, folder_name, child.id, &new_prefix, last);
     }
 }
 
@@ -179,7 +175,6 @@ fn resolve_target(
     path: Option<String>,
     folders: &[crate::api::FolderEntry],
     folder_name: &HashMap<u64, String>,
-    _folder_by_name: &HashMap<String, u64>,
 ) -> Result<u64, O2Error> {
     let path = match path {
         Some(p) => p,
@@ -340,17 +335,6 @@ pub async fn upload_file(
         O2Error::Auth(format!("Cannot read file for upload: {}", e))
     })?;
     client.upload_bytes(&id, &data, auth).await?;
-
-    // Cache the file metadata for future listings
-    let mut cache = FileCache::load();
-    cache.insert(
-        id.parse().unwrap_or(0),
-        meta.name.clone(),
-        meta.size,
-        meta.contenttype.clone(),
-        meta.modificationdate.clone(),
-        folder_id,
-    )?;
 
     eprintln!("✓ Uploaded successfully (id: {})", id);
     Ok(())
@@ -774,7 +758,6 @@ pub async fn delete_target(
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
-    let folder_by_name: HashMap<String, u64> = folders.iter().map(|f| (f.name.clone(), f.id)).collect();
 
     // Try numeric ID first
     if let Ok(id) = target.parse::<u64>() {
@@ -789,7 +772,7 @@ pub async fn delete_target(
 
     // Resolve as path
     let path = Some(target.to_string());
-    match resolve_target(path, &folders, &folder_name, &folder_by_name) {
+    match resolve_target(path, &folders, &folder_name) {
         Ok(folder_id) => {
             let media = client.get_all_media(auth).await?;
             return delete_folder(client, auth, folder_id, &folders, &media, recursive).await;
@@ -1009,11 +992,9 @@ mod tests {
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
-        let folder_by_name: std::collections::HashMap<String, u64> =
-            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
 
-        assert_eq!(resolve_target(Some("42".into()), &folders, &folder_name, &folder_by_name).unwrap(), 42);
-        assert_eq!(resolve_target(None, &folders, &folder_name, &folder_by_name).unwrap(), 1);
+        assert_eq!(resolve_target(Some("42".into()), &folders, &folder_name).unwrap(), 42);
+        assert_eq!(resolve_target(None, &folders, &folder_name).unwrap(), 1);
     }
 
     #[test]
@@ -1024,10 +1005,8 @@ mod tests {
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
-        let folder_by_name: std::collections::HashMap<String, u64> =
-            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
 
-        assert!(resolve_target(Some("999".into()), &folders, &folder_name, &folder_by_name).is_err());
+        assert!(resolve_target(Some("999".into()), &folders, &folder_name).is_err());
     }
 
     #[test]
@@ -1039,11 +1018,9 @@ mod tests {
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
-        let folder_by_name: std::collections::HashMap<String, u64> =
-            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
 
-        assert_eq!(resolve_target(Some("/docs".into()), &folders, &folder_name, &folder_by_name).unwrap(), 2);
-        assert_eq!(resolve_target(Some("/docs/images".into()), &folders, &folder_name, &folder_by_name).unwrap(), 3);
+        assert_eq!(resolve_target(Some("/docs".into()), &folders, &folder_name).unwrap(), 2);
+        assert_eq!(resolve_target(Some("/docs/images".into()), &folders, &folder_name).unwrap(), 3);
     }
 
     #[test]
@@ -1052,9 +1029,8 @@ mod tests {
             crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
         ];
         let folder_name = std::collections::HashMap::from([(1u64, "/".into())]);
-        let folder_by_name = std::collections::HashMap::from([("/".into(), 1u64)]);
 
-        assert!(resolve_target(Some("/nope".into()), &folders, &folder_name, &folder_by_name).is_err());
+        assert!(resolve_target(Some("/nope".into()), &folders, &folder_name).is_err());
     }
 
     #[test]

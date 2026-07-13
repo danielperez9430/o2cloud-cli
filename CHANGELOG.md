@@ -2,6 +2,33 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Error-body previews in `api.rs` could panic when truncated mid multi-byte
+  UTF-8 character (server responds in Spanish).
+- User-facing messages referenced the command as `o2cli`; the binary is
+  actually `o2cloud`.
+- `upload-dir`/`upload-zip` could panic on non-UTF-8 file names.
+- ZIP entries used the host OS path separator instead of `/`, producing
+  broken archives when zipping on Windows.
+- `upload-dir` now skips hidden **directories** as well as hidden files
+  (previously `.git/`, `.venv/`, etc. had their contents uploaded).
+- `upload-dir`'s final success count no longer reports files that failed
+  mid-upload as successful; the command now exits non-zero if any file
+  failed.
+- `rm --recursive` fetched the full media list at every level of folder
+  recursion; it's now fetched once per invocation.
+- `ls`/`find` on a folder ID that doesn't exist now errors instead of
+  silently printing an empty folder.
+- `download` without `-o` now saves the file under its real name (was
+  `<id>.downloaded`); it also refuses to overwrite an existing local file.
+
+### Removed
+- The local file cache (`~/.config/o2cli/file_cache.json`) has been
+  removed — it was written on every upload but never read anywhere. Any
+  existing cache file on disk is harmless and can be deleted manually.
+
 ## [0.1.0] — 2026-06-22
 
 ### Added
