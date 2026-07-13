@@ -307,11 +307,8 @@ async fn main() {
 
         Commands::Download { id, output } => {
             let (client, auth) = require_client_and_auth().await;
-            let output_path = match output {
-                Some(ref p) => PathBuf::from(p),
-                None => PathBuf::from(format!("{}.downloaded", id)),
-            };
-            match ops::download_file(&client, &auth, id, &output_path).await {
+            let output_path = output.map(PathBuf::from);
+            match ops::download_file(&client, &auth, id, output_path).await {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("Download failed: {}", e);

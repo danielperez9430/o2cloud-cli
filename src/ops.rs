@@ -188,9 +188,16 @@ fn resolve_target(
         }
     };
 
-    // Numeric → direct folder ID
+    // Numeric → direct folder ID (must exist)
     if let Ok(id) = path.parse::<u64>() {
-        return Ok(id);
+        return if folder_name.contains_key(&id) {
+            Ok(id)
+        } else {
+            Err(O2Error::Auth(format!(
+                "Folder id {} not found. Try `o2cloud ls` to browse from root.",
+                id
+            )))
+        };
     }
 
     // Absolute path → split and traverse
@@ -648,24 +655,46 @@ fn add_dir_to_zip(
 // ------------------------------------------------------------------
 
 /// Download a file from O2 Cloud by its media ID.
+///
+/// If `output` is `None`, the file is saved under its real name in the
+/// current directory (falling back to `{id}.bin` if the name is empty).
+/// Refuses to overwrite an existing local file.
 pub async fn download_file(
     client: &O2Client,
     auth: &AuthConfig,
     media_id: u64,
-    output_path: &Path,
+    output: Option<PathBuf>,
 ) -> Result<(), O2Error> {
-    // Fetch the signed download URL from the media listing
+    // Fetch the signed download URL (and real name) from the media listing
     let media = client.get_all_media(auth).await?;
-    let download_url = media
+    let item = media
         .iter()
         .find(|m| m.id == media_id)
-        .and_then(|m| m.url.as_deref())
-        .ok_or_else(|| O2Error::Auth(format!("Media {} not found or has no download URL", media_id)))?;
+        .ok_or_else(|| O2Error::Auth(format!("Media {} not found", media_id)))?;
+    let download_url = item
+        .url
+        .as_deref()
+        .ok_or_else(|| O2Error::Auth(format!("Media {} has no download URL", media_id)))?;
+
+    let output_path = match output {
+        Some(p) => p,
+        None => match item.name.as_deref().filter(|n| !n.is_empty()) {
+            Some(name) => PathBuf::from(name),
+            None => PathBuf::from(format!("{}.bin", media_id)),
+        },
+    };
+
+    if output_path.exists() {
+        return Err(O2Error::Auth(format!(
+            "Refusing to overwrite existing file: {}",
+            output_path.display()
+        )));
+    }
 
     eprintln!("→ Downloading media {}...", media_id);
     let data = client.download_file_url(download_url).await?;
 
-    std::fs::write(output_path, &data).map_err(|e| {
+    std::fs::write(&output_path, &data).map_err(|e| {
         O2Error::Auth(format!(
             "Cannot write to {}: {}",
             output_path.display(),
@@ -751,7 +780,8 @@ pub async fn delete_target(
     if let Ok(id) = target.parse::<u64>() {
         // Is it a folder or a file?
         if folder_name.contains_key(&id) {
-            return delete_folder(client, auth, id, &folders, recursive).await;
+            let media = client.get_all_media(auth).await?;
+            return delete_folder(client, auth, id, &folders, &media, recursive).await;
         } else {
             return delete_file(client, auth, id).await;
         }
@@ -761,7 +791,8 @@ pub async fn delete_target(
     let path = Some(target.to_string());
     match resolve_target(path, &folders, &folder_name, &folder_by_name) {
         Ok(folder_id) => {
-            return delete_folder(client, auth, folder_id, &folders, recursive).await;
+            let media = client.get_all_media(auth).await?;
+            return delete_folder(client, auth, folder_id, &folders, &media, recursive).await;
         }
         Err(_) => {
             // Not a folder — maybe it's a filename? Search media
@@ -782,12 +813,12 @@ async fn delete_folder(
     auth: &AuthConfig,
     folder_id: u64,
     folders: &[crate::api::FolderEntry],
+    media: &[crate::api::MediaItem],
     recursive: bool,
 ) -> Result<(), O2Error> {
     let name = folders.iter().find(|f| f.id == folder_id).map(|f| f.name.as_str()).unwrap_or("?");
 
     // Count contents
-    let media = client.get_all_media(auth).await?;
     let file_count = media.iter().filter(|m| m.folderid == Some(folder_id)).count();
     let child_dirs: Vec<_> = folders.iter().filter(|f| f.parentid == folder_id).collect();
 
@@ -802,7 +833,7 @@ async fn delete_folder(
 
     // Recursively delete child folders
     for child in &child_dirs {
-        Box::pin(delete_folder(client, auth, child.id, folders, true)).await?;
+        Box::pin(delete_folder(client, auth, child.id, folders, media, true)).await?;
     }
 
     // Delete files in this folder (paginated, 1000 at a time)
@@ -983,6 +1014,20 @@ mod tests {
 
         assert_eq!(resolve_target(Some("42".into()), &folders, &folder_name, &folder_by_name).unwrap(), 42);
         assert_eq!(resolve_target(None, &folders, &folder_name, &folder_by_name).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_resolve_target_by_id_not_found() {
+        let folders = vec![
+            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
+            crate::api::FolderEntry { id: 42, name: "stuff".into(), parentid: 1 },
+        ];
+        let folder_name: std::collections::HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let folder_by_name: std::collections::HashMap<String, u64> =
+            folders.iter().map(|f| (f.name.clone(), f.id)).collect();
+
+        assert!(resolve_target(Some("999".into()), &folders, &folder_name, &folder_by_name).is_err());
     }
 
     #[test]
