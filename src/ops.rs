@@ -189,7 +189,7 @@ fn resolve_target(
         return if folder_name.contains_key(&id) {
             Ok(id)
         } else {
-            Err(O2Error::Auth(format!(
+            Err(O2Error::NotFound(format!(
                 "Folder id {} not found. Try `o2cloud ls` to browse from root.",
                 id
             )))
@@ -220,7 +220,7 @@ fn resolve_target(
     let mut current = root;
     for part in &parts {
         let kids = children.get(&current).ok_or_else(|| {
-            O2Error::Auth(format!("Folder '{}' has no children", folder_name.get(&current).unwrap_or(&"?".into())))
+            O2Error::NotFound(format!("Folder '{}' has no children", folder_name.get(&current).unwrap_or(&"?".into())))
         })?;
         let found = kids.iter().find_map(|kid| {
             folder_name.get(kid).and_then(|name| if name == *part { Some(*kid) } else { None })
@@ -238,7 +238,7 @@ fn resolve_target(
                 match fuzzy {
                     Some(id) => current = id,
                     None => {
-                        return Err(O2Error::Auth(format!(
+                        return Err(O2Error::NotFound(format!(
                             "Folder '{}' not found. Try `o2cloud ls` to browse from root.",
                             part
                         )));
@@ -285,13 +285,13 @@ pub async fn upload_file(
 ) -> Result<(), O2Error> {
     // Read file metadata
     let metadata = std::fs::metadata(local_path).map_err(|e| {
-        O2Error::Auth(format!("Cannot read file {}: {}", local_path.display(), e))
+        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read file {}: {}", local_path.display(), e)))
     })?;
     let size = metadata.len();
     let name = local_path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| O2Error::Auth("Invalid file name".into()))?
+        .ok_or_else(|| O2Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name")))?
         .to_string();
 
     let modified = metadata.modified().ok();
@@ -309,7 +309,7 @@ pub async fn upload_file(
                 .iter()
                 .find(|f| f.name == "/")
                 .map(|f| f.id)
-                .ok_or_else(|| O2Error::Auth("Root folder not found".into()))?
+                .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))?
         }
     };
 
@@ -333,7 +333,7 @@ pub async fn upload_file(
 
     // Step 2 — Upload bytes
     let data = std::fs::read(local_path).map_err(|e| {
-        O2Error::Auth(format!("Cannot read file for upload: {}", e))
+        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read file for upload: {}", e)))
     })?;
     client.upload_bytes(&id, &data, auth).await?;
 
@@ -362,7 +362,7 @@ pub async fn upload_dir(
                 .iter()
                 .find(|f| f.name == "/")
                 .map(|f| f.id)
-                .ok_or_else(|| O2Error::Auth("Root folder not found".into()))?
+                .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))?
         }
     };
 
@@ -487,7 +487,7 @@ pub async fn upload_dir(
     eprintln!("✓ Uploaded {} files to {}", succeeded, local_dir.display());
 
     if failed > 0 {
-        return Err(O2Error::Auth(format!(
+        return Err(O2Error::Api(format!(
             "{} of {} files failed to upload",
             failed, file_count
         )));
@@ -505,10 +505,10 @@ fn walk_dir(
 ) -> Result<(), O2Error> {
     entries.push((dir.to_path_buf(), true));
     for entry in std::fs::read_dir(dir).map_err(|e| {
-        O2Error::Auth(format!("Cannot read dir {}: {}", dir.display(), e))
+        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read dir {}: {}", dir.display(), e)))
     })? {
         let entry = entry.map_err(|e| {
-            O2Error::Auth(format!("Read error in {}: {}", dir.display(), e))
+            O2Error::Io(std::io::Error::new(e.kind(), format!("Read error in {}: {}", dir.display(), e)))
         })?;
         let path = entry.path();
         let is_hidden = path
@@ -562,9 +562,9 @@ pub async fn upload_zip(
     folder_id: Option<u64>,
 ) -> Result<(), O2Error> {
     if !local_dir.is_dir() {
-        return Err(O2Error::Auth(format!(
-            "Not a directory: {}",
-            local_dir.display()
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Not a directory: {}", local_dir.display()),
         )));
     }
 
@@ -578,7 +578,7 @@ pub async fn upload_zip(
 
     // Create zip
     let file = std::fs::File::create(&tmp_zip).map_err(|e| {
-        O2Error::Auth(format!("Cannot create zip: {}", e))
+        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot create zip: {}", e)))
     })?;
     let mut zip = zip::ZipWriter::new(file);
     let options =
@@ -605,10 +605,10 @@ fn add_dir_to_zip(
     options: zip::write::SimpleFileOptions,
 ) -> Result<(), O2Error> {
     for entry in std::fs::read_dir(dir).map_err(|e| {
-        O2Error::Auth(format!("Cannot read dir {}: {}", dir.display(), e))
+        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read dir {}: {}", dir.display(), e)))
     })? {
         let entry = entry.map_err(|e| {
-            O2Error::Auth(format!("Read error in {}: {}", dir.display(), e))
+            O2Error::Io(std::io::Error::new(e.kind(), format!("Read error in {}: {}", dir.display(), e)))
         })?;
         let path = entry.path();
         let relative = path.strip_prefix(base).unwrap();
@@ -623,13 +623,15 @@ fn add_dir_to_zip(
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            zip.start_file(&entry_name, options)
-                .map_err(|e| O2Error::Auth(format!("Zip error: {}", e)))?;
-            let data = std::fs::read(&path).map_err(|e| {
-                O2Error::Auth(format!("Cannot read {}: {}", path.display(), e))
+            zip.start_file(&entry_name, options).map_err(|e| {
+                O2Error::Io(std::io::Error::other(format!("Zip error: {}", e)))
             })?;
-            zip.write_all(&data)
-                .map_err(|e| O2Error::Auth(format!("Zip write error: {}", e)))?;
+            let data = std::fs::read(&path).map_err(|e| {
+                O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read {}: {}", path.display(), e)))
+            })?;
+            zip.write_all(&data).map_err(|e| {
+                O2Error::Io(std::io::Error::other(format!("Zip write error: {}", e)))
+            })?;
         }
     }
     Ok(())
@@ -655,11 +657,11 @@ pub async fn download_file(
     let item = media
         .iter()
         .find(|m| m.id == media_id)
-        .ok_or_else(|| O2Error::Auth(format!("Media {} not found", media_id)))?;
+        .ok_or_else(|| O2Error::NotFound(format!("Media {} not found", media_id)))?;
     let download_url = item
         .url
         .as_deref()
-        .ok_or_else(|| O2Error::Auth(format!("Media {} has no download URL", media_id)))?;
+        .ok_or_else(|| O2Error::NotFound(format!("Media {} has no download URL", media_id)))?;
 
     let output_path = match output {
         Some(p) => p,
@@ -670,9 +672,9 @@ pub async fn download_file(
     };
 
     if output_path.exists() {
-        return Err(O2Error::Auth(format!(
-            "Refusing to overwrite existing file: {}",
-            output_path.display()
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("Refusing to overwrite existing file: {}", output_path.display()),
         )));
     }
 
@@ -680,10 +682,9 @@ pub async fn download_file(
     let data = client.download_file_url(download_url).await?;
 
     std::fs::write(&output_path, &data).map_err(|e| {
-        O2Error::Auth(format!(
-            "Cannot write to {}: {}",
-            output_path.display(),
-            e
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot write to {}: {}", output_path.display(), e),
         ))
     })?;
 
@@ -784,8 +785,8 @@ pub async fn delete_target(
             if let Some(item) = media.iter().find(|m| m.name.as_deref() == Some(target)) {
                 return delete_file(client, auth, item.id).await;
             }
-            Err(O2Error::Auth(format!(
-                "Not found: '{}'. Use a numeric ID or folder path.",
+            Err(O2Error::NotFound(format!(
+                "'{}'. Use a numeric ID or folder path.",
                 target
             )))
         }

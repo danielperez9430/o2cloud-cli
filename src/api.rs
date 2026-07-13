@@ -474,7 +474,7 @@ impl O2Client {
         let raw_body = resp.text().await?;
 
         if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Get folders failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
@@ -487,7 +487,7 @@ impl O2Client {
         }
 
         let body: RawResponse<FolderData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!("Failed to parse folder list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
+            O2Error::Parse(format!("Failed to parse folder list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
         })?;
 
         Ok(body.data.folders)
@@ -547,7 +547,7 @@ impl O2Client {
             let raw_body = resp.text().await?;
 
             if !status.is_success() {
-                return Err(O2Error::Auth(format!(
+                return Err(O2Error::Api(format!(
                     "Get media failed (status {}): {}",
                     status,
                     truncate_utf8(&raw_body, 300)
@@ -555,7 +555,7 @@ impl O2Client {
             }
 
             let body: RawResponse<MediaData> = serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Auth(format!("Failed to parse media list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
+                O2Error::Parse(format!("Failed to parse media list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
             })?;
 
             let count = body.data.media.len();
@@ -623,7 +623,7 @@ impl O2Client {
         let raw_body = resp.text().await?;
 
         if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Create folder failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
@@ -636,7 +636,7 @@ impl O2Client {
         }
 
         let body: FolderCreateResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!("Failed to parse create folder response: {} — body: {}", e, truncate_utf8(&raw_body, 200)))
+            O2Error::Parse(format!("Failed to parse create folder response: {} — body: {}", e, truncate_utf8(&raw_body, 200)))
         })?;
 
         Ok(body.id)
@@ -663,7 +663,7 @@ impl O2Client {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Delete folder failed ({}): {}", status, truncate_utf8(&body, 200)
             )));
         }
@@ -694,7 +694,7 @@ impl O2Client {
         let raw_body = resp.text().await?;
 
         if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Delete failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
@@ -721,7 +721,7 @@ impl O2Client {
             data: meta,
         };
         let json_body = serde_json::to_vec(&payload).map_err(|e| {
-            O2Error::Auth(format!("Failed to serialize upload metadata: {}", e))
+            O2Error::Api(format!("Failed to serialize upload metadata: {}", e))
         })?;
 
         let req = self
@@ -746,7 +746,7 @@ impl O2Client {
         let raw_body = resp.text().await?;
 
         if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Upload metadata failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
@@ -761,7 +761,7 @@ impl O2Client {
                     .as_array()
                     .map(|a| a.iter().filter_map(|p| p["param"].as_str()).collect())
                     .unwrap_or_default();
-                return Err(O2Error::Auth(format!(
+                return Err(O2Error::Api(format!(
                     "Upload metadata rejected: {} (params: {:?})",
                     msg, params
                 )));
@@ -769,7 +769,7 @@ impl O2Client {
         }
 
         let resp_data: UploadMetaResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!(
+            O2Error::Parse(format!(
                 "Failed to parse upload metadata response: {} — body: {}",
                 e,
                 truncate_utf8(&raw_body, 300)
@@ -816,7 +816,7 @@ impl O2Client {
         let raw_body = resp.text().await?;
 
         if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Upload bytes failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
@@ -842,7 +842,7 @@ impl O2Client {
         let status = resp.status();
         if !status.is_success() {
             let raw_body = resp.text().await.unwrap_or_default();
-            return Err(O2Error::Auth(format!(
+            return Err(O2Error::Api(format!(
                 "Download failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 200)
