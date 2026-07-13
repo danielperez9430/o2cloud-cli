@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use error::O2Error;
+
 /// O2 Cloud CLI — access your O2 Cloud storage from the terminal.
 ///
 /// O2 Cloud is the cloud storage service provided by Telefónica España,
@@ -107,21 +109,13 @@ enum Commands {
     },
 }
 
-async fn require_client_and_auth() -> (api::O2Client, config::AuthConfig) {
-    let auth = match config::load_auth() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
-    };
-    let client = match api::O2Client::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to create API client: {}", e);
-            std::process::exit(1);
-        }
-    };
+/// Load stored credentials and an API client, silently refreshing (or, as
+/// a last resort, re-running the interactive login flow) if the session
+/// has expired.
+async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig), O2Error> {
+    let auth = config::load_auth()?;
+    let client = api::O2Client::new()?;
+
     if !client.is_session_valid(&auth).await {
         eprintln!("→ Session expired, trying silent re-login...");
         match client.silent_login(&auth).await {
@@ -139,38 +133,23 @@ async fn require_client_and_auth() -> (api::O2Client, config::AuthConfig) {
                     eprintln!("Failed to save refreshed auth: {}", e);
                 }
                 eprintln!("✓ Session refreshed silently");
-                return (client, new_auth);
+                return Ok((client, new_auth));
             }
             Err(_) => {
                 eprintln!("→ Silent re-login failed, opening login window...");
                 let msisdn = auth.msisdn.strip_prefix("34").unwrap_or(&auth.msisdn).to_string();
-                match crate::auth::login(&msisdn).await {
-                    Ok(new_auth) => {
-                        eprintln!("✓ Re-login successful");
-                        let new_client = match api::O2Client::new() {
-                            Ok(c) => c,
-                            Err(e2) => {
-                                eprintln!("Failed to create API client: {}", e2);
-                                std::process::exit(1);
-                            }
-                        };
-                        return (new_client, new_auth);
-                    }
-                    Err(e2) => {
-                        eprintln!("Re-login failed: {}", e2);
-                        std::process::exit(1);
-                    }
-                }
+                let new_auth = crate::auth::login(&msisdn).await?;
+                eprintln!("✓ Re-login successful");
+                let new_client = api::O2Client::new()?;
+                return Ok((new_client, new_auth));
             }
         }
     }
-    (client, auth)
+
+    Ok((client, auth))
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
+async fn run(cli: Cli) -> Result<(), O2Error> {
     match cli.command {
         Commands::Login { phone } => {
             let phone = match phone {
@@ -178,27 +157,17 @@ async fn main() {
                 None => {
                     eprint!("Enter your phone number (+34): ");
                     let mut input = String::new();
-                    std::io::stdin()
-                        .read_line(&mut input)
-                        .expect("Failed to read input");
+                    std::io::stdin().read_line(&mut input).map_err(O2Error::Io)?;
                     input.trim().to_string()
                 }
             };
 
             if phone.is_empty() {
-                eprintln!("Error: phone number is required");
-                std::process::exit(1);
+                return Err(O2Error::Auth("phone number is required".into()));
             }
 
-            match auth::login(&phone).await {
-                Ok(config) => {
-                    println!("Logged in as +34 {}", config.msisdn);
-                }
-                Err(e) => {
-                    eprintln!("Login failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            let config = auth::login(&phone).await?;
+            println!("Logged in as +34 {}", config.msisdn);
         }
 
         Commands::Status => match config::load_auth() {
@@ -216,105 +185,72 @@ async fn main() {
             }
         },
 
-        Commands::Logout => match config::clear_auth() {
-            Ok(()) => println!("✓ Logged out — tokens removed"),
-            Err(e) => {
-                eprintln!("Failed to clear auth: {}", e);
-                std::process::exit(1);
-            }
-        },
+        Commands::Logout => {
+            config::clear_auth()?;
+            println!("✓ Logged out — tokens removed");
+        }
 
         Commands::Ls { path, all, tree } => {
-            let (client, auth) = require_client_and_auth().await;
-            match ops::list_folder(&client, &auth, path, all, tree).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("List failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            let (client, auth) = require_client_and_auth().await?;
+            ops::list_folder(&client, &auth, path, all, tree).await?;
         }
 
         Commands::UploadDir { path, folder } => {
-            let (client, auth) = require_client_and_auth().await;
+            let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
-                eprintln!("Error: not a directory: {}", path);
-                std::process::exit(1);
+                return Err(O2Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("not a directory: {}", path),
+                )));
             }
-            match ops::upload_dir(&client, &auth, &local_path, folder).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Directory upload failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            ops::upload_dir(&client, &auth, &local_path, folder).await?;
         }
 
         Commands::UploadZip { path, folder } => {
-            let (client, auth) = require_client_and_auth().await;
+            let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
-                eprintln!("Error: not a directory: {}", path);
-                std::process::exit(1);
+                return Err(O2Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("not a directory: {}", path),
+                )));
             }
-            match ops::upload_zip(&client, &auth, &local_path, folder).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Zip upload failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            ops::upload_zip(&client, &auth, &local_path, folder).await?;
         }
 
         Commands::Rm { target, recursive } => {
-            let (client, auth) = require_client_and_auth().await;
-            match ops::delete_target(&client, &auth, &target, recursive).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Delete failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            let (client, auth) = require_client_and_auth().await?;
+            ops::delete_target(&client, &auth, &target, recursive).await?;
         }
 
         Commands::Upload { path, folder } => {
-            let (client, auth) = require_client_and_auth().await;
+            let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.exists() {
-                eprintln!("Error: file not found: {}", path);
-                std::process::exit(1);
+                return Err(O2Error::NotFound(format!("file not found: {}", path)));
             }
-            match ops::upload_file(&client, &auth, &local_path, folder).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Upload failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            ops::upload_file(&client, &auth, &local_path, folder).await?;
         }
 
         Commands::Find { query } => {
-            let (client, auth) = require_client_and_auth().await;
-            match ops::find(&client, &auth, &query).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Search failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            let (client, auth) = require_client_and_auth().await?;
+            ops::find(&client, &auth, &query).await?;
         }
 
         Commands::Download { id, output } => {
-            let (client, auth) = require_client_and_auth().await;
+            let (client, auth) = require_client_and_auth().await?;
             let output_path = output.map(PathBuf::from);
-            match ops::download_file(&client, &auth, id, output_path).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Download failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            ops::download_file(&client, &auth, id, output_path).await?;
         }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run(Cli::parse()).await {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
