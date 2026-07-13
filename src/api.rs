@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,11 @@ use crate::error::O2Error;
 const BASE_URL: &str = "https://cloud.o2online.es";
 /// Separate host for binary uploads.
 const UPLOAD_URL: &str = "https://upload.cloud.o2online.es";
+
+/// Per-request timeout applied to metadata/listing/login calls — never
+/// to the raw upload/download of file bytes, which can legitimately take
+/// much longer than this for large files.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Truncate `s` to at most `max` bytes without splitting a UTF-8 character.
 fn truncate_utf8(s: &str, max: usize) -> &str {
@@ -72,6 +79,7 @@ impl O2Client {
         let client = Client::builder()
             .cookie_store(true)
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(15))
             .build()?;
 
         Ok(Self { client, device_id })
@@ -88,6 +96,7 @@ impl O2Client {
         let resp = self
             .client
             .get(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[("embedded", "true")])
             .header("x-deviceid", &self.device_id)
             .header("referer", "https://cloud.o2online.es/")
@@ -114,6 +123,7 @@ impl O2Client {
         let resp = self
             .client
             .get(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)])
             .header("cookie", format!("JSESSIONID={}", auth.jsessionid))
             .header("authorization", &auth_header)
@@ -150,6 +160,7 @@ impl O2Client {
         let resp = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "login"), ("responsetime", "true")])
             .header("authorization", &auth_header)
             .header("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
@@ -210,13 +221,16 @@ impl O2Client {
     // ------------------------------------------------------------------
 
     /// Attach per-request headers that CloudFront / WAF expects from a
-    /// browser client: device ID, referer, and Sec-Fetch metadata.
+    /// browser client: device ID, referer, and Sec-Fetch metadata.  Also
+    /// applies `REQUEST_TIMEOUT` — every caller of this helper is a small
+    /// metadata/auth exchange, never a raw file transfer.
     fn with_device_headers(
         &self,
         builder: reqwest::RequestBuilder,
         path: &str,
     ) -> reqwest::RequestBuilder {
         builder
+            .timeout(REQUEST_TIMEOUT)
             .header("x-deviceid", &self.device_id)
             .header("referer", format!("https://cloud.o2online.es{}", path))
             .header("sec-fetch-site", "same-origin")
@@ -462,6 +476,7 @@ impl O2Client {
         let req = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)])
             .header("authorization", &auth_header);
 
@@ -528,6 +543,7 @@ impl O2Client {
             let req = self
                 .client
                 .post(&url)
+                .timeout(REQUEST_TIMEOUT)
                 .query(&[
                     ("action", "get"),
                     ("validationkey", &auth.validationkey),
@@ -611,6 +627,7 @@ impl O2Client {
         let req = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
             .json(&payload);
 
@@ -654,6 +671,7 @@ impl O2Client {
         let req = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[
                 ("action", "softdelete"),
                 ("id", &folder_id.to_string()),
@@ -679,6 +697,7 @@ impl O2Client {
         let req = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[
                 ("action", "softdelete"),
                 ("id", &media_id.to_string()),
@@ -727,6 +746,7 @@ impl O2Client {
         let req = self
             .client
             .post(&url)
+            .timeout(REQUEST_TIMEOUT)
             .query(&[
                 ("action", "save-metadata"),
                 ("responsetime", "true"),
