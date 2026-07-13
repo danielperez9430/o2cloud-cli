@@ -98,7 +98,7 @@ enum Commands {
 
     /// Download a file from O2 Cloud by media ID
     Download {
-        /// Media ID (shown in `o2cli ls`)
+        /// Media ID (shown in `o2cloud ls`)
         id: u64,
 
         /// Output file path (defaults to current directory)
@@ -212,7 +212,7 @@ async fn main() {
                 );
             }
             Err(_) => {
-                println!("✗ Not logged in. Run `o2cli login` to authenticate.");
+                println!("✗ Not logged in. Run `o2cloud login` to authenticate.");
             }
         },
 

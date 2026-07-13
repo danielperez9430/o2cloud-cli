@@ -9,6 +9,18 @@ const BASE_URL: &str = "https://cloud.o2online.es";
 /// Separate host for binary uploads.
 const UPLOAD_URL: &str = "https://upload.cloud.o2online.es";
 
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 character.
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Generate a random device ID in the format used by the web client.
 fn generate_device_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -152,7 +164,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Silent login failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -160,7 +172,7 @@ impl O2Client {
             O2Error::Auth(format!(
                 "Failed to parse silent login response: {} — body: {}",
                 e,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             ))
         })?;
 
@@ -301,7 +313,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Start Mobile Connect failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -310,7 +322,7 @@ impl O2Client {
                 O2Error::Auth(format!(
                     "Failed to parse start response: {} — body: {}",
                     e,
-                    &raw_body[..raw_body.len().min(300)]
+                    truncate_utf8(&raw_body, 300)
                 ))
             })?;
 
@@ -360,7 +372,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Validate credential failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -369,7 +381,7 @@ impl O2Client {
                 O2Error::Auth(format!(
                     "Failed to parse validate response: {} — body: {}",
                     e,
-                    &raw_body[..raw_body.len().min(300)]
+                    truncate_utf8(&raw_body, 300)
                 ))
             })?;
 
@@ -414,7 +426,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Login failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -422,7 +434,7 @@ impl O2Client {
             O2Error::Auth(format!(
                 "Failed to parse login response: {} — body: {}",
                 e,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             ))
         })?;
 
@@ -465,7 +477,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Get folders failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -475,7 +487,7 @@ impl O2Client {
         }
 
         let body: RawResponse<FolderData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!("Failed to parse folder list: {} — body: {}", e, &raw_body[..raw_body.len().min(300)]))
+            O2Error::Auth(format!("Failed to parse folder list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
         })?;
 
         Ok(body.data.folders)
@@ -538,12 +550,12 @@ impl O2Client {
                 return Err(O2Error::Auth(format!(
                     "Get media failed (status {}): {}",
                     status,
-                    &raw_body[..raw_body.len().min(300)]
+                    truncate_utf8(&raw_body, 300)
                 )));
             }
 
             let body: RawResponse<MediaData> = serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Auth(format!("Failed to parse media list: {} — body: {}", e, &raw_body[..raw_body.len().min(300)]))
+                O2Error::Auth(format!("Failed to parse media list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
             })?;
 
             let count = body.data.media.len();
@@ -614,7 +626,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Create folder failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -624,7 +636,7 @@ impl O2Client {
         }
 
         let body: FolderCreateResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!("Failed to parse create folder response: {} — body: {}", e, &raw_body[..raw_body.len().min(200)]))
+            O2Error::Auth(format!("Failed to parse create folder response: {} — body: {}", e, truncate_utf8(&raw_body, 200)))
         })?;
 
         Ok(body.id)
@@ -652,7 +664,7 @@ impl O2Client {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(O2Error::Auth(format!(
-                "Delete folder failed ({}): {}", status, &body[..body.len().min(200)]
+                "Delete folder failed ({}): {}", status, truncate_utf8(&body, 200)
             )));
         }
         Ok(())
@@ -685,7 +697,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Delete failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -737,7 +749,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Upload metadata failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -760,7 +772,7 @@ impl O2Client {
             O2Error::Auth(format!(
                 "Failed to parse upload metadata response: {} — body: {}",
                 e,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             ))
         })?;
 
@@ -807,7 +819,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Upload bytes failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(300)]
+                truncate_utf8(&raw_body, 300)
             )));
         }
 
@@ -833,7 +845,7 @@ impl O2Client {
             return Err(O2Error::Auth(format!(
                 "Download failed (status {}): {}",
                 status,
-                &raw_body[..raw_body.len().min(200)]
+                truncate_utf8(&raw_body, 200)
             )));
         }
 
@@ -1128,3 +1140,29 @@ fn format_compact_iso_now() -> String {
     format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, m, d, t / 3600, (t % 3600) / 60, t % 60)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_utf8_short_string_unchanged() {
+        assert_eq!(truncate_utf8("hello", 300), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_does_not_split_multibyte_char() {
+        // "á" is 2 bytes in UTF-8 (0xC3 0xA1). Repeating it 200 times gives
+        // a 400-byte string where byte offset 300 falls squarely inside a
+        // character boundary (300 is even, so it lands mid-character only
+        // if the previous naive byte-slice logic was used incorrectly);
+        // build a string where the boundary genuinely falls mid-char by
+        // prefixing with a single-byte character to shift alignment.
+        let s = format!("x{}", "á".repeat(200));
+        // Byte 300 in this string must fall inside a 2-byte 'á' sequence.
+        assert!(!s.is_char_boundary(300));
+        let truncated = truncate_utf8(&s, 300);
+        assert!(s.starts_with(truncated));
+        assert!(truncated.len() <= 300);
+        // Must not panic and must be valid UTF-8 (guaranteed by &str type).
+    }
+}

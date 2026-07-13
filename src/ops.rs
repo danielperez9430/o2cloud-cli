@@ -236,7 +236,7 @@ fn resolve_target(
                     Some(id) => current = id,
                     None => {
                         return Err(O2Error::Auth(format!(
-                            "Folder '{}' not found. Try `o2cli ls` to browse from root.",
+                            "Folder '{}' not found. Try `o2cloud ls` to browse from root.",
                             part
                         )));
                     }
@@ -377,9 +377,11 @@ pub async fn upload_dir(
     // Fetch all existing folders to check for duplicates
     let existing_folders = client.get_all_folders(auth).await?;
 
-    // Collect all files and directories to upload
+    // Collect all files and directories to upload, skipping hidden entries
+    // (dotfiles/dotdirs like .git, .DS_Store) which O2 Cloud rejects.
     let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
-    walk_dir(local_dir, &mut entries)?;
+    let mut skipped_hidden = 0u32;
+    walk_dir(local_dir, &mut entries, &mut skipped_hidden)?;
 
     // Count files for progress
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
@@ -405,7 +407,7 @@ pub async fn upload_dir(
         }
         let parent_local = dir_path.parent().unwrap();
         let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(root_parent);
-        let name = dir_path.file_name().unwrap().to_str().unwrap();
+        let name = dir_path.file_name().unwrap().to_string_lossy().into_owned();
 
         // Check if folder already exists
         let existing_id = existing_folders
@@ -417,7 +419,7 @@ pub async fn upload_dir(
             eprintln!("  📁 {}/ (exists id:{})", name, id);
             id
         } else {
-            let id = client.create_folder(name, parent_o2, auth).await?;
+            let id = client.create_folder(&name, parent_o2, auth).await?;
             eprintln!("  📁 {}/ (created id:{})", name, id);
             id
         };
@@ -425,42 +427,37 @@ pub async fn upload_dir(
     }
 
     // Upload files
-    let mut uploaded = 0;
-    let mut skipped = 0u32;
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
     for (file_path, is_dir) in &entries {
         if *is_dir {
             continue;
         }
         let parent_local = file_path.parent().unwrap();
         let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(root_parent);
-        let name = file_path.file_name().unwrap().to_str().unwrap();
+        let name = file_path.file_name().unwrap().to_string_lossy().into_owned();
 
-        // O2 Cloud blocks files starting with "."
-        if name.starts_with('.') {
-            skipped += 1;
-            continue;
-        }
-
-        uploaded += 1;
+        attempted += 1;
         let size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
 
         eprintln!(
             "  [{}/{}] 📄 {} ({})",
-            uploaded, file_count, name, format_size(size)
+            attempted, file_count, name, format_size(size)
         );
 
         // Upload via metadata + bytes
         let modified = std::fs::metadata(file_path).ok().and_then(|m| m.modified().ok());
         let now = std::time::SystemTime::now();
         let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
-        let contenttype = mime_type_from_name(name);
+        let contenttype = mime_type_from_name(&name);
 
         let meta = UploadMeta {
             contenttype: contenttype.clone(),
             creationdate: date_str.clone(),
             folderid: parent_o2,
             modificationdate: date_str,
-            name: name.to_string(),
+            name: name.clone(),
             size,
         };
 
@@ -468,6 +465,7 @@ pub async fn upload_dir(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ⚠ Skipping {}: {}", name, e);
+                failed += 1;
                 continue;
             }
         };
@@ -475,34 +473,44 @@ pub async fn upload_dir(
             Ok(d) => d,
             Err(e) => {
                 eprintln!("  ⚠ Cannot read {}: {}", file_path.display(), e);
+                failed += 1;
                 continue;
             }
         };
         if let Err(e) = client.upload_bytes(&id, &data, auth).await {
             eprintln!("  ⚠ Byte upload failed for {}: {}", name, e);
+            failed += 1;
             continue;
         }
 
-        // Cache
-        let mut cache = FileCache::load();
-        cache.insert(
-            id.parse().unwrap_or(0),
-            name.to_string(),
-            size,
-            contenttype,
-            meta.modificationdate.clone(),
-            parent_o2,
-        )?;
+        succeeded += 1;
     }
 
-    if skipped > 0 {
-        eprintln!("  (skipped {} dotfiles: .gitignore, .DS_Store, etc.)", skipped);
+    if skipped_hidden > 0 {
+        eprintln!("  (skipped {} hidden files/dirs: .git, .DS_Store, etc.)", skipped_hidden);
     }
-    eprintln!("✓ Uploaded {} files to {}", file_count - skipped as usize, local_dir.display());
+    if failed > 0 {
+        eprintln!("⚠ {} file(s) failed to upload", failed);
+    }
+    eprintln!("✓ Uploaded {} files to {}", succeeded, local_dir.display());
+
+    if failed > 0 {
+        return Err(O2Error::Auth(format!(
+            "{} of {} files failed to upload",
+            failed, file_count
+        )));
+    }
     Ok(())
 }
 
-fn walk_dir(dir: &Path, entries: &mut Vec<(PathBuf, bool)>) -> Result<(), O2Error> {
+/// Recursively collect files and directories under `dir`, skipping any
+/// entry (file or directory) whose name starts with `.` — O2 Cloud
+/// rejects dotfiles, and dotdirs like `.git` should never be uploaded.
+fn walk_dir(
+    dir: &Path,
+    entries: &mut Vec<(PathBuf, bool)>,
+    skipped_hidden: &mut u32,
+) -> Result<(), O2Error> {
     entries.push((dir.to_path_buf(), true));
     for entry in std::fs::read_dir(dir).map_err(|e| {
         O2Error::Auth(format!("Cannot read dir {}: {}", dir.display(), e))
@@ -511,8 +519,16 @@ fn walk_dir(dir: &Path, entries: &mut Vec<(PathBuf, bool)>) -> Result<(), O2Erro
             O2Error::Auth(format!("Read error in {}: {}", dir.display(), e))
         })?;
         let path = entry.path();
+        let is_hidden = path
+            .file_name()
+            .map(|n| n.to_string_lossy().starts_with('.'))
+            .unwrap_or(false);
+        if is_hidden {
+            *skipped_hidden += 1;
+            continue;
+        }
         if path.is_dir() {
-            walk_dir(&path, entries)?;
+            walk_dir(&path, entries, skipped_hidden)?;
         } else {
             entries.push((path, false));
         }
@@ -525,6 +541,13 @@ fn dir_size(dir: &Path) -> u64 {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            let is_hidden = path
+                .file_name()
+                .map(|n| n.to_string_lossy().starts_with('.'))
+                .unwrap_or(false);
+            if is_hidden {
+                continue;
+            }
             if path.is_dir() {
                 total += dir_size(&path);
             } else if let Ok(meta) = std::fs::metadata(&path) {
@@ -555,7 +578,7 @@ pub async fn upload_zip(
 
     let zip_name = format!(
         "{}.zip",
-        local_dir.file_name().unwrap().to_str().unwrap()
+        local_dir.file_name().unwrap().to_string_lossy()
     );
     let tmp_zip = std::env::temp_dir().join(&zip_name);
 
@@ -601,7 +624,14 @@ fn add_dir_to_zip(
         if path.is_dir() {
             add_dir_to_zip(zip, base, &path, options)?;
         } else {
-            zip.start_file(relative.to_str().unwrap(), options)
+            // ZIP entries always use `/` as the separator, regardless of
+            // the host OS path separator (important on Windows).
+            let entry_name = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            zip.start_file(&entry_name, options)
                 .map_err(|e| O2Error::Auth(format!("Zip error: {}", e)))?;
             let data = std::fs::read(&path).map_err(|e| {
                 O2Error::Auth(format!("Cannot read {}: {}", path.display(), e))
@@ -980,5 +1010,30 @@ mod tests {
         let folder_by_name = std::collections::HashMap::from([("/".into(), 1u64)]);
 
         assert!(resolve_target(Some("/nope".into()), &folders, &folder_name, &folder_by_name).is_err());
+    }
+
+    #[test]
+    fn test_walk_dir_skips_hidden_files_and_dirs() {
+        let tmp = std::env::temp_dir().join(format!("o2cli_test_walk_dir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".hidden")).unwrap();
+        std::fs::write(tmp.join(".hidden").join("inner.txt"), b"secret").unwrap();
+        std::fs::write(tmp.join("visible.txt"), b"public").unwrap();
+        std::fs::write(tmp.join(".dotfile"), b"nope").unwrap();
+
+        let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+        let mut skipped = 0u32;
+        walk_dir(&tmp, &mut entries, &mut skipped).unwrap();
+
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|(_, is_dir)| !is_dir)
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(files, vec!["visible.txt".to_string()]);
+        assert_eq!(skipped, 2); // .hidden/ dir and .dotfile
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }
