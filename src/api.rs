@@ -1187,6 +1187,47 @@ mod tests {
     }
 
     #[test]
+    fn test_folder_entry_deserialize_numeric_id() {
+        let folder: FolderEntry =
+            serde_json::from_str(r#"{"id": 42, "name": "docs", "parentid": 1}"#).unwrap();
+        assert_eq!(folder.id, 42);
+        assert_eq!(folder.parentid, 1);
+    }
+
+    #[test]
+    fn test_folder_entry_deserialize_string_id() {
+        let folder: FolderEntry =
+            serde_json::from_str(r#"{"id": "42", "name": "docs", "parentid": "1"}"#).unwrap();
+        assert_eq!(folder.id, 42);
+        assert_eq!(folder.parentid, 1);
+    }
+
+    #[test]
+    fn test_media_item_deserialize_folderid_numeric() {
+        let item: MediaItem =
+            serde_json::from_str(r#"{"id": 100, "name": "a.txt", "folderid": 5, "size": 10}"#)
+                .unwrap();
+        assert_eq!(item.id, 100);
+        assert_eq!(item.folderid, Some(5));
+    }
+
+    #[test]
+    fn test_media_item_deserialize_folder_alias_as_string() {
+        // The server actually returns `folder`, not `folderid`, even
+        // though the request asks for the `folderid` field.
+        let item: MediaItem =
+            serde_json::from_str(r#"{"id": 101, "name": "b.txt", "folder": "7", "size": 20}"#)
+                .unwrap();
+        assert_eq!(item.folderid, Some(7));
+    }
+
+    #[test]
+    fn test_media_item_deserialize_folderid_absent() {
+        let item: MediaItem = serde_json::from_str(r#"{"id": 102, "name": "c.txt"}"#).unwrap();
+        assert_eq!(item.folderid, None);
+    }
+
+    #[test]
     fn test_truncate_utf8_does_not_split_multibyte_char() {
         // "á" is 2 bytes in UTF-8 (0xC3 0xA1). Repeating it 200 times gives
         // a 400-byte string where byte offset 300 falls squarely inside a

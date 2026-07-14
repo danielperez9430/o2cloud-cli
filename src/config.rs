@@ -173,3 +173,44 @@ pub fn clear_auth() -> Result<(), O2Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_access_token(token: &str) -> AuthConfig {
+        AuthConfig {
+            validationkey: "vk".into(),
+            jsessionid: "js".into(),
+            access_token: token.into(),
+            encryption_token: "et".into(),
+            msisdn: "600000000".into(),
+            platform: "macos".into(),
+        }
+    }
+
+    #[test]
+    fn test_extract_pat_token_valid_padded() {
+        use base64::Engine;
+        let json = r#"{"data":{"accesstoken":"pat=abc123"}}"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let cfg = config_with_access_token(&b64);
+        assert_eq!(cfg.extract_pat_token(), "pat=abc123");
+    }
+
+    #[test]
+    fn test_extract_pat_token_valid_no_padding() {
+        use base64::Engine;
+        let json = r#"{"data":{"accesstoken":"pat=abc123"}}"#;
+        let unpadded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(json.as_bytes());
+        assert!(!unpadded.contains('=')); // sanity: genuinely no padding
+        let cfg = config_with_access_token(&unpadded);
+        assert_eq!(cfg.extract_pat_token(), "pat=abc123");
+    }
+
+    #[test]
+    fn test_extract_pat_token_fallback_on_garbage() {
+        let cfg = config_with_access_token("not-valid-base64-json!!!");
+        assert_eq!(cfg.extract_pat_token(), "not-valid-base64-json!!!");
+    }
+}
