@@ -2,7 +2,7 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] — 2026-07-14
 
 ### Added
 - `rm --recursive` now prints how many files/subfolders it's about to
