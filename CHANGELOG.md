@@ -4,6 +4,27 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `rm --recursive` now prints how many files/subfolders it's about to
+  destroy and asks for confirmation before deleting anything. Pass
+  `-y`/`--yes` to skip the prompt (required when stdin isn't a TTY,
+  e.g. in scripts).
+- HTTP request timeouts: a 15s connect timeout on the client, plus a
+  60s per-request timeout on metadata/listing/login calls (uploads and
+  downloads of file bytes are intentionally exempt).
+
+### Changed
+- Uploads and downloads are now streamed to/from disk instead of being
+  buffered fully in memory, so peak memory use no longer scales with
+  file size.
+- Errors are no longer all reported as "Authentication failed: ...".
+  `O2Error` now distinguishes API failures, not-found resources,
+  malformed responses, and local I/O errors from genuine login/session
+  failures.
+- `main.rs`'s per-command error handling was collapsed from nine
+  repeated match/eprintln/exit blocks into a single `run()` function
+  using `?`.
+
 ### Fixed
 - Error-body previews in `api.rs` could panic when truncated mid multi-byte
   UTF-8 character (server responds in Spanish).

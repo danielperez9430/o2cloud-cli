@@ -51,7 +51,8 @@ o2cloud download 1195003130 -o archivo.txt
 
 # Borrar (papelera)
 o2cloud rm 1195003130                # archivo por ID
-o2cloud rm /ruta/carpeta -r          # carpeta recursiva
+o2cloud rm /ruta/carpeta -r          # carpeta recursiva (pide confirmación)
+o2cloud rm /ruta/carpeta -r -y       # carpeta recursiva, sin confirmación
 
 # Sesión
 o2cloud status
@@ -68,8 +69,8 @@ o2cloud logout
 
 O2 Cloud usa **Synchronoss OneMediaHub v31** como backend. La autenticación va por **Telefónica Mobile Connect** (OAuth2/OpenID Connect). El CLI abre un WebView para que introduzcas tu número y valides por SMS. Tras el login, los tokens se guardan en:
 
-- macOS: `~/Library/Application Support/o2cloud-cli/auth.json`
-- Linux: `~/.config/o2cloud-cli/auth.json`
+- macOS: `~/Library/Application Support/o2cli/auth.json`
+- Linux: `~/.config/o2cli/auth.json`
 
 La sesión se renueva silenciosamente al expirar — no necesitas volver a hacer login.
 
