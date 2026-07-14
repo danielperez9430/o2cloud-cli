@@ -6,6 +6,8 @@ description = "CLI for O2 Cloud (Telefónica Spain) — manage your cloud storag
 license = "MIT"
 repository = "https://github.com/danielperez9430/o2cloud-cli"
 readme = "README.md"
+keywords = ["o2", "cloud", "cli", "telefonica", "storage"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "o2cloud"
@@ -16,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json", "cookies", "rustls-tls", "gzip", "brotli", "deflate", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 wry = "0.55"
@@ -25,5 +27,9 @@ url = "2"
 thiserror = "2"
 dirs = "6"
 base64 = "0.22"
-bytes = "1"
 zip = "2"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
