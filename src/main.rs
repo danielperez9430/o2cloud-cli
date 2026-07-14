@@ -141,7 +141,11 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
             }
             Err(_) => {
                 eprintln!("→ Silent re-login failed, opening login window...");
-                let msisdn = auth.msisdn.strip_prefix("34").unwrap_or(&auth.msisdn).to_string();
+                let msisdn = auth
+                    .msisdn
+                    .strip_prefix("34")
+                    .unwrap_or(&auth.msisdn)
+                    .to_string();
                 let new_auth = crate::auth::login(&msisdn).await?;
                 eprintln!("✓ Re-login successful");
                 let new_client = api::O2Client::new()?;
@@ -161,7 +165,9 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 None => {
                     eprint!("Enter your phone number (+34): ");
                     let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).map_err(O2Error::Io)?;
+                    std::io::stdin()
+                        .read_line(&mut input)
+                        .map_err(O2Error::Io)?;
                     input.trim().to_string()
                 }
             };
@@ -223,7 +229,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::upload_zip(&client, &auth, &local_path, folder).await?;
         }
 
-        Commands::Rm { target, recursive, yes } => {
+        Commands::Rm {
+            target,
+            recursive,
+            yes,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             ops::delete_target(&client, &auth, &target, recursive, yes).await?;
         }

@@ -163,7 +163,10 @@ impl O2Client {
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "login"), ("responsetime", "true")])
             .header("authorization", &auth_header)
-            .header("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header(
+                "content-type",
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
             .header("x-deviceid", &self.device_id)
             .send()
             .await?;
@@ -201,15 +204,13 @@ impl O2Client {
     // ------------------------------------------------------------------
 
     /// Grab the JSESSIONID value from a `Set-Cookie` response header.
-    fn extract_jsessionid_from_headers(
-        headers: &reqwest::header::HeaderMap,
-    ) -> Option<String> {
+    fn extract_jsessionid_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
         headers.get_all("set-cookie").iter().find_map(|v| {
             let s = v.to_str().ok()?;
             if s.starts_with("JSESSIONID=") {
-                s.split(';').next().and_then(|c| {
-                    c.strip_prefix("JSESSIONID=").map(|v| v.to_string())
-                })
+                s.split(';')
+                    .next()
+                    .and_then(|c| c.strip_prefix("JSESSIONID=").map(|v| v.to_string()))
             } else {
                 None
             }
@@ -269,10 +270,7 @@ impl O2Client {
     #[allow(dead_code)]
     pub async fn system_information(&self) -> Result<SystemInfo, O2Error> {
         let url = format!("{}/sapi/system/information", BASE_URL);
-        let req = self
-            .client
-            .get(&url)
-            .query(&[("action", "get")]);
+        let req = self.client.get(&url).query(&[("action", "get")]);
 
         let resp = self
             .with_device_headers(req, "/sapi/system/information")
@@ -312,7 +310,10 @@ impl O2Client {
             .client
             .post(&url)
             .query(&[("action", "start")])
-            .header("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header(
+                "content-type",
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
             .form(&form);
 
         let resp = self
@@ -480,10 +481,7 @@ impl O2Client {
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)])
             .header("authorization", &auth_header);
 
-        let resp = self
-            .with_sapi_headers(req, auth)
-            .send()
-            .await?;
+        let resp = self.with_sapi_headers(req, auth).send().await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -502,7 +500,11 @@ impl O2Client {
         }
 
         let body: RawResponse<FolderData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Parse(format!("Failed to parse folder list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
+            O2Error::Parse(format!(
+                "Failed to parse folder list: {} — body: {}",
+                e,
+                truncate_utf8(&raw_body, 300)
+            ))
         })?;
 
         Ok(body.data.folders)
@@ -554,10 +556,7 @@ impl O2Client {
                 .header("content-type", "application/json")
                 .json(&payload);
 
-            let resp = self
-                .with_sapi_headers(req, auth)
-                .send()
-                .await?;
+            let resp = self.with_sapi_headers(req, auth).send().await?;
 
             let status = resp.status();
             let raw_body = resp.text().await?;
@@ -571,7 +570,11 @@ impl O2Client {
             }
 
             let body: RawResponse<MediaData> = serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Parse(format!("Failed to parse media list: {} — body: {}", e, truncate_utf8(&raw_body, 300)))
+                O2Error::Parse(format!(
+                    "Failed to parse media list: {} — body: {}",
+                    e,
+                    truncate_utf8(&raw_body, 300)
+                ))
             })?;
 
             let count = body.data.media.len();
@@ -631,10 +634,7 @@ impl O2Client {
             .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
             .json(&payload);
 
-        let resp = self
-            .with_sapi_headers(req, auth)
-            .send()
-            .await?;
+        let resp = self.with_sapi_headers(req, auth).send().await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -653,7 +653,11 @@ impl O2Client {
         }
 
         let body: FolderCreateResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Parse(format!("Failed to parse create folder response: {} — body: {}", e, truncate_utf8(&raw_body, 200)))
+            O2Error::Parse(format!(
+                "Failed to parse create folder response: {} — body: {}",
+                e,
+                truncate_utf8(&raw_body, 200)
+            ))
         })?;
 
         Ok(body.id)
@@ -668,21 +672,19 @@ impl O2Client {
     /// `POST /sapi/media/folder?action=softdelete&id=<id>`
     pub async fn delete_folder(&self, folder_id: u64, auth: &AuthConfig) -> Result<(), O2Error> {
         let url = format!("{}/sapi/media/folder", BASE_URL);
-        let req = self
-            .client
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[
-                ("action", "softdelete"),
-                ("id", &folder_id.to_string()),
-                ("validationkey", &auth.validationkey),
-            ]);
+        let req = self.client.post(&url).timeout(REQUEST_TIMEOUT).query(&[
+            ("action", "softdelete"),
+            ("id", &folder_id.to_string()),
+            ("validationkey", &auth.validationkey),
+        ]);
         let resp = self.with_sapi_headers(req, auth).send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(O2Error::Api(format!(
-                "Delete folder failed ({}): {}", status, truncate_utf8(&body, 200)
+                "Delete folder failed ({}): {}",
+                status,
+                truncate_utf8(&body, 200)
             )));
         }
         Ok(())
@@ -694,20 +696,13 @@ impl O2Client {
     pub async fn delete_media(&self, media_id: u64, auth: &AuthConfig) -> Result<(), O2Error> {
         let url = format!("{}/sapi/media", BASE_URL);
 
-        let req = self
-            .client
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[
-                ("action", "softdelete"),
-                ("id", &media_id.to_string()),
-                ("validationkey", &auth.validationkey),
-            ]);
+        let req = self.client.post(&url).timeout(REQUEST_TIMEOUT).query(&[
+            ("action", "softdelete"),
+            ("id", &media_id.to_string()),
+            ("validationkey", &auth.validationkey),
+        ]);
 
-        let resp = self
-            .with_sapi_headers(req, auth)
-            .send()
-            .await?;
+        let resp = self.with_sapi_headers(req, auth).send().await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -736,12 +731,9 @@ impl O2Client {
         let url = format!("{}/sapi/upload/file", BASE_URL);
         let auth_header = auth.to_sapi_auth_header();
 
-        let payload = RawRequest {
-            data: meta,
-        };
-        let json_body = serde_json::to_vec(&payload).map_err(|e| {
-            O2Error::Api(format!("Failed to serialize upload metadata: {}", e))
-        })?;
+        let payload = RawRequest { data: meta };
+        let json_body = serde_json::to_vec(&payload)
+            .map_err(|e| O2Error::Api(format!("Failed to serialize upload metadata: {}", e)))?;
 
         let req = self
             .client
@@ -757,10 +749,7 @@ impl O2Client {
             .header("authorization", &auth_header)
             .body(json_body);
 
-        let resp = self
-            .with_sapi_headers(req, auth)
-            .send()
-            .await?;
+        let resp = self.with_sapi_headers(req, auth).send().await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -842,10 +831,7 @@ impl O2Client {
             .header("x-funambol-id", media_id)
             .body(body);
 
-        let resp = self
-            .with_sapi_headers(req, auth)
-            .send()
-            .await?;
+        let resp = self.with_sapi_headers(req, auth).send().await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -1109,7 +1095,11 @@ pub struct MediaItem {
     #[serde(default)]
     pub name: Option<String>,
     /// The API returns this as `folder` (number) even when we ask for `folderid`.
-    #[serde(default, alias = "folder", deserialize_with = "deserialize_optional_id")]
+    #[serde(
+        default,
+        alias = "folder",
+        deserialize_with = "deserialize_optional_id"
+    )]
     pub folderid: Option<u64>,
     #[serde(default)]
     pub size: Option<u64>,

@@ -163,8 +163,9 @@ mod tests {
     #[test]
     fn test_extract_valid() {
         let (code, state) = extract_oauth_params(
-            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc123&state=xyz789"
-        ).unwrap();
+            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc123&state=xyz789",
+        )
+        .unwrap();
         assert_eq!(code, "abc123");
         assert_eq!(state, "xyz789");
     }
@@ -172,8 +173,9 @@ mod tests {
     #[test]
     fn test_extract_extra_params() {
         let (code, state) = extract_oauth_params(
-            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc&other=1&state=xyz&foo=bar"
-        ).unwrap();
+            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc&other=1&state=xyz&foo=bar",
+        )
+        .unwrap();
         assert_eq!(code, "abc");
         assert_eq!(state, "xyz");
     }
@@ -182,7 +184,8 @@ mod tests {
     fn test_extract_missing_code() {
         assert!(extract_oauth_params(
             "https://cloud.o2online.es/ui/html/clientoauth.html?state=xyz"
-        ).is_none());
+        )
+        .is_none());
     }
 
     #[test]

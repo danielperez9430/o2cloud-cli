@@ -32,7 +32,8 @@ pub async fn list_folder(
     }
 
     // Build lookup tables
-    let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
     // Resolve target folder
     let target = resolve_target(path, &folders, &folder_name)?;
@@ -61,12 +62,19 @@ fn print_folder_contents(
     let path = resolve_path(target, folder_name, folders);
 
     // Breadcrumb
-    let show_path = if path == "/" { "/".to_string() } else { format!("{}/", path) };
+    let show_path = if path == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", path)
+    };
     println!("📁 {}", show_path);
     println!();
 
     // Subfolders
-    let child_folders: Vec<_> = folders.iter().filter(|f| f.parentid == target && f.name != "/").collect();
+    let child_folders: Vec<_> = folders
+        .iter()
+        .filter(|f| f.parentid == target && f.name != "/")
+        .collect();
     for f in &child_folders {
         println!("  {:<8}  📁 {}/", f.id, f.name);
     }
@@ -75,7 +83,10 @@ fn print_folder_contents(
     }
 
     // Files
-    let files: Vec<_> = media.iter().filter(|m| m.folderid == Some(target)).collect();
+    let files: Vec<_> = media
+        .iter()
+        .filter(|m| m.folderid == Some(target))
+        .collect();
     if files.is_empty() && child_folders.is_empty() {
         println!("  (empty folder)");
         return;
@@ -84,10 +95,7 @@ fn print_folder_contents(
     for item in &files {
         let name = item.name.as_deref().unwrap_or("?");
         let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
-        println!(
-            "  {:<8}  {:>8}  {}",
-            item.id, size, name,
-        );
+        println!("  {:<8}  {:>8}  {}", item.id, size, name,);
     }
 }
 
@@ -102,10 +110,15 @@ fn print_flat_all(
     for item in media {
         let name = item.name.as_deref().unwrap_or("?");
         let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
-        let path = item.folderid
+        let path = item
+            .folderid
             .map(|fid| resolve_path(fid, folder_name, folders))
             .unwrap_or_else(|| "/".into());
-        let full = if path == "/" { format!("/{}", name) } else { format!("{}/{}", path, name) };
+        let full = if path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", path, name)
+        };
 
         println!("{:<12} {:>8}  {}", item.id, size, full);
     }
@@ -138,7 +151,10 @@ fn print_tree(
     };
 
     // Files in this folder
-    let here: Vec<_> = media.iter().filter(|m| m.folderid == Some(current)).collect();
+    let here: Vec<_> = media
+        .iter()
+        .filter(|m| m.folderid == Some(current))
+        .collect();
 
     // Child folders (excluding root which has parentid=0)
     let children: Vec<_> = folders
@@ -180,7 +196,11 @@ fn resolve_target(
     let path = match path {
         Some(p) => p,
         None => {
-            return Ok(folders.iter().find(|f| f.name == "/").map(|f| f.id).unwrap_or(0));
+            return Ok(folders
+                .iter()
+                .find(|f| f.name == "/")
+                .map(|f| f.id)
+                .unwrap_or(0));
         }
     };
 
@@ -204,7 +224,11 @@ fn resolve_target(
     };
 
     if parts.is_empty() {
-        return Ok(folders.iter().find(|f| f.name == "/").map(|f| f.id).unwrap_or(0));
+        return Ok(folders
+            .iter()
+            .find(|f| f.name == "/")
+            .map(|f| f.id)
+            .unwrap_or(0));
     }
 
     // Build parent→children index
@@ -214,16 +238,25 @@ fn resolve_target(
     }
 
     // Find root
-    let root = folders.iter().find(|f| f.name == "/").map(|f| f.id).unwrap_or(0);
+    let root = folders
+        .iter()
+        .find(|f| f.name == "/")
+        .map(|f| f.id)
+        .unwrap_or(0);
 
     // Traverse from root
     let mut current = root;
     for part in &parts {
         let kids = children.get(&current).ok_or_else(|| {
-            O2Error::NotFound(format!("Folder '{}' has no children", folder_name.get(&current).unwrap_or(&"?".into())))
+            O2Error::NotFound(format!(
+                "Folder '{}' has no children",
+                folder_name.get(&current).unwrap_or(&"?".into())
+            ))
         })?;
         let found = kids.iter().find_map(|kid| {
-            folder_name.get(kid).and_then(|name| if name == *part { Some(*kid) } else { None })
+            folder_name
+                .get(kid)
+                .and_then(|name| if name == *part { Some(*kid) } else { None })
         });
         match found {
             Some(id) => current = id,
@@ -232,7 +265,11 @@ fn resolve_target(
                 let lower = part.to_lowercase();
                 let fuzzy = kids.iter().find_map(|kid| {
                     folder_name.get(kid).and_then(|name| {
-                        if name.to_lowercase() == lower { Some(*kid) } else { None }
+                        if name.to_lowercase() == lower {
+                            Some(*kid)
+                        } else {
+                            None
+                        }
                     })
                 });
                 match fuzzy {
@@ -260,16 +297,30 @@ fn resolve_path(
     let mut cur = folder_id;
     let mut seen = std::collections::HashSet::new();
     loop {
-        if !seen.insert(cur) { break; }
+        if !seen.insert(cur) {
+            break;
+        }
         if let Some(name) = folder_name.get(&cur) {
-            if name == "/" { break; }
+            if name == "/" {
+                break;
+            }
             parts.push(name.clone());
         }
-        cur = folders.iter().find(|f| f.id == cur).map(|f| f.parentid).unwrap_or(0);
-        if cur == 0 { break; }
+        cur = folders
+            .iter()
+            .find(|f| f.id == cur)
+            .map(|f| f.parentid)
+            .unwrap_or(0);
+        if cur == 0 {
+            break;
+        }
     }
     parts.reverse();
-    if parts.is_empty() { "/".into() } else { format!("/{}", parts.join("/")) }
+    if parts.is_empty() {
+        "/".into()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
 }
 
 // ------------------------------------------------------------------
@@ -285,13 +336,21 @@ pub async fn upload_file(
 ) -> Result<(), O2Error> {
     // Read file metadata
     let metadata = std::fs::metadata(local_path).map_err(|e| {
-        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read file {}: {}", local_path.display(), e)))
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot read file {}: {}", local_path.display(), e),
+        ))
     })?;
     let size = metadata.len();
     let name = local_path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| O2Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name")))?
+        .ok_or_else(|| {
+            O2Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid file name",
+            ))
+        })?
         .to_string();
 
     let modified = metadata.modified().ok();
@@ -425,18 +484,27 @@ pub async fn upload_dir(
         }
         let parent_local = file_path.parent().unwrap();
         let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(root_parent);
-        let name = file_path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
 
         attempted += 1;
         let size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
 
         eprintln!(
             "  [{}/{}] 📄 {} ({})",
-            attempted, file_count, name, format_size(size)
+            attempted,
+            file_count,
+            name,
+            format_size(size)
         );
 
         // Upload via metadata + bytes
-        let modified = std::fs::metadata(file_path).ok().and_then(|m| m.modified().ok());
+        let modified = std::fs::metadata(file_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         let now = std::time::SystemTime::now();
         let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
         let contenttype = mime_type_from_name(&name);
@@ -468,7 +536,10 @@ pub async fn upload_dir(
     }
 
     if skipped_hidden > 0 {
-        eprintln!("  (skipped {} hidden files/dirs: .git, .DS_Store, etc.)", skipped_hidden);
+        eprintln!(
+            "  (skipped {} hidden files/dirs: .git, .DS_Store, etc.)",
+            skipped_hidden
+        );
     }
     if failed > 0 {
         eprintln!("⚠ {} file(s) failed to upload", failed);
@@ -494,10 +565,16 @@ fn walk_dir(
 ) -> Result<(), O2Error> {
     entries.push((dir.to_path_buf(), true));
     for entry in std::fs::read_dir(dir).map_err(|e| {
-        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read dir {}: {}", dir.display(), e)))
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot read dir {}: {}", dir.display(), e),
+        ))
     })? {
         let entry = entry.map_err(|e| {
-            O2Error::Io(std::io::Error::new(e.kind(), format!("Read error in {}: {}", dir.display(), e)))
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Read error in {}: {}", dir.display(), e),
+            ))
         })?;
         let path = entry.path();
         let is_hidden = path
@@ -557,27 +634,31 @@ pub async fn upload_zip(
         )));
     }
 
-    let zip_name = format!(
-        "{}.zip",
-        local_dir.file_name().unwrap().to_string_lossy()
-    );
+    let zip_name = format!("{}.zip", local_dir.file_name().unwrap().to_string_lossy());
     let tmp_zip = std::env::temp_dir().join(&zip_name);
 
     eprintln!("→ Zipping {}...", local_dir.display());
 
     // Create zip
     let file = std::fs::File::create(&tmp_zip).map_err(|e| {
-        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot create zip: {}", e)))
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot create zip: {}", e),
+        ))
     })?;
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
     let base = local_dir;
     add_dir_to_zip(&mut zip, base, base, options)?;
 
     let total_size = std::fs::metadata(&tmp_zip).map(|m| m.len()).unwrap_or(0);
-    eprintln!("  Created {} ({})", tmp_zip.display(), format_size(total_size));
+    eprintln!(
+        "  Created {} ({})",
+        tmp_zip.display(),
+        format_size(total_size)
+    );
 
     // Upload the zip
     upload_file(client, auth, &tmp_zip, folder_id).await?;
@@ -594,10 +675,16 @@ fn add_dir_to_zip(
     options: zip::write::SimpleFileOptions,
 ) -> Result<(), O2Error> {
     for entry in std::fs::read_dir(dir).map_err(|e| {
-        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read dir {}: {}", dir.display(), e)))
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot read dir {}: {}", dir.display(), e),
+        ))
     })? {
         let entry = entry.map_err(|e| {
-            O2Error::Io(std::io::Error::new(e.kind(), format!("Read error in {}: {}", dir.display(), e)))
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Read error in {}: {}", dir.display(), e),
+            ))
         })?;
         let path = entry.path();
         let relative = path.strip_prefix(base).unwrap();
@@ -612,11 +699,13 @@ fn add_dir_to_zip(
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            zip.start_file(&entry_name, options).map_err(|e| {
-                O2Error::Io(std::io::Error::other(format!("Zip error: {}", e)))
-            })?;
+            zip.start_file(&entry_name, options)
+                .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
             let data = std::fs::read(&path).map_err(|e| {
-                O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read {}: {}", path.display(), e)))
+                O2Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Cannot read {}: {}", path.display(), e),
+                ))
             })?;
             zip.write_all(&data).map_err(|e| {
                 O2Error::Io(std::io::Error::other(format!("Zip write error: {}", e)))
@@ -663,7 +752,10 @@ pub async fn download_file(
     if output_path.exists() {
         return Err(O2Error::Io(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            format!("Refusing to overwrite existing file: {}", output_path.display()),
+            format!(
+                "Refusing to overwrite existing file: {}",
+                output_path.display()
+            ),
         )));
     }
 
@@ -683,15 +775,12 @@ pub async fn download_file(
 // ------------------------------------------------------------------
 
 /// Search files and folders by name (case-insensitive substring).
-pub async fn find(
-    client: &O2Client,
-    auth: &AuthConfig,
-    query: &str,
-) -> Result<(), O2Error> {
+pub async fn find(client: &O2Client, auth: &AuthConfig, query: &str) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let media = client.get_all_media(auth).await?;
 
-    let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
     let q = query.to_lowercase();
     let mut found = 0u32;
@@ -709,10 +798,15 @@ pub async fn find(
     for item in &media {
         let name = item.name.as_deref().unwrap_or("");
         if name.to_lowercase().contains(&q) {
-            let folder_path = item.folderid
+            let folder_path = item
+                .folderid
                 .map(|fid| resolve_path(fid, &folder_name, &folders))
                 .unwrap_or_else(|| "/".into());
-            let full = if folder_path == "/" { format!("/{}", name) } else { format!("{}/{}", folder_path, name) };
+            let full = if folder_path == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", folder_path, name)
+            };
             let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
             println!("📄 {:<12} {:>8}  {}", item.id, size, full);
             found += 1;
@@ -743,7 +837,8 @@ pub async fn delete_target(
     assume_yes: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let folder_name: HashMap<u64, String> = folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
     // Try numeric ID first
     if let Ok(id) = target.parse::<u64>() {
@@ -791,7 +886,10 @@ fn count_recursive(
     folders: &[crate::api::FolderEntry],
     media: &[crate::api::MediaItem],
 ) -> (usize, usize) {
-    let mut files = media.iter().filter(|m| m.folderid == Some(folder_id)).count();
+    let mut files = media
+        .iter()
+        .filter(|m| m.folderid == Some(folder_id))
+        .count();
     let mut dirs = 0usize;
     for child in folders.iter().filter(|f| f.parentid == folder_id) {
         dirs += 1;
@@ -838,7 +936,9 @@ fn confirm_recursive_delete(
         files, dirs
     );
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).map_err(O2Error::Io)?;
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(O2Error::Io)?;
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
@@ -850,16 +950,25 @@ async fn delete_folder(
     media: &[crate::api::MediaItem],
     recursive: bool,
 ) -> Result<(), O2Error> {
-    let name = folders.iter().find(|f| f.id == folder_id).map(|f| f.name.as_str()).unwrap_or("?");
+    let name = folders
+        .iter()
+        .find(|f| f.id == folder_id)
+        .map(|f| f.name.as_str())
+        .unwrap_or("?");
 
     // Count contents
-    let file_count = media.iter().filter(|m| m.folderid == Some(folder_id)).count();
+    let file_count = media
+        .iter()
+        .filter(|m| m.folderid == Some(folder_id))
+        .count();
     let child_dirs: Vec<_> = folders.iter().filter(|f| f.parentid == folder_id).collect();
 
     if !recursive && (!child_dirs.is_empty() || file_count > 0) {
         eprintln!(
             "📁 {}/ contains {} files and {} subfolders.",
-            name, file_count, child_dirs.len()
+            name,
+            file_count,
+            child_dirs.len()
         );
         eprintln!("Use --recursive (-r) to delete folder and all its contents.");
         return Ok(());
@@ -871,7 +980,8 @@ async fn delete_folder(
     }
 
     // Delete files in this folder (paginated, 1000 at a time)
-    let files: Vec<u64> = media.iter()
+    let files: Vec<u64> = media
+        .iter()
         .filter(|m| m.folderid == Some(folder_id))
         .map(|m| m.id)
         .collect();
@@ -889,11 +999,7 @@ async fn delete_folder(
 }
 
 /// Soft-delete a file by media ID (move to trash).
-async fn delete_file(
-    client: &O2Client,
-    auth: &AuthConfig,
-    media_id: u64,
-) -> Result<(), O2Error> {
+async fn delete_file(client: &O2Client, auth: &AuthConfig, media_id: u64) -> Result<(), O2Error> {
     let media = client.get_all_media(auth).await?;
     let name = media
         .iter()
@@ -914,9 +1020,21 @@ mod tests {
     #[test]
     fn test_resolve_path() {
         let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
-            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 2,
+                name: "docs".into(),
+                parentid: 1,
+            },
+            crate::api::FolderEntry {
+                id: 3,
+                name: "images".into(),
+                parentid: 2,
+            },
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
@@ -929,21 +1047,40 @@ mod tests {
     #[test]
     fn test_resolve_target_by_id() {
         let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-            crate::api::FolderEntry { id: 42, name: "stuff".into(), parentid: 1 },
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 42,
+                name: "stuff".into(),
+                parentid: 1,
+            },
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-        assert_eq!(resolve_target(Some("42".into()), &folders, &folder_name).unwrap(), 42);
+        assert_eq!(
+            resolve_target(Some("42".into()), &folders, &folder_name).unwrap(),
+            42
+        );
         assert_eq!(resolve_target(None, &folders, &folder_name).unwrap(), 1);
     }
 
     #[test]
     fn test_resolve_target_by_id_not_found() {
         let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-            crate::api::FolderEntry { id: 42, name: "stuff".into(), parentid: 1 },
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 42,
+                name: "stuff".into(),
+                parentid: 1,
+            },
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
@@ -954,22 +1091,42 @@ mod tests {
     #[test]
     fn test_resolve_target_by_path() {
         let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
-            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 2,
+                name: "docs".into(),
+                parentid: 1,
+            },
+            crate::api::FolderEntry {
+                id: 3,
+                name: "images".into(),
+                parentid: 2,
+            },
         ];
         let folder_name: std::collections::HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-        assert_eq!(resolve_target(Some("/docs".into()), &folders, &folder_name).unwrap(), 2);
-        assert_eq!(resolve_target(Some("/docs/images".into()), &folders, &folder_name).unwrap(), 3);
+        assert_eq!(
+            resolve_target(Some("/docs".into()), &folders, &folder_name).unwrap(),
+            2
+        );
+        assert_eq!(
+            resolve_target(Some("/docs/images".into()), &folders, &folder_name).unwrap(),
+            3
+        );
     }
 
     #[test]
     fn test_resolve_target_not_found() {
-        let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-        ];
+        let folders = vec![crate::api::FolderEntry {
+            id: 1,
+            name: "/".into(),
+            parentid: 0,
+        }];
         let folder_name = std::collections::HashMap::from([(1u64, "/".into())]);
 
         assert!(resolve_target(Some("/nope".into()), &folders, &folder_name).is_err());
@@ -978,9 +1135,21 @@ mod tests {
     #[test]
     fn test_count_recursive() {
         let folders = vec![
-            crate::api::FolderEntry { id: 1, name: "/".into(), parentid: 0 },
-            crate::api::FolderEntry { id: 2, name: "docs".into(), parentid: 1 },
-            crate::api::FolderEntry { id: 3, name: "images".into(), parentid: 2 },
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 2,
+                name: "docs".into(),
+                parentid: 1,
+            },
+            crate::api::FolderEntry {
+                id: 3,
+                name: "images".into(),
+                parentid: 2,
+            },
         ];
         let media: Vec<crate::api::MediaItem> = serde_json::from_str(
             r#"[

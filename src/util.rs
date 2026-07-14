@@ -62,8 +62,8 @@ fn is_leap(y: i64) -> bool {
 pub fn mime_type_from_name(name: &str) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
-        "txt" | "md" | "rs" | "toml" | "lock" | "py" | "js" | "ts" | "html" | "css"
-        | "json" | "xml" | "yaml" | "yml" | "csv" => "text/plain",
+        "txt" | "md" | "rs" | "toml" | "lock" | "py" | "js" | "ts" | "html" | "css" | "json"
+        | "xml" | "yaml" | "yml" | "csv" => "text/plain",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -102,7 +102,10 @@ mod tests {
         assert_eq!(mime_type_from_name("movie.mp4"), "video/mp4");
         assert_eq!(mime_type_from_name("song.mp3"), "audio/mpeg");
         assert_eq!(mime_type_from_name("script.php"), "application/x-httpd-php");
-        assert_eq!(mime_type_from_name("unknown.xyz"), "application/octet-stream");
+        assert_eq!(
+            mime_type_from_name("unknown.xyz"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
