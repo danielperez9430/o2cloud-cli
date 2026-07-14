@@ -331,11 +331,8 @@ pub async fn upload_file(
     let UploadMetaResponse { id, .. } = client.upload_metadata(&meta, auth).await?;
     eprintln!("  Metadata saved (id: {})", id);
 
-    // Step 2 — Upload bytes
-    let data = std::fs::read(local_path).map_err(|e| {
-        O2Error::Io(std::io::Error::new(e.kind(), format!("Cannot read file for upload: {}", e)))
-    })?;
-    client.upload_bytes(&id, &data, auth).await?;
+    // Step 2 — Upload bytes (streamed from disk, not buffered in memory)
+    client.upload_bytes(&id, local_path, size, auth).await?;
 
     eprintln!("✓ Uploaded successfully (id: {})", id);
     Ok(())
@@ -461,15 +458,7 @@ pub async fn upload_dir(
                 continue;
             }
         };
-        let data = match std::fs::read(file_path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("  ⚠ Cannot read {}: {}", file_path.display(), e);
-                failed += 1;
-                continue;
-            }
-        };
-        if let Err(e) = client.upload_bytes(&id, &data, auth).await {
+        if let Err(e) = client.upload_bytes(&id, file_path, size, auth).await {
             eprintln!("  ⚠ Byte upload failed for {}: {}", name, e);
             failed += 1;
             continue;
@@ -679,18 +668,11 @@ pub async fn download_file(
     }
 
     eprintln!("→ Downloading media {}...", media_id);
-    let data = client.download_file_url(download_url).await?;
-
-    std::fs::write(&output_path, &data).map_err(|e| {
-        O2Error::Io(std::io::Error::new(
-            e.kind(),
-            format!("Cannot write to {}: {}", output_path.display(), e),
-        ))
-    })?;
+    let bytes_written = client.download_to_path(download_url, &output_path).await?;
 
     eprintln!(
         "✓ Downloaded {} to {}",
-        format_size(data.len() as u64),
+        format_size(bytes_written),
         output_path.display()
     );
     Ok(())

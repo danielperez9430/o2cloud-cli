@@ -800,16 +800,30 @@ impl O2Client {
     }
 
     /// Upload the raw file bytes for a previously-saved metadata entry.
+    ///
+    /// Streams `path` from disk instead of loading it into memory. The
+    /// body is a stream of unknown `size_hint` to reqwest, so we set
+    /// `Content-Length` explicitly — hyper honors a manually-set
+    /// Content-Length header over chunked transfer-encoding when one is
+    /// present, which keeps the wire format byte-for-byte identical to
+    /// the old `Vec<u8>`-body upload.
     pub async fn upload_bytes(
         &self,
         media_id: &str,
-        data: &[u8],
+        path: &std::path::Path,
+        size: u64,
         auth: &AuthConfig,
     ) -> Result<(), O2Error> {
         let url = format!("{}/sapi/upload/file", UPLOAD_URL);
         let auth_header = auth.to_sapi_auth_header();
 
-        let file_size = data.len().to_string();
+        let file = tokio::fs::File::open(path).await.map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot open {} for upload: {}", path.display(), e),
+            ))
+        })?;
+        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
 
         let req = self
             .client
@@ -823,9 +837,10 @@ impl O2Client {
             ])
             .header("content-type", "application/octet-stream")
             .header("authorization", &auth_header)
-            .header("x-funambol-file-size", &file_size)
+            .header(reqwest::header::CONTENT_LENGTH, size)
+            .header("x-funambol-file-size", size.to_string())
             .header("x-funambol-id", media_id)
-            .body(data.to_vec());
+            .body(body);
 
         let resp = self
             .with_sapi_headers(req, auth)
@@ -850,14 +865,17 @@ impl O2Client {
     // Download
     // ------------------------------------------------------------------
 
-    /// Download a file using its signed URL (from the `url` field in the
-    /// media listing response).  Returns the raw bytes.
-    pub async fn download_file_url(&self, download_url: &str) -> Result<bytes::Bytes, O2Error> {
-        let resp = self
-            .client
-            .get(download_url)
-            .send()
-            .await?;
+    /// Download a file from its signed URL (from the `url` field in the
+    /// media listing response), streaming it directly to `path` instead
+    /// of buffering the whole file in memory. Returns the byte count
+    /// written. On any error after the destination file is created, the
+    /// partially-written file is removed.
+    pub async fn download_to_path(
+        &self,
+        download_url: &str,
+        path: &std::path::Path,
+    ) -> Result<u64, O2Error> {
+        let resp = self.client.get(download_url).send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -869,8 +887,47 @@ impl O2Client {
             )));
         }
 
-        let body = resp.bytes().await?;
-        Ok(body)
+        let result = Self::stream_response_to_file(resp, path).await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        result
+    }
+
+    async fn stream_response_to_file(
+        resp: reqwest::Response,
+        path: &std::path::Path,
+    ) -> Result<u64, O2Error> {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = tokio::fs::File::create(path).await.map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot create {}: {}", path.display(), e),
+            ))
+        })?;
+
+        let mut stream = resp.bytes_stream();
+        let mut total: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await.map_err(|e| {
+                O2Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Cannot write to {}: {}", path.display(), e),
+                ))
+            })?;
+            total += chunk.len() as u64;
+        }
+        file.flush().await.map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot flush {}: {}", path.display(), e),
+            ))
+        })?;
+
+        Ok(total)
     }
 }
 
