@@ -37,6 +37,14 @@ All notable changes to o2cloud-cli will be documented in this file.
 - Being offline (or any network error) during the session check was
   treated as an expired session and opened the login window; the network
   error is now reported instead.
+- `login` sent malformed phone numbers to the server when typed with a
+  `+34`/`0034` prefix, spaces or dashes (e.g. `+34 686 942 006` became
+  `34+34 686 942 006`), which O2 Cloud answers with a generic
+  `PAPI-0000 Unknown exception` (#2). The number is now normalized to its
+  9 digits and validated before any request is made.
+- Errors the server returns inside a 200 response (`{"error": …}`) during
+  login were reported as "missing field `data`"; they now show the
+  server's message and code, plus a hint for the first login step.
 - `login` without a graphical session (no `DISPLAY`/`WAYLAND_DISPLAY`)
   panicked; it now reports a clear error. Same for a missing config
   directory.

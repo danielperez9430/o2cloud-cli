@@ -28,6 +28,33 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Extract the error from a SAPI error envelope, which the server can
+/// send even with a 200 status:
+/// `{"error":{"code":"PAPI-0000","message":"Unknown exception","parameters":[...]}}`.
+/// Returns e.g. `Unknown exception (PAPI-0000)`, or `None` if `raw` is not
+/// an error envelope.
+fn sapi_error(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let error = value.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown error");
+    let mut out = match error.get("code").and_then(|c| c.as_str()) {
+        Some(code) => format!("{} ({})", message, code),
+        None => message.to_string(),
+    };
+    let params: Vec<&str> = error
+        .get("parameters")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|p| p["param"].as_str()).collect())
+        .unwrap_or_default();
+    if !params.is_empty() {
+        out.push_str(&format!(" [params: {}]", params.join(", ")));
+    }
+    Some(out)
+}
+
 /// Generate a random device ID in the format used by the web client.
 fn generate_device_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -171,6 +198,10 @@ impl O2Client {
                 status,
                 truncate_utf8(&raw_body, 300)
             )));
+        }
+
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Auth(format!("Login failed: {}", err)));
         }
 
         let body: RawResponse<LoginData> = serde_json::from_str(&raw_body).map_err(|e| {
@@ -323,6 +354,14 @@ impl O2Client {
             )));
         }
 
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Auth(format!(
+                "O2 Cloud rejected the login request for +{}: {}. Check that the \
+                 number is an active O2 line registered in O2 Cloud.",
+                full_msisdn, err
+            )));
+        }
+
         let body: RawResponse<StartMobileConnectData> =
             serde_json::from_str(&raw_body).map_err(|e| {
                 O2Error::Auth(format!(
@@ -382,6 +421,13 @@ impl O2Client {
             )));
         }
 
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Auth(format!(
+                "Validate credential failed: {}",
+                err
+            )));
+        }
+
         let body: RawResponse<ValidateCredentialData> =
             serde_json::from_str(&raw_body).map_err(|e| {
                 O2Error::Auth(format!(
@@ -434,6 +480,10 @@ impl O2Client {
                 status,
                 truncate_utf8(&raw_body, 300)
             )));
+        }
+
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Auth(format!("Login failed: {}", err)));
         }
 
         let body: RawResponse<LoginData> = serde_json::from_str(&raw_body).map_err(|e| {
@@ -754,18 +804,8 @@ impl O2Client {
         }
 
         // Check for error-in-200 response
-        if let Ok(error_body) = serde_json::from_str::<serde_json::Value>(&raw_body) {
-            if error_body.get("error").is_some() {
-                let msg = error_body["error"]["message"].as_str().unwrap_or("unknown");
-                let params: Vec<&str> = error_body["error"]["parameters"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|p| p["param"].as_str()).collect())
-                    .unwrap_or_default();
-                return Err(O2Error::Api(format!(
-                    "Upload metadata rejected: {} (params: {:?})",
-                    msg, params
-                )));
-            }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Upload metadata rejected: {}", err)));
         }
 
         let resp_data: UploadMetaResponse = serde_json::from_str(&raw_body).map_err(|e| {
@@ -1179,6 +1219,19 @@ pub struct UploadMetaResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sapi_error() {
+        let raw = r#"{"error":{"code":"PAPI-0000","message":"Unknown exception","parameters":[],"cause":""},"responsetime":1784797653007}"#;
+        assert_eq!(
+            sapi_error(raw).as_deref(),
+            Some("Unknown exception (PAPI-0000)")
+        );
+        let raw = r#"{"error":{"message":"bad","parameters":[{"param":"name"}]}}"#;
+        assert_eq!(sapi_error(raw).as_deref(), Some("bad [params: name]"));
+        assert_eq!(sapi_error(r#"{"data":{"authorizationurl":"x"}}"#), None);
+        assert_eq!(sapi_error("not json"), None);
+    }
 
     #[test]
     fn test_truncate_utf8_short_string_unchanged() {

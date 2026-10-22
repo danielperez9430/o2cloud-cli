@@ -172,9 +172,10 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 }
             };
 
-            if phone.is_empty() {
+            if phone.trim().is_empty() {
                 return Err(O2Error::Auth("phone number is required".into()));
             }
+            let phone = util::normalize_spanish_msisdn(&phone).map_err(O2Error::Auth)?;
 
             let config = auth::login(&phone).await?;
             println!("Logged in as +34 {}", config.msisdn);
