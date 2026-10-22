@@ -31,6 +31,10 @@ pub enum O2Error {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// A name matched several items; the message lists them.
+    #[error("{0}")]
+    Ambiguous(String),
+
     /// A server response could not be parsed into the expected shape.
     #[error("Invalid response: {0}")]
     Parse(String),

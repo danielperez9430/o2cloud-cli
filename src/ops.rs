@@ -1056,10 +1056,16 @@ fn find_file<'a>(
                         .folderid
                         .map(|fid| resolve_path(fid, folder_name, folders))
                         .unwrap_or_else(|| "/".into());
-                    format!("  {}  {}", m.id, dir)
+                    let name = m.name.as_deref().unwrap_or("?");
+                    let path = if dir == "/" {
+                        format!("/{}", name)
+                    } else {
+                        format!("{}/{}", dir, name)
+                    };
+                    format!("  {:<12}  {}", m.id, path)
                 })
                 .collect();
-            Err(O2Error::NotFound(format!(
+            Err(O2Error::Ambiguous(format!(
                 "'{}' is ambiguous — {} files have that name:\n{}\nUse the ID or the full path.",
                 target,
                 many.len(),
@@ -1466,7 +1472,9 @@ mod tests {
         assert_eq!(find("/2024/dup.txt").unwrap(), 102);
         // Same bare name in two folders: refuse to guess.
         let err = find("dup.txt").unwrap_err().to_string();
-        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.starts_with("'dup.txt' is ambiguous"), "{err}");
+        assert!(err.contains("101           /docs/dup.txt"), "{err}");
+        assert!(err.contains("102           /2024/dup.txt"), "{err}");
         assert!(find("missing.txt").is_err());
         assert!(find("/nope/a.txt").is_err());
         assert!(find("/2024/a.txt").is_err());
