@@ -118,20 +118,35 @@ pub fn save_auth(config: &AuthConfig) -> Result<(), O2Error> {
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| O2Error::Config(format!("Failed to serialize auth config: {}", e)))?;
 
-    fs::write(&path, json).map_err(|e| {
+    let write_err = |e: std::io::Error| {
         O2Error::Config(format!(
             "Failed to write auth file {}: {}",
             path.display(),
             e
         ))
-    })?;
+    };
 
-    // Set restrictive permissions on the auth file (owner read/write only)
+    // Restrict permissions to the owner (0700 dir, 0600 file). The file is
+    // created with mode 0600 up front so the tokens are never readable by
+    // other users, not even briefly between write and chmod.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).ok();
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).ok();
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(write_err)?;
+        // `mode` only applies on creation; tighten pre-existing files too.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(write_err)?;
+        std::io::Write::write_all(&mut file, json.as_bytes()).map_err(write_err)?;
     }
+    #[cfg(not(unix))]
+    fs::write(&path, json).map_err(write_err)?;
 
     Ok(())
 }

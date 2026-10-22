@@ -854,8 +854,8 @@ impl O2Client {
     /// Download a file from its signed URL (from the `url` field in the
     /// media listing response), streaming it directly to `path` instead
     /// of buffering the whole file in memory. Returns the byte count
-    /// written. On any error after the destination file is created, the
-    /// partially-written file is removed.
+    /// written. Fails if `path` already exists. On any error after the
+    /// destination file is created, the partially-written file is removed.
     pub async fn download_to_path(
         &self,
         download_url: &str,
@@ -873,7 +873,21 @@ impl O2Client {
             )));
         }
 
-        let result = Self::stream_response_to_file(resp, path).await;
+        // `create_new` fails if the file already exists, so an existing
+        // local file is never overwritten (nor removed by the cleanup below).
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+            .map_err(|e| {
+                O2Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("Cannot create {}: {}", path.display(), e),
+                ))
+            })?;
+
+        let result = Self::stream_response_to_file(resp, file, path).await;
         if result.is_err() {
             let _ = tokio::fs::remove_file(path).await;
         }
@@ -882,17 +896,11 @@ impl O2Client {
 
     async fn stream_response_to_file(
         resp: reqwest::Response,
+        mut file: tokio::fs::File,
         path: &std::path::Path,
     ) -> Result<u64, O2Error> {
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
-
-        let mut file = tokio::fs::File::create(path).await.map_err(|e| {
-            O2Error::Io(std::io::Error::new(
-                e.kind(),
-                format!("Cannot create {}: {}", path.display(), e),
-            ))
-        })?;
 
         let mut stream = resp.bytes_stream();
         let mut total: u64 = 0;

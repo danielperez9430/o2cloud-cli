@@ -2,6 +2,34 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `upload-zip` uploaded a corrupt archive: the zip's central directory was
+  only written when the writer was dropped, after the upload had already
+  happened. The archive is now finalized before uploading.
+- `upload-zip .` (or `..`) panicked; the archive is now named after the
+  resolved directory.
+- `upload-zip` left the temporary zip behind when the upload failed, and
+  built it at a predictable path in the shared temp dir. It now uses a
+  fresh private (0700) temp directory that is always removed.
+- `upload-zip` no longer reads each file fully into memory while zipping.
+- `download` without `-o` used the server-supplied media name as a local
+  path, so a name like `../../.bashrc` could write outside the current
+  directory. Only the final file-name component is used now.
+- `download` could overwrite a file created between the existence check
+  and the download; the file is now created with `create_new`.
+
+### Security
+- `auth.json` is created with mode 0600 from the start (it was previously
+  written with default permissions and chmod'ed afterwards), and the config
+  directory is restricted to 0700.
+- Updated dependencies to clear RUSTSEC advisories: `zip` 2 → 9, plus
+  lockfile updates for `rustls`, `rustls-webpki`, `webpki-roots`,
+  `quinn-proto` and `quick-xml`.
+- CI: the workflow token is now read-only except for the release job, and
+  `cargo audit` runs on every push/PR.
+
 ## [0.2.0] — 2026-07-14
 
 ### Added
