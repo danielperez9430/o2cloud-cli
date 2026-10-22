@@ -4,20 +4,41 @@
   <img src="assets/logo.svg" alt="o2cloud-cli" width="600">
 </p>
 
-[![Crates.io](https://img.shields.io/crates/v/o2cloud-cli)](https://crates.io/crates/o2cloud-cli)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+<p align="center">
+  <a href="https://crates.io/crates/o2cloud-cli"><img src="https://img.shields.io/crates/v/o2cloud-cli" alt="Crates.io"></a>
+  <a href="https://github.com/danielperez9430/o2cloud-cli/actions/workflows/release.yml"><img src="https://github.com/danielperez9430/o2cloud-cli/actions/workflows/release.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+</p>
 
-CLI for O2 Cloud (Telefónica Spain) — manage your cloud storage from the terminal.
+<p align="center">
+  <b>Manage your O2 Cloud (Telefónica Spain) storage from the terminal.</b><br>
+  <a href="README.es.md">Español</a>
+</p>
 
-[Español](README.es.md)
+---
 
-## Installation
+## ✨ Features
+
+- 🔐 **Login** with your phone number and SMS code, in the same login window the O2 Cloud website uses
+- 📂 **Browse** folders as a list or a tree, and **search** by name
+- ⬆️ **Upload** single files, whole folders, or a folder as a `.zip`
+- ⬇️ **Download** by ID, path or file name
+- 🔗 **Share** files and folders with a public link, and remove the link again
+- ✏️ **Move** and **rename** files
+- 🗑️ **Delete** to the trash, with safety checks (confirmation for folders, the root folder can't be deleted, ambiguous names are never guessed)
+
+## 📦 Installation
+
+With [Rust](https://rustup.rs) installed:
 
 ```bash
 cargo install o2cloud-cli
 ```
 
-Or build from source:
+Pre-built binaries for macOS, Linux and Windows are attached to each [GitHub release](https://github.com/danielperez9430/o2cloud-cli/releases).
+
+<details>
+<summary>🛠️ Build from source</summary>
 
 ```bash
 git clone https://github.com/danielperez9430/o2cloud-cli
@@ -26,87 +47,177 @@ cargo build --release
 ./target/release/o2cloud --help
 ```
 
-## Usage
+</details>
 
-```bash
-# Authentication (opens a login window: enter your phone number and the SMS code there)
-o2cloud login
+### 🧰 Requirements
 
-# List files
-o2cloud ls                  # root
-o2cloud ls /DMHAIR          # folder by path
-o2cloud ls -t               # tree view
-o2cloud ls -a               # all files (flat)
+| Platform | Needs |
+|---|---|
+| macOS | Nothing extra |
+| Linux | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev` |
+| Windows | The [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11 and up-to-date Windows 10) |
 
-# Search
-o2cloud find "query"        # case-insensitive search
+You also need an O2 Cloud account (an O2 Spain mobile line).
 
-# Upload
-o2cloud upload file.txt
-o2cloud upload-dir ./my-folder       # recursive
-o2cloud upload-zip ./my-folder       # zip + upload
+## 🚀 Quick start
 
-# Download
-o2cloud download 1195003130          # by ID, saved under its cloud name in the current dir
-o2cloud download /path/to/file.txt   # by path (or just the name, if it is unique)
-o2cloud download 1195003130 -o file.txt
+```console
+$ o2cloud login
+→ Opening login window (enter your phone number there)...
+✓ Login successful — tokens saved
+Logged in as +34 600000000
 
-# Delete (trash)
-o2cloud rm 1195003130                # file by ID
-o2cloud rm /path/to/file.txt         # file by path
-o2cloud rm /path/to/folder -r        # recursive folder (prompts for confirmation)
-o2cloud rm /path/to/folder -r -y     # recursive folder, skip confirmation
+$ o2cloud ls
+📁 /
 
-# Share (public links)
-o2cloud share /path/to/folder        # prints the public URL
-o2cloud share /path/to/file.txt
-o2cloud shares                       # list shared folders
-o2cloud unshare /path/to/folder      # or by link ID from `shares`
+  12345678  📁 Photos/
+  12345679  📁 Documents/
 
-# Move & rename files
-o2cloud mv /path/to/file.txt /other/folder
-o2cloud rename /path/to/file.txt new-name.txt
+  1234567890    1.2 MB  notes.pdf
 
-# Session
-o2cloud status
-o2cloud logout
+$ o2cloud upload-dir ./holidays --folder 12345678
+→ Uploading ./holidays (24.0 MB) — 12 files, 1 dirs...
+  📁 holidays/ (created id:12345690)
+  ...
+✓ Uploaded 12 files to ./holidays
 ```
 
-### Notes
+## 📖 Commands
 
-- `upload-dir ./my-folder` creates `my-folder/` in the target folder (or
-  reuses it if it exists) and uploads everything inside it, recursing
-  into all subfolders. Hidden files and folders
-  (`.git`, `.DS_Store`, …) are skipped because O2 Cloud rejects them.
-- `upload-dir` and `upload-zip` follow symlinks to files, but **skip
-  symlinks to folders** (with a warning), so a link pointing back to a
-  parent folder can't cause an endless loop.
-- `share` creates a public link: anyone with the URL can access the file
-  or folder. Sharing the root folder is refused. For now `unshare`,
-  `mv` and `rename` work on folders' links and on files respectively;
-  unsharing a file and moving/renaming folders must be done on the website.
-- `download` never overwrites an existing local file. Without `-o`, only
-  the file name is used (any directory part sent by the server is ignored).
+| Command | What it does |
+|---|---|
+| 🔐 `login` | Log in (opens a login window) |
+| ℹ️ `status` | Show the account and whether the session is still active |
+| 🚪 `logout` | Remove the stored session |
+| 📂 `ls [folder]` | List a folder (`-t` tree view, `-a` all files) |
+| 🔍 `find <text>` | Search files and folders by name |
+| ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where) |
+| 📁 `upload-dir <dir>` | Upload a folder and everything in it |
+| 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
+| ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
+| 🗑️ `rm <file or folder>` | Move to the trash (`-r` for folders, `-y` to skip confirmation) |
+| 🔗 `share <file or folder>` | Create a public link and print its URL |
+| 📋 `shares` | List shared folders |
+| 🚫 `unshare <folder>` | Remove a folder's public link |
+| 📦 `mv <file> <folder>` | Move a file to another folder |
+| ✏️ `rename <file> <name>` | Rename a file |
 
-## Requirements
+Run `o2cloud <command> --help` for all the options.
 
-- macOS, Linux or Windows
-- O2 Cloud account (Telefónica Spain)
-- Linux: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev`
-- Windows: the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11 and up-to-date Windows 10)
+### 🎯 Naming files and folders
 
-## How it works
+Wherever a command takes a file or folder, you can use any of these:
 
-O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication uses the same flow as the O2 Cloud website: Telefónica's OAuth2/OpenID Connect login, with PKCE handled by the O2 Cloud server (no client secret involved). The CLI opens a login window where you enter your phone number and verify via SMS. After login, the session is stored in:
+| Form | Example | Meaning |
+|---|---|---|
+| ID | `1234567890` | As shown by `ls` and `find` |
+| Path | `/Documents/notes.pdf` | Starts with `/`: an exact path from the root |
+| Name | `notes.pdf` | No `/`: searched in the whole account; must be unique |
 
-- macOS: `~/Library/Application Support/o2cli/auth.json`
-- Linux: `~/.config/o2cli/auth.json`
-- Windows: `%APPDATA%\o2cli\auth.json`
+If a name matches several files, nothing happens and the CLI lists the matches so you can pick one:
 
-On macOS/Linux the file is only readable by your user (`0600`).
+```console
+$ o2cloud download notes.pdf
+Error: 'notes.pdf' is ambiguous — 2 files have that name:
+  1234567890    /notes.pdf
+  1234567891    /Documents/notes.pdf
+Use the ID or the full path.
+```
 
-A session lasts about 24 hours. When it expires, the next command opens the login window again.
+## 💡 Examples
 
-## License
+<details open>
+<summary><b>📂 Browse and search</b></summary>
 
-MIT
+```bash
+o2cloud ls                     # root folder
+o2cloud ls /Photos/2024        # a folder by path
+o2cloud ls 12345678            # a folder by ID
+o2cloud ls -t                  # tree view
+o2cloud ls -a                  # every file, flat
+o2cloud find invoice           # case-insensitive search
+```
+
+</details>
+
+<details open>
+<summary><b>🔄 Upload and download</b></summary>
+
+```bash
+o2cloud upload ./report.pdf                      # to the root folder
+o2cloud upload ./report.pdf --folder 12345679    # to a folder (by ID)
+o2cloud upload-dir ./holidays                    # creates holidays/ and uploads into it
+o2cloud upload-zip ./project                     # uploads project.zip
+
+o2cloud download /Documents/report.pdf           # saved as ./report.pdf
+o2cloud download 1234567890 -o ~/Desktop/copy.pdf
+```
+
+</details>
+
+<details open>
+<summary><b>🔗 Share</b></summary>
+
+```console
+$ o2cloud share /Photos/2024
+✓ Public link created for /Photos/2024/ — anyone with it can access it:
+https://cloud.o2online.es/share/f/EXAMPLE-TOKEN
+  (link 100001; remove it with `o2cloud unshare 100001`)
+
+$ o2cloud shares
+LINK ID     USES  URL                                            FOLDER
+100001         3  https://cloud.o2online.es/share/f/EXAMPLE-TOKEN  /Photos/2024/
+
+$ o2cloud unshare /Photos/2024
+✓ /Photos/2024/ is no longer shared
+```
+
+The URL is printed alone on standard output, so scripts can capture it: `url=$(o2cloud share /notes.pdf)`.
+
+</details>
+
+<details open>
+<summary><b>🗂️ Move, rename and delete</b></summary>
+
+```bash
+o2cloud mv /notes.pdf /Documents
+o2cloud rename /Documents/notes.pdf notes-2024.pdf
+
+o2cloud rm /Documents/notes-2024.pdf    # a file
+o2cloud rm /Photos/old -r               # a folder and its contents (asks first)
+o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
+```
+
+</details>
+
+## ⚠️ Good to know
+
+> [!NOTE]
+> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again. `o2cloud status` tells you whether yours is still active.
+
+> [!WARNING]
+> **Shared links are public**: anyone with the URL can open the file or folder. Sharing the root folder is refused, since it would publish the whole account.
+
+- **Deletes go to the trash**, so they can be restored from the O2 Cloud website.
+- **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
+- **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them. `upload-zip` includes them inside the zip.
+- **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
+- **Not supported yet:** unsharing a file, and moving or renaming folders. Use the website for those for now.
+
+## ⚙️ How it works
+
+O2 Cloud runs on **Synchronoss OneMediaHub**. `o2cloud` talks to the same API as the O2 Cloud website, and logs in the same way: Telefónica's OAuth2 / OpenID Connect login, with PKCE handled by the O2 Cloud server (no client secret involved). You type your phone number and SMS code in the login window, never in the terminal.
+
+The session is stored in:
+
+| OS | Path |
+|---|---|
+| macOS | `~/Library/Application Support/o2cli/auth.json` |
+| Linux | `~/.config/o2cli/auth.json` |
+| Windows | `%APPDATA%\o2cli\auth.json` |
+
+On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
+
+## 📄 License
+
+[MIT](./LICENSE)

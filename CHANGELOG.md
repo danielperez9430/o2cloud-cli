@@ -10,6 +10,9 @@ All notable changes to o2cloud-cli will be documented in this file.
   ID, uses and URL; `unshare <folder|link-id>` removes a folder's link.
 - `mv <file> <folder>` moves a file and `rename <file> <name>` renames
   it; both refuse to overwrite a file with the same name.
+- `status` checks the session against the server ("active" / "expired")
+  and shows when it was created; it no longer prints part of the
+  validation key, which is a session credential.
 - Folders aren't supported yet by `mv`/`rename`, nor files by `unshare`:
   the CLI says so instead of guessing at the requests.
 
@@ -71,6 +74,12 @@ All notable changes to o2cloud-cli will be documented in this file.
   directory.
 
 ### Changed
+- Refusals and argument errors (e.g. "refusing to delete the root
+  folder", "already has a file named …") no longer carry a misleading
+  "I/O error:" prefix. `shares` puts the folder in the last column so
+  long paths don't break the table.
+- README (EN/ES) rewritten: command reference, file/folder naming rules,
+  example output, and placeholder IDs and names instead of real ones.
 - `download` accepts a file path or a unique file name as well as an ID
   (`o2cloud download /docs/a.txt`), resolved like `rm`.
 - `rm` accepts file paths (`o2cloud rm /docs/a.txt`), and the recursive

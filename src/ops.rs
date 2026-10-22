@@ -12,7 +12,7 @@ use crate::util::{format_size, mime_type_from_name, system_time_to_compact_iso};
 
 /// List files with multiple display modes:
 /// - Default: root folder contents (direct children)
-/// - `path`: folder path (e.g. `/DMHAIR/app`) or ID (e.g. `24440698`)
+/// - `path`: folder path (e.g. `/Photos/2024`) or ID (e.g. `12345678`)
 /// - `all`: all files flat list
 /// - `tree`: hierarchical tree view
 pub async fn list_folder(
@@ -201,9 +201,9 @@ fn print_tree(
 ///
 /// Supported formats:
 /// - `None` → root folder
-/// - `"24440698"` (numeric) → direct ID, or a root folder with that name
+/// - `"12345678"` (numeric) → direct ID, or a root folder with that name
 ///   (e.g. `2024`) if no folder has that ID
-/// - `"/DMHAIR/app"` (absolute path) → traverse tree
+/// - `"/Photos/2024"` (absolute path) → traverse tree
 /// - `"app"` (single name) → search direct children of root
 fn resolve_target(
     path: Option<String>,
