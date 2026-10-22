@@ -12,10 +12,17 @@ use wry::WebViewBuilder;
 
 use crate::error::O2Error;
 
+/// Where Telefónica sends the browser back after login, with `code` and
+/// `state` (or `error`) query parameters.
+const LOGIN_REDIRECT_URL: &str = "https://cloud.o2online.es/sapi/login/oauth";
+/// Where O2 Cloud sends the browser when the OAuth flow fails.
+const LOGIN_ERROR_URL: &str = "https://cloud.o2online.es/ui/html/oauth.html";
+
 /// Custom event sent from the navigation handler back to the event loop.
 #[derive(Debug)]
 enum AppEvent {
-    AuthCodeReceived(String, String),
+    /// The login redirect was reached: `(code, state)` or an error message.
+    Redirect(Result<(String, String), String>),
 }
 
 /// State for the temporary WebView window.
@@ -58,25 +65,15 @@ impl ApplicationHandler<AppEvent> for WebViewState {
 
         let webview = WebViewBuilder::new()
             .with_url(&self.auth_url)
-            .with_navigation_handler(move |url| {
-                if url.starts_with("https://cloud.o2online.es/ui/html/clientoauth.html") {
-                    match extract_oauth_params(&url) {
-                        Some((code, state)) => {
-                            let _ = proxy.send_event(AppEvent::AuthCodeReceived(code, state));
-                        }
-                        None => {
-                            let _ = proxy.send_event(AppEvent::AuthCodeReceived(
-                                String::new(),
-                                String::new(),
-                            ));
-                        }
-                    }
-                    // block navigation — we already captured the code
+            .with_navigation_handler(move |url| match classify_redirect(&url) {
+                Some(result) => {
+                    let _ = proxy.send_event(AppEvent::Redirect(result));
+                    // Block navigation: the CLI hands the code to O2 Cloud
+                    // itself, in the session that started the login.
                     false
-                } else {
-                    // allow all other navigations
-                    true
                 }
+                // allow all other navigations
+                None => true,
             })
             .build(&window);
         let webview = match webview {
@@ -90,15 +87,9 @@ impl ApplicationHandler<AppEvent> for WebViewState {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::AuthCodeReceived(code, state) => {
-                if code.is_empty() || state.is_empty() {
-                    if let Some(tx) = self.tx.take() {
-                        let _ = tx.send(Err(O2Error::Auth(
-                            "Failed to extract OAuth2 code/state from redirect URL".into(),
-                        )));
-                    }
-                } else if let Some(tx) = self.tx.take() {
-                    let _ = tx.send(Ok((code, state)));
+            AppEvent::Redirect(result) => {
+                if let Some(tx) = self.tx.take() {
+                    let _ = tx.send(result.map_err(O2Error::Auth));
                 }
                 event_loop.exit();
             }
@@ -121,8 +112,8 @@ impl ApplicationHandler<AppEvent> for WebViewState {
     }
 }
 
-/// Open a WebView window, navigate to the Telefónica Mobile Connect
-/// authorization URL, and wait for the OAuth2 redirect that carries the
+/// Open a WebView window, navigate to the Telefónica authorization URL,
+/// and wait for the OAuth2 redirect back to O2 Cloud that carries the
 /// `code` and `state` parameters.
 ///
 /// **macOS requirement**: this function MUST be called from the main
@@ -157,10 +148,37 @@ pub fn intercept_oauth_code_sync(auth_url: &str) -> Result<(String, String), O2E
         .map_err(|_| O2Error::WebView("WebView closed unexpectedly".into()))?
 }
 
+/// Decide what to do with a navigation: `None` lets it through; `Some`
+/// means the login finished, successfully (`code`, `state`) or not.
+fn classify_redirect(url: &str) -> Option<Result<(String, String), String>> {
+    if url.starts_with(LOGIN_ERROR_URL) {
+        return Some(Err("Login was rejected by O2 Cloud".into()));
+    }
+    if !url.starts_with(LOGIN_REDIRECT_URL) {
+        return None;
+    }
+    if let Some((code, state)) = extract_oauth_params(url) {
+        return Some(Ok((code, state)));
+    }
+    let parsed = Url::from_str(url).ok();
+    let param = |name: &str| {
+        parsed.as_ref().and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+        })
+    };
+    Some(Err(match (param("error"), param("error_description")) {
+        (Some(e), Some(d)) => format!("Login failed: {} ({})", d, e),
+        (Some(e), None) => format!("Login failed: {}", e),
+        _ => "Login redirect did not include an authorization code".into(),
+    }))
+}
+
 /// Parse the `code` and `state` query parameters from a URL.
 ///
 /// Expected URL shape:
-/// `https://cloud.o2online.es/ui/html/clientoauth.html?code=...&state=...`
+/// `https://cloud.o2online.es/sapi/login/oauth?code=...&state=...`
 fn extract_oauth_params(url_str: &str) -> Option<(String, String)> {
     let url = Url::from_str(url_str).ok()?;
     let code = url
@@ -181,7 +199,7 @@ mod tests {
     #[test]
     fn test_extract_valid() {
         let (code, state) = extract_oauth_params(
-            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc123&state=xyz789",
+            "https://cloud.o2online.es/sapi/login/oauth?code=abc123&state=xyz789",
         )
         .unwrap();
         assert_eq!(code, "abc123");
@@ -191,7 +209,7 @@ mod tests {
     #[test]
     fn test_extract_extra_params() {
         let (code, state) = extract_oauth_params(
-            "https://cloud.o2online.es/ui/html/clientoauth.html?code=abc&other=1&state=xyz&foo=bar",
+            "https://cloud.o2online.es/sapi/login/oauth?code=abc&other=1&state=xyz&foo=bar",
         )
         .unwrap();
         assert_eq!(code, "abc");
@@ -200,10 +218,31 @@ mod tests {
 
     #[test]
     fn test_extract_missing_code() {
-        assert!(extract_oauth_params(
-            "https://cloud.o2online.es/ui/html/clientoauth.html?state=xyz"
-        )
-        .is_none());
+        assert!(
+            extract_oauth_params("https://cloud.o2online.es/sapi/login/oauth?state=xyz").is_none()
+        );
+    }
+
+    #[test]
+    fn test_classify_redirect() {
+        assert_eq!(
+            classify_redirect("https://t3.o2online.es/acceso/#/accessUserPassO2"),
+            None
+        );
+        assert_eq!(
+            classify_redirect("https://cloud.o2online.es/sapi/login/oauth?code=c&state=s"),
+            Some(Ok(("c".into(), "s".into())))
+        );
+        assert_eq!(
+            classify_redirect(
+                "https://cloud.o2online.es/sapi/login/oauth?error=access_denied&error_description=User+cancelled&state=s"
+            ),
+            Some(Err("Login failed: User cancelled (access_denied)".into()))
+        );
+        assert!(matches!(
+            classify_redirect("https://cloud.o2online.es/ui/html/oauth.html?x=1"),
+            Some(Err(_))
+        ));
     }
 
     #[test]

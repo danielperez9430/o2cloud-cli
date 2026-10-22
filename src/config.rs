@@ -9,19 +9,32 @@ use crate::error::O2Error;
 pub struct AuthConfig {
     pub validationkey: String,
     pub jsessionid: String,
+    /// OAuth token from the old Mobile Connect login, used for silent
+    /// renewal. Empty for sessions from the current OAuth web login.
+    #[serde(default)]
     pub access_token: String,
-    #[serde(rename = "encryption-token")]
+    #[serde(rename = "encryption-token", default)]
     pub encryption_token: String,
+    #[serde(default)]
     pub msisdn: String,
+    #[serde(default)]
     pub platform: String,
+    /// `x-deviceid` the session was created with.
+    #[serde(default)]
+    pub device_id: String,
 }
 
 impl AuthConfig {
-    /// Build the `Authorization: oauth <base64>` header value required
-    /// by SAPI calls (list, upload, download).  The format is a
-    /// base64-encoded JSON object wrapping the login access token with
-    /// camelCase keys, matching what the official desktop client sends.
-    pub fn to_sapi_auth_header(&self) -> String {
+    /// Build the `Authorization: oauth <base64>` header value sent by the
+    /// old desktop client with SAPI calls (list, upload, download).  The
+    /// format is a base64-encoded JSON object wrapping the login access
+    /// token with camelCase keys.  `None` for sessions without a stored
+    /// token, which authenticate with the session cookie alone.
+    pub fn sapi_auth_header(&self) -> Option<String> {
+        if self.access_token.is_empty() {
+            return None;
+        }
+
         #[derive(Serialize)]
         struct OAuthData {
             accesstoken: String,
@@ -60,7 +73,7 @@ impl AuthConfig {
 
         let json = serde_json::to_string(&payload).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
-        format!("oauth {}", b64)
+        Some(format!("oauth {}", b64))
     }
 
     /// Extract the raw `pat=...` token from the JWT-wrapped access_token.
@@ -201,6 +214,7 @@ mod tests {
             encryption_token: "et".into(),
             msisdn: "600000000".into(),
             platform: "macos".into(),
+            device_id: String::new(),
         }
     }
 

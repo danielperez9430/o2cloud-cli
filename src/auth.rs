@@ -5,45 +5,49 @@ use crate::webview;
 
 /// Run the full login flow and persist tokens to disk.
 ///
-/// 1. Start Mobile Connect → get Telefónica authorization URL
-/// 2. Open WebView → user authenticates → intercept OAuth2 code + state
-/// 3. Validate credential → exchange code for credential token
-/// 4. Login → obtain session tokens (validationkey, jsessionid, …)
+/// This follows the O2 Cloud web client's OAuth2 login (PKCE handled by
+/// the O2 Cloud server, so no client secret is involved):
+///
+/// 1. Initialise a session (`JSESSIONID` cookie)
+/// 2. Ask O2 Cloud to start the login → Telefónica authorization URL
+/// 3. Open WebView → user enters phone number + SMS code → intercept the
+///    redirect back to O2 Cloud carrying the OAuth2 code + state
+/// 4. Hand the code to O2 Cloud in the same session → `JSESSIONID` and
+///    `validationKey` cookies
 /// 5. Save tokens to `~/.config/o2cli/auth.json`
-pub async fn login(phone_number: &str) -> Result<AuthConfig, O2Error> {
-    let client = O2Client::new()?;
+pub async fn login() -> Result<AuthConfig, O2Error> {
+    let client = O2Client::new("")?;
 
-    // Step 0 – Initialise session (get JSESSIONID cookie)
+    // Step 1 – Initialise session (the PKCE state is bound to it)
     eprintln!("→ Initialising session...");
-    client.init_session().await?; // ignore returned JSESSIONID — login sets a new one
+    client.init_session().await?;
 
-    // Step 1 – Start Mobile Connect
-    eprintln!("→ Starting Mobile Connect for +34 {}...", phone_number);
-    let start = client.start_mobile_connect(phone_number).await?;
+    // Step 2 – Start the OAuth login
+    eprintln!("→ Starting login...");
+    let authorize_url = client.start_oauth_login().await?;
 
-    // Step 2 – WebView OAuth2 (must run on main thread for macOS/Cocoa)
-    eprintln!("→ Opening login window...");
-    let (code, state) = webview::intercept_oauth_code_sync(&start.authorizationurl)?;
+    // Step 3 – WebView OAuth2 (must run on main thread for macOS/Cocoa)
+    eprintln!("→ Opening login window (enter your phone number there)...");
+    let (code, state) = webview::intercept_oauth_code_sync(&authorize_url)?;
     eprintln!("✓ Authorization code received");
 
-    // Step 3 – Validate credential
-    eprintln!("→ Validating credential...");
-    let credential = client.validate_credential(&code, &state).await?;
-
-    // Step 4 – Login (requires OAuth Authorization header from validate response)
+    // Step 4 – Complete the login
     eprintln!("→ Logging in...");
-    let oauth_header = credential.to_oauth_auth_header();
-    let login_resp = client.login(&oauth_header).await?;
+    let session = client.complete_oauth_login(&code, &state).await?;
 
-    // Build and save config
-    let config = AuthConfig {
-        validationkey: login_resp.validationkey,
-        jsessionid: login_resp.jsessionid,
-        access_token: login_resp.access_token,
-        encryption_token: login_resp.encryption_token,
-        msisdn: credential.msisdn,
-        platform: credential.platform,
+    let mut config = AuthConfig {
+        validationkey: session.validationkey,
+        jsessionid: session.jsessionid,
+        access_token: String::new(),
+        encryption_token: String::new(),
+        msisdn: String::new(),
+        platform: "web".into(),
+        device_id: client.device_id().to_string(),
     };
+    // Only used for display, so a failure here doesn't fail the login.
+    if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
+        config.msisdn = msisdn;
+    }
 
     config::save_auth(&config)?;
     eprintln!("✓ Login successful — tokens saved");

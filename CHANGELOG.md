@@ -37,14 +37,19 @@ All notable changes to o2cloud-cli will be documented in this file.
 - Being offline (or any network error) during the session check was
   treated as an expired session and opened the login window; the network
   error is now reported instead.
-- `login` sent malformed phone numbers to the server when typed with a
-  `+34`/`0034` prefix, spaces or dashes (e.g. `+34 686 942 006` became
-  `34+34 686 942 006`), which O2 Cloud answers with a generic
-  `PAPI-0000 Unknown exception` (#2). The number is now normalized to its
-  9 digits and validated before any request is made.
-- Errors the server returns inside a 200 response (`{"error": …}`) during
-  login were reported as "missing field `data`"; they now show the
-  server's message and code, plus a hint for the first login step.
+- **`login` was broken** (#2): O2 Cloud retired the Mobile Connect login
+  the CLI used, so `mobileconnect?action=start` failed with
+  `PAPI-0000 Unknown exception` for every number. The CLI now uses the
+  same OAuth2 login as the O2 Cloud website (`/sapi/oauth/pkce/authorize`
+  → Telefónica login → `/sapi/login/oauth`), with PKCE handled by the
+  server. The phone number and SMS code are now entered in the login
+  window; `--phone` is accepted but ignored.
+- Uploads now use the website's single multipart request
+  (`/sapi/upload?action=save`), and file deletes its batch endpoint
+  (`/sapi/media/file?action=delete&softdelete=true`), so `rm -r` sends one
+  request per 1000 files instead of one per file.
+- Errors the server returns inside a 200 response (`{"error": …}`) are
+  now reported with the server's message and code.
 - `login` without a graphical session (no `DISPLAY`/`WAYLAND_DISPLAY`)
   panicked; it now reports a clear error. Same for a missing config
   directory.
@@ -53,7 +58,11 @@ All notable changes to o2cloud-cli will be documented in this file.
 - `rm` accepts file paths (`o2cloud rm /docs/a.txt`), and the recursive
   delete prompt now shows which folder will be moved to the trash (it
   previously said "permanently delete", but deletes are soft).
-- When silent session renewal fails, the reason is printed.
+- Sessions from the new login last ~24 h and are not renewed silently
+  (the server no longer hands the client a renewable token); the login
+  window opens again when they expire. Existing sessions from the old
+  login keep their silent renewal. When silent renewal fails, the reason
+  is printed.
 - Directory walking, zipping, and file metadata reads now run off the
   async runtime (`spawn_blocking` / `tokio::fs`), and `upload-dir` reads
   each file's metadata once instead of twice.

@@ -8,6 +8,8 @@ use crate::error::O2Error;
 
 /// Base URL for the O2 Cloud SAPI (Synchronoss API).
 const BASE_URL: &str = "https://cloud.o2online.es";
+/// Telefónica's OAuth authorization endpoint, where the login redirects.
+const AUTHORIZE_URL_PREFIX: &str = "https://apiseg.telefonica.es/";
 /// Separate host for binary uploads.
 const UPLOAD_URL: &str = "https://upload.cloud.o2online.es";
 
@@ -55,19 +57,30 @@ fn sapi_error(raw: &str) -> Option<String> {
     Some(out)
 }
 
-/// Generate a random device ID in the format used by the web client.
-fn generate_device_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    format!(
-        "web-{:08x}{}{}",
-        now as u32,
-        (now >> 32) as u32,
-        (now as u32).wrapping_mul(0x9e3779b9)
-    )
+/// Generate a random device ID in the format used by the web client:
+/// `web-` followed by 32 hex characters.
+pub fn generate_device_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut id = String::from("web-");
+    for _ in 0..2 {
+        // Each `RandomState` is seeded with fresh random keys.
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(nanos);
+        id.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    id
+}
+
+/// Value of the cookie `name` from the response's `Set-Cookie` headers.
+fn set_cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    headers.get_all(header::SET_COOKIE).iter().find_map(|v| {
+        let (key, rest) = v.to_str().ok()?.split_once('=')?;
+        (key.trim() == name).then(|| rest.split(';').next().unwrap_or("").to_string())
+    })
 }
 
 /// O2 Cloud API client.
@@ -77,12 +90,18 @@ fn generate_device_id() -> String {
 /// set to mimic the official O2 Cloud desktop app (QtWebEngine).
 pub struct O2Client {
     client: Client,
+    /// Same cookie jar as `client`, but never follows redirects — the
+    /// OAuth login steps need to read the `Location` / `Set-Cookie` of
+    /// the 302 responses themselves.
+    no_redirect: Client,
     device_id: String,
 }
 
 impl O2Client {
-    /// Create a new API client with browser-matching defaults.
-    pub fn new() -> Result<Self, O2Error> {
+    /// Create a new API client with browser-matching defaults. `device_id`
+    /// should be the one stored with the session; pass `""` to generate a
+    /// new one (e.g. for a fresh login).
+    pub fn new(device_id: &str) -> Result<Self, O2Error> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::USER_AGENT,
@@ -101,30 +120,50 @@ impl O2Client {
             header::HeaderValue::from_static("https://cloud.o2online.es"),
         );
 
-        let device_id = generate_device_id();
+        let device_id = if device_id.is_empty() {
+            generate_device_id()
+        } else {
+            device_id.to_string()
+        };
 
+        let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
         let client = Client::builder()
-            .cookie_store(true)
-            .default_headers(headers)
+            .cookie_provider(jar.clone())
+            .default_headers(headers.clone())
             .connect_timeout(Duration::from_secs(15))
             .build()?;
+        let no_redirect = Client::builder()
+            .cookie_provider(jar)
+            .default_headers(headers)
+            .connect_timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
 
-        Ok(Self { client, device_id })
+        Ok(Self {
+            client,
+            no_redirect,
+            device_id,
+        })
     }
 
-    /// Initialise the session by fetching the login page.
+    /// The device ID sent as `x-deviceid`; persisted with the session.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Initialise the session by fetching the home page, as the web
+    /// client does.
     ///
     /// This is required to obtain a `JSESSIONID` cookie from the server
     /// before making any SAPI calls — CloudFront blocks requests that
     /// lack a valid session cookie.
     pub async fn init_session(&self) -> Result<Option<String>, O2Error> {
-        let url = format!("{}/ui/html/mobileconnect.html", BASE_URL);
+        let url = format!("{}/", BASE_URL);
 
         let resp = self
             .client
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
-            .query(&[("embedded", "true")])
             .header("x-deviceid", &self.device_id)
             .header("referer", "https://cloud.o2online.es/")
             .header("sec-fetch-site", "same-origin")
@@ -134,7 +173,7 @@ impl O2Client {
             .await?;
 
         // Extract the new JSESSIONID from Set-Cookie
-        let new_jsessionid = Self::extract_jsessionid_from_headers(resp.headers());
+        let new_jsessionid = set_cookie_value(resp.headers(), "JSESSIONID");
 
         // Drain the response body so the connection is reusable.
         let _ = resp.text().await?;
@@ -148,30 +187,31 @@ impl O2Client {
     /// trigger a re-login (and its login window).
     pub async fn is_session_valid(&self, auth: &AuthConfig) -> Result<bool, O2Error> {
         let url = format!("{}/sapi/profile/role", BASE_URL);
-        let auth_header = auth.to_sapi_auth_header();
-        let resp = self
+        let req = self
             .client
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
-            .query(&[("action", "get"), ("validationkey", &auth.validationkey)])
-            .header("cookie", format!("JSESSIONID={}", auth.jsessionid))
-            .header("authorization", &auth_header)
-            .send()
-            .await?;
+            .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
+        let resp = self.with_sapi_headers(req, auth).send().await?;
         let status = resp.status();
         let _ = resp.text().await?;
         Ok(status != reqwest::StatusCode::UNAUTHORIZED)
     }
 
     /// Attempt a silent re-login using the stored `access_token` (pat token).
+    /// Only sessions from the old Mobile Connect login have one; the
+    /// current OAuth login doesn't hand a token to the client.
     /// First gets a fresh JSESSIONID cookie, then calls the login endpoint.
     /// If successful, returns new `LoginResponse` with fresh tokens.
     pub async fn silent_login(&self, auth: &AuthConfig) -> Result<LoginResponse, O2Error> {
+        let auth_header = auth
+            .sapi_auth_header()
+            .ok_or_else(|| O2Error::Auth("no stored token for silent renewal".into()))?;
+
         // Get a fresh session cookie first
         self.init_session().await?;
 
         let url = format!("{}/sapi/login", BASE_URL);
-        let auth_header = auth.to_sapi_auth_header();
 
         // Try with SAPI auth header (pat token) — this is what the
         // desktop app uses for all its API calls
@@ -222,24 +262,6 @@ impl O2Client {
     }
 
     // ------------------------------------------------------------------
-    // Session
-    // ------------------------------------------------------------------
-
-    /// Grab the JSESSIONID value from a `Set-Cookie` response header.
-    fn extract_jsessionid_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
-        headers.get_all("set-cookie").iter().find_map(|v| {
-            let s = v.to_str().ok()?;
-            if s.starts_with("JSESSIONID=") {
-                s.split(';')
-                    .next()
-                    .and_then(|c| c.strip_prefix("JSESSIONID=").map(|v| v.to_string()))
-            } else {
-                None
-            }
-        })
-    }
-
-    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -261,7 +283,8 @@ impl O2Client {
             .header("sec-fetch-dest", "empty")
     }
 
-    /// Attach headers for SAPI calls (list, upload, download).  These
+    /// Attach headers for SAPI calls (list, upload, download): device ID,
+    /// session cookie and, for legacy sessions, the OAuth token.  These
     /// mimic the official desktop client (`omh macos client`) rather
     /// than the web client, because SAPI endpoints reject web-style
     /// Sec-Fetch / Referer headers.
@@ -276,10 +299,16 @@ impl O2Client {
             .unwrap()
             .as_nanos();
         let req_id = format!("{:016x}", now);
-        builder
+        let builder = builder
             .header("x-deviceid", &self.device_id)
             .header("x-request-id", req_id)
-            .header("cookie", format!("JSESSIONID={}", auth.jsessionid))
+            .header("cookie", format!("JSESSIONID={}", auth.jsessionid));
+        // The web client authenticates with the session cookie and
+        // validationkey alone; only legacy sessions carry an OAuth token.
+        match auth.sapi_auth_header() {
+            Some(h) => builder.header("authorization", h),
+            None => builder,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -304,203 +333,109 @@ impl O2Client {
     }
 
     // ------------------------------------------------------------------
-    // Mobile Connect – Step 1: Start
+    // Login (OAuth2 + PKCE, handled server-side)
     // ------------------------------------------------------------------
 
-    /// Start the Mobile Connect authentication flow.
+    /// Start the web login flow.
     ///
-    /// `POST /sapi/login/mobileconnect?action=start`
+    /// `GET /sapi/oauth/pkce/authorize?platform=web&deviceid=<id>`
     ///
-    /// The body is URL-encoded form data: `platform=<platform>&msisdn=<phone>`.
-    /// Returns the Telefónica Mobile Connect authorization URL.
-    pub async fn start_mobile_connect(
-        &self,
-        msisdn: &str,
-    ) -> Result<StartMobileConnectResponse, O2Error> {
-        let url = format!("{}/sapi/login/mobileconnect", BASE_URL);
-
-        // The API expects the full MSISDN with country code prefix
-        let full_msisdn = if msisdn.starts_with("34") {
-            msisdn.to_string()
-        } else {
-            format!("34{}", msisdn)
-        };
-
-        let form = [("platform", "macos"), ("msisdn", &full_msisdn)];
-
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("action", "start")])
-            .header(
-                "content-type",
-                "application/x-www-form-urlencoded; charset=UTF-8",
-            )
-            .form(&form);
-
+    /// O2 Cloud generates the PKCE challenge, stores it in the current
+    /// session (`JSESSIONID`, from `init_session`) and redirects to the
+    /// Telefónica authorization page, whose URL is returned. The user
+    /// enters their phone number and SMS code there.
+    pub async fn start_oauth_login(&self) -> Result<String, O2Error> {
+        let url = format!("{}/sapi/oauth/pkce/authorize", BASE_URL);
         let resp = self
-            .with_device_headers(req, "/ui/html/mobileconnect.html")
+            .no_redirect
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("platform", "web"), ("deviceid", &self.device_id)])
+            .header("referer", "https://cloud.o2online.es/")
             .send()
             .await?;
 
         let status = resp.status();
-        let raw_body = resp.text().await?;
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let raw_body = resp.text().await.unwrap_or_default();
 
-        if !status.is_success() {
-            return Err(O2Error::Auth(format!(
-                "Start Mobile Connect failed (status {}): {}",
+        match location {
+            Some(loc) if status.is_redirection() && loc.starts_with(AUTHORIZE_URL_PREFIX) => {
+                Ok(loc)
+            }
+            _ => Err(O2Error::Auth(format!(
+                "Could not start login (status {}): {}",
                 status,
-                truncate_utf8(&raw_body, 300)
-            )));
+                sapi_error(&raw_body).unwrap_or_else(|| truncate_utf8(&raw_body, 300).into())
+            ))),
         }
-
-        if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Auth(format!(
-                "O2 Cloud rejected the login request for +{}: {}. Check that the \
-                 number is an active O2 line registered in O2 Cloud.",
-                full_msisdn, err
-            )));
-        }
-
-        let body: RawResponse<StartMobileConnectData> =
-            serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Auth(format!(
-                    "Failed to parse start response: {} — body: {}",
-                    e,
-                    truncate_utf8(&raw_body, 300)
-                ))
-            })?;
-
-        Ok(StartMobileConnectResponse {
-            authorizationurl: body.data.authorizationurl,
-        })
     }
 
-    // ------------------------------------------------------------------
-    // Mobile Connect – Step 2: Validate
-    // ------------------------------------------------------------------
-
-    /// Validate the OAuth2 authorization code and state.
+    /// Finish the web login flow by handing the authorization code from
+    /// the Telefónica redirect back to O2 Cloud, in the same session that
+    /// started it.
     ///
-    /// `POST /sapi/credential/mobileconnect?action=validate`
+    /// `GET /sapi/login/oauth?code=...&state=...`
     ///
-    /// Body is JSON: `{"data":{"code":"...","state":"..."}}`
-    pub async fn validate_credential(
+    /// The server exchanges the code and answers with a redirect that
+    /// sets the `JSESSIONID` and `validationKey` cookies.
+    pub async fn complete_oauth_login(
         &self,
         code: &str,
         state: &str,
-    ) -> Result<ValidateCredentialResponse, O2Error> {
-        let url = format!("{}/sapi/credential/mobileconnect", BASE_URL);
-
-        let payload = ValidateCredentialRequest {
-            data: ValidateCredentialRequestData {
-                code: code.to_string(),
-                state: state.to_string(),
-            },
-        };
-
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("action", "validate")])
-            .json(&payload);
-
+    ) -> Result<SessionTokens, O2Error> {
+        let url = format!("{}/sapi/login/oauth", BASE_URL);
         let resp = self
-            .with_device_headers(req, "/ui/html/clientoauth.html")
+            .no_redirect
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("code", code), ("state", state)])
+            .header("referer", "https://t3.o2online.es/")
             .send()
             .await?;
 
         let status = resp.status();
-        let raw_body = resp.text().await?;
+        let jsessionid = set_cookie_value(resp.headers(), "JSESSIONID");
+        let validationkey = set_cookie_value(resp.headers(), "validationKey");
+        let raw_body = resp.text().await.unwrap_or_default();
 
-        if !status.is_success() {
-            return Err(O2Error::Auth(format!(
-                "Validate credential failed (status {}): {}",
-                status,
-                truncate_utf8(&raw_body, 300)
-            )));
-        }
-
-        if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Auth(format!(
-                "Validate credential failed: {}",
-                err
-            )));
-        }
-
-        let body: RawResponse<ValidateCredentialData> =
-            serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Auth(format!(
-                    "Failed to parse validate response: {} — body: {}",
-                    e,
-                    truncate_utf8(&raw_body, 300)
-                ))
-            })?;
-
-        Ok(ValidateCredentialResponse {
-            access_token: body.data.access_token,
-            expires_in: body.data.expires_in,
-            msisdn: body.data.msisdn,
-            platform: body.data.platform,
-            lastrefreshdate: body.data.lastrefreshdate,
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // Login – Final Step
-    // ------------------------------------------------------------------
-
-    /// Complete login and obtain session tokens.
-    ///
-    /// `POST /sapi/login?action=login&responsetime=true`
-    ///
-    /// The body is empty.  Returns the `validationkey`, `jsessionid`,
-    /// JWT `access_token`, and `encryption-token` needed for all
-    /// subsequent API calls.
-    pub async fn login(&self, oauth_auth_header: &str) -> Result<LoginResponse, O2Error> {
-        let url = format!("{}/sapi/login", BASE_URL);
-
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("action", "login"), ("responsetime", "true")])
-            .header("authorization", oauth_auth_header);
-
-        let resp = self
-            .with_device_headers(req, "/ui/html/clientoauth.html")
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let raw_body = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(O2Error::Auth(format!(
+        match (jsessionid, validationkey) {
+            (Some(jsessionid), Some(validationkey)) if !validationkey.is_empty() => {
+                Ok(SessionTokens {
+                    jsessionid,
+                    validationkey,
+                })
+            }
+            _ => Err(O2Error::Auth(format!(
                 "Login failed (status {}): {}",
                 status,
-                truncate_utf8(&raw_body, 300)
-            )));
+                sapi_error(&raw_body).unwrap_or_else(|| "no session returned by O2 Cloud".into())
+            ))),
         }
+    }
 
-        if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Auth(format!("Login failed: {}", err)));
-        }
-
-        let body: RawResponse<LoginData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!(
-                "Failed to parse login response: {} — body: {}",
-                e,
-                truncate_utf8(&raw_body, 300)
-            ))
-        })?;
-
-        Ok(LoginResponse {
-            access_token: body.data.access_token,
-            jsessionid: body.data.jsessionid,
-            validationkey: body.data.validationkey,
-            encryption_token: body.data.encryption_token,
-            roles: body.data.roles,
-        })
+    /// The account's phone number as 9 national digits, from the profile.
+    ///
+    /// `GET /sapi/profile?action=get`
+    pub async fn get_profile_msisdn(&self, auth: &AuthConfig) -> Result<Option<String>, O2Error> {
+        let url = format!("{}/sapi/profile", BASE_URL);
+        let req = self
+            .client
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
+        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let raw_body = resp.text().await?;
+        let value: serde_json::Value = serde_json::from_str(&raw_body)
+            .map_err(|e| O2Error::Parse(format!("Failed to parse profile: {}", e)))?;
+        Ok(value["data"]["user"]["phones"]
+            .as_array()
+            .and_then(|phones| phones.iter().find_map(|p| p["phonenumber"].as_str()))
+            .map(|n| n.strip_prefix("34").unwrap_or(n).to_string()))
     }
 
     // ------------------------------------------------------------------
@@ -513,14 +448,12 @@ impl O2Client {
     /// `POST /sapi/media/folder?action=get`
     pub async fn get_all_folders(&self, auth: &AuthConfig) -> Result<Vec<FolderEntry>, O2Error> {
         let url = format!("{}/sapi/media/folder", BASE_URL);
-        let auth_header = auth.to_sapi_auth_header();
 
         let req = self
             .client
             .post(&url)
             .timeout(REQUEST_TIMEOUT)
-            .query(&[("action", "get"), ("validationkey", &auth.validationkey)])
-            .header("authorization", &auth_header);
+            .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
 
         let resp = self.with_sapi_headers(req, auth).send().await?;
 
@@ -557,7 +490,6 @@ impl O2Client {
     /// `POST /sapi/media?action=get` with JSON body specifying fields.
     pub async fn get_all_media(&self, auth: &AuthConfig) -> Result<Vec<MediaItem>, O2Error> {
         let url = format!("{}/sapi/media", BASE_URL);
-        let auth_header = auth.to_sapi_auth_header();
         let page_size = 1000u64;
         let mut all = Vec::new();
         let mut offset = 0u64;
@@ -593,7 +525,6 @@ impl O2Client {
                     ("limit", &page_size.to_string()),
                     ("offset", &offset.to_string()),
                 ])
-                .header("authorization", &auth_header)
                 .header("content-type", "application/json")
                 .json(&payload);
 
@@ -731,17 +662,25 @@ impl O2Client {
         Ok(())
     }
 
-    /// Soft-delete a media item (move to trash).
+    /// Soft-delete files (move them to the trash), as the web client
+    /// does: one request for a batch of IDs.
     ///
-    /// `POST /sapi/media?action=softdelete&id=<id>`
-    pub async fn delete_media(&self, media_id: u64, auth: &AuthConfig) -> Result<(), O2Error> {
-        let url = format!("{}/sapi/media", BASE_URL);
+    /// `POST /sapi/media/file?action=delete&softdelete=true`
+    /// with body `{"data":{"files":[<id>, ...]}}`
+    pub async fn delete_files(&self, media_ids: &[u64], auth: &AuthConfig) -> Result<(), O2Error> {
+        let url = format!("{}/sapi/media/file", BASE_URL);
+        let payload = serde_json::json!({ "data": { "files": media_ids } });
 
-        let req = self.client.post(&url).timeout(REQUEST_TIMEOUT).query(&[
-            ("action", "softdelete"),
-            ("id", &media_id.to_string()),
-            ("validationkey", &auth.validationkey),
-        ]);
+        let req = self
+            .client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[
+                ("action", "delete"),
+                ("softdelete", "true"),
+                ("validationkey", &auth.validationkey),
+            ])
+            .json(&payload);
 
         let resp = self.with_sapi_headers(req, auth).send().await?;
 
@@ -755,6 +694,9 @@ impl O2Client {
                 truncate_utf8(&raw_body, 300)
             )));
         }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Delete failed: {}", err)));
+        }
 
         Ok(())
     }
@@ -763,79 +705,23 @@ impl O2Client {
     // Upload
     // ------------------------------------------------------------------
 
-    /// Save file metadata and obtain a media ID for the subsequent byte upload.
-    pub async fn upload_metadata(
+    /// Upload a file in one request, as the web client does: a multipart
+    /// body with the metadata JSON (`data`) and the file contents (`file`),
+    /// streamed from disk. Returns the new media ID.
+    ///
+    /// `POST https://upload.cloud.o2online.es/sapi/upload?action=save`
+    ///
+    /// No `REQUEST_TIMEOUT`: large files can legitimately take longer.
+    pub async fn upload_file(
         &self,
         meta: &UploadMeta,
-        auth: &AuthConfig,
-    ) -> Result<UploadMetaResponse, O2Error> {
-        let url = format!("{}/sapi/upload/file", BASE_URL);
-        let auth_header = auth.to_sapi_auth_header();
-
-        let payload = RawRequest { data: meta };
-        let json_body = serde_json::to_vec(&payload)
-            .map_err(|e| O2Error::Api(format!("Failed to serialize upload metadata: {}", e)))?;
-
-        let req = self
-            .client
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[
-                ("action", "save-metadata"),
-                ("responsetime", "true"),
-                ("lastupdate", "true"),
-                ("validationkey", &auth.validationkey),
-            ])
-            .header("content-type", "application/octet-stream")
-            .header("authorization", &auth_header)
-            .body(json_body);
-
-        let resp = self.with_sapi_headers(req, auth).send().await?;
-
-        let status = resp.status();
-        let raw_body = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(O2Error::Api(format!(
-                "Upload metadata failed (status {}): {}",
-                status,
-                truncate_utf8(&raw_body, 300)
-            )));
-        }
-
-        // Check for error-in-200 response
-        if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Api(format!("Upload metadata rejected: {}", err)));
-        }
-
-        let resp_data: UploadMetaResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Parse(format!(
-                "Failed to parse upload metadata response: {} — body: {}",
-                e,
-                truncate_utf8(&raw_body, 300)
-            ))
-        })?;
-
-        Ok(resp_data)
-    }
-
-    /// Upload the raw file bytes for a previously-saved metadata entry.
-    ///
-    /// Streams `path` from disk instead of loading it into memory. The
-    /// body is a stream of unknown `size_hint` to reqwest, so we set
-    /// `Content-Length` explicitly — hyper honors a manually-set
-    /// Content-Length header over chunked transfer-encoding when one is
-    /// present, which keeps the wire format byte-for-byte identical to
-    /// the old `Vec<u8>`-body upload.
-    pub async fn upload_bytes(
-        &self,
-        media_id: &str,
         path: &std::path::Path,
-        size: u64,
         auth: &AuthConfig,
-    ) -> Result<(), O2Error> {
-        let url = format!("{}/sapi/upload/file", UPLOAD_URL);
-        let auth_header = auth.to_sapi_auth_header();
+    ) -> Result<u64, O2Error> {
+        let url = format!("{}/sapi/upload", UPLOAD_URL);
+
+        let metadata = serde_json::to_string(&RawRequest { data: meta })
+            .map_err(|e| O2Error::Api(format!("Failed to serialize upload metadata: {}", e)))?;
 
         let file = tokio::fs::File::open(path).await.map_err(|e| {
             O2Error::Io(std::io::Error::new(
@@ -844,23 +730,19 @@ impl O2Client {
             ))
         })?;
         let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+        let file_part = reqwest::multipart::Part::stream_with_length(body, meta.size)
+            .file_name(meta.name.clone())
+            .mime_str(&meta.contenttype)?;
+        let form = reqwest::multipart::Form::new()
+            .text("data", metadata)
+            .part("file", file_part);
 
         let req = self
             .client
             .post(&url)
-            .query(&[
-                ("action", "save"),
-                ("id", media_id),
-                ("lastupdate", "true"),
-                ("acceptasynchronous", "true"),
-                ("validationkey", &auth.validationkey),
-            ])
-            .header("content-type", "application/octet-stream")
-            .header("authorization", &auth_header)
-            .header(reqwest::header::CONTENT_LENGTH, size)
-            .header("x-funambol-file-size", size.to_string())
-            .header("x-funambol-id", media_id)
-            .body(body);
+            .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
+            .header("referer", "https://cloud.o2online.es/")
+            .multipart(form);
 
         let resp = self.with_sapi_headers(req, auth).send().await?;
 
@@ -869,13 +751,24 @@ impl O2Client {
 
         if !status.is_success() {
             return Err(O2Error::Api(format!(
-                "Upload bytes failed (status {}): {}",
+                "Upload failed (status {}): {}",
                 status,
                 truncate_utf8(&raw_body, 300)
             )));
         }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Upload rejected: {}", err)));
+        }
 
-        Ok(())
+        let resp_data: UploadResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            O2Error::Parse(format!(
+                "Failed to parse upload response: {} — body: {}",
+                e,
+                truncate_utf8(&raw_body, 300)
+            ))
+        })?;
+
+        Ok(resp_data.id)
     }
 
     // ------------------------------------------------------------------
@@ -1000,88 +893,13 @@ pub struct OAuthInfo {
     pub accesstokenurl: Option<String>,
 }
 
-// -- Start Mobile Connect ----------------------------------------------
+// -- OAuth login -------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct StartMobileConnectData {
-    authorizationurl: String,
-}
-
+/// Session cookies returned by the OAuth login callback.
 #[derive(Debug)]
-pub struct StartMobileConnectResponse {
-    pub authorizationurl: String,
-}
-
-// -- Validate Credential -----------------------------------------------
-
-#[derive(Debug, Serialize)]
-struct ValidateCredentialRequest {
-    data: ValidateCredentialRequestData,
-}
-
-#[derive(Debug, Serialize)]
-struct ValidateCredentialRequestData {
-    code: String,
-    state: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValidateCredentialData {
-    access_token: String,
-    expires_in: String,
-    msisdn: String,
-    #[serde(default)]
-    platform: String,
-    #[serde(default)]
-    lastrefreshdate: u64,
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct ValidateCredentialResponse {
-    pub access_token: String,
-    pub expires_in: String,
-    pub msisdn: String,
-    pub platform: String,
-    pub lastrefreshdate: u64,
-}
-
-impl ValidateCredentialResponse {
-    /// Build the `Authorization: oauth <base64>` header value required
-    /// by the login endpoint.  The format is a base64-encoded JSON
-    /// object that wraps the validate response data with camelCase keys.
-    pub fn to_oauth_auth_header(&self) -> String {
-        #[derive(Serialize)]
-        struct OAuthData {
-            accesstoken: String,
-            expiresin: String,
-            lastrefreshdate: u64,
-            msisdn: String,
-            platform: String,
-            refreshtoken: String,
-        }
-
-        #[derive(Serialize)]
-        struct OAuthPayload {
-            data: OAuthData,
-        }
-
-        use base64::Engine;
-        let payload = OAuthPayload {
-            data: OAuthData {
-                accesstoken: self.access_token.clone(),
-                expiresin: self.expires_in.clone(),
-                lastrefreshdate: self.lastrefreshdate,
-                msisdn: self.msisdn.clone(),
-                platform: self.platform.clone(),
-                refreshtoken: String::new(),
-            },
-        };
-
-        let json = serde_json::to_string(&payload).unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
-        format!("oauth {}", b64)
-    }
+pub struct SessionTokens {
+    pub jsessionid: String,
+    pub validationkey: String,
 }
 
 // -- Login -------------------------------------------------------------
@@ -1209,16 +1027,46 @@ pub struct UploadMeta {
     pub size: u64,
 }
 
+/// Response to an upload: `{"success": "...", "id": "1539028003", ...}`.
 #[derive(Debug, Deserialize)]
-pub struct UploadMetaResponse {
-    pub id: String,
-    #[serde(flatten)]
-    _rest: serde_json::Value,
+struct UploadResponse {
+    #[serde(deserialize_with = "deserialize_id")]
+    id: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generate_device_id_matches_web_format() {
+        let a = generate_device_id();
+        let b = generate_device_id();
+        let hex = a.strip_prefix("web-").expect("web- prefix");
+        assert_eq!(hex.len(), 32, "{a}");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_set_cookie_value() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for v in [
+            "JSESSIONID=abc.node1; Max-Age=86400; Domain=cloud.o2online.es; Path=/; Secure; HttpOnly",
+            "validationKey=0123456789abcdef; Path=/; Secure",
+        ] {
+            headers.append(header::SET_COOKIE, v.parse().unwrap());
+        }
+        assert_eq!(
+            set_cookie_value(&headers, "JSESSIONID").as_deref(),
+            Some("abc.node1")
+        );
+        assert_eq!(
+            set_cookie_value(&headers, "validationKey").as_deref(),
+            Some("0123456789abcdef")
+        );
+        assert_eq!(set_cookie_value(&headers, "validationkey"), None);
+    }
 
     #[test]
     fn test_sapi_error() {
