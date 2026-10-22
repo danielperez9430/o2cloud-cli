@@ -59,6 +59,8 @@ All notable changes to o2cloud-cli will be documented in this file.
   directory.
 
 ### Changed
+- `download` accepts a file path or a unique file name as well as an ID
+  (`o2cloud download /docs/a.txt`), resolved like `rm`.
 - `rm` accepts file paths (`o2cloud rm /docs/a.txt`), and the recursive
   delete prompt now shows which folder will be moved to the trash (it
   previously said "permanently delete", but deletes are soft).

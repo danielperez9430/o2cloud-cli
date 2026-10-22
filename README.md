@@ -47,7 +47,8 @@ o2cloud upload-dir ./my-folder       # recursive
 o2cloud upload-zip ./my-folder       # zip + upload
 
 # Download
-o2cloud download 1195003130          # saved under its cloud name in the current dir
+o2cloud download 1195003130          # by ID, saved under its cloud name in the current dir
+o2cloud download /path/to/file.txt   # by path (or just the name, if it is unique)
 o2cloud download 1195003130 -o file.txt
 
 # Delete (trash)
