@@ -19,6 +19,18 @@ All notable changes to o2cloud-cli will be documented in this file.
   directory. Only the final file-name component is used now.
 - `download` could overwrite a file created between the existence check
   and the download; the file is now created with `create_new`.
+- `upload-dir` and `upload-zip` recursed forever on a symlink pointing
+  back to an ancestor directory. Symlinked directories are now skipped
+  (with a warning); symlinked files are still followed.
+
+### Changed
+- Directory walking, zipping, and file metadata reads now run off the
+  async runtime (`spawn_blocking` / `tokio::fs`), and `upload-dir` reads
+  each file's metadata once instead of twice.
+- More accurate upload content types for video (`mov`, `avi`, `mkv`,
+  `webm`), audio (`wav`, `flac`, `aac`, `ogg`, `m4a`), `zip`/`gz` and
+  `heic`; previously all video was sent as `video/mp4` and all audio as
+  `audio/mpeg`.
 
 ### Security
 - `auth.json` is created with mode 0600 from the start (it was previously

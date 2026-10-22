@@ -69,10 +69,22 @@ pub fn mime_type_from_name(name: &str) -> String {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
+        "heic" => "image/heic",
         "pdf" => "application/pdf",
-        "zip" | "gz" | "tar" | "bz2" | "xz" | "7z" => "application/octet-stream",
-        "mp4" | "mov" | "avi" | "mkv" | "webm" => "video/mp4",
-        "mp3" | "wav" | "flac" | "aac" | "ogg" => "audio/mpeg",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" | "bz2" | "xz" | "7z" => "application/octet-stream",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "ogg" => "audio/ogg",
         "php" => "application/x-httpd-php",
         _ => "application/octet-stream",
     }
@@ -101,6 +113,9 @@ mod tests {
         assert_eq!(mime_type_from_name("doc.pdf"), "application/pdf");
         assert_eq!(mime_type_from_name("movie.mp4"), "video/mp4");
         assert_eq!(mime_type_from_name("song.mp3"), "audio/mpeg");
+        assert_eq!(mime_type_from_name("clip.MOV"), "video/quicktime");
+        assert_eq!(mime_type_from_name("song.flac"), "audio/flac");
+        assert_eq!(mime_type_from_name("backup.zip"), "application/zip");
         assert_eq!(mime_type_from_name("script.php"), "application/x-httpd-php");
         assert_eq!(
             mime_type_from_name("unknown.xyz"),

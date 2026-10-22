@@ -334,7 +334,7 @@ pub async fn upload_file(
     folder_id: Option<u64>,
 ) -> Result<(), O2Error> {
     // Read file metadata
-    let metadata = std::fs::metadata(local_path).map_err(|e| {
+    let metadata = tokio::fs::metadata(local_path).await.map_err(|e| {
         O2Error::Io(std::io::Error::new(
             e.kind(),
             format!("Cannot read file {}: {}", local_path.display(), e),
@@ -426,16 +426,22 @@ pub async fn upload_dir(
 
     // Collect all files and directories to upload, skipping hidden entries
     // (dotfiles/dotdirs like .git, .DS_Store) which O2 Cloud rejects.
-    let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
-    let mut skipped_hidden = 0u32;
-    walk_dir(local_dir, &mut entries, &mut skipped_hidden)?;
+    // The walk is synchronous filesystem work, so keep it off the runtime.
+    let dir = local_dir.to_path_buf();
+    let (entries, skipped_hidden, total_size) = spawn_blocking_io(move || {
+        let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
+        let mut skipped_hidden = 0u32;
+        walk_dir(&dir, &mut entries, &mut skipped_hidden)?;
+        Ok((entries, skipped_hidden, dir_size(&dir)))
+    })
+    .await?;
 
     // Count files for progress
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
     eprintln!(
         "→ Uploading {} ({}) — {} files, {} dirs...",
         local_dir.display(),
-        format_size(dir_size(local_dir)),
+        format_size(total_size),
         file_count,
         entries.iter().filter(|(_, is_dir)| *is_dir).count() - 1, // -1 for root
     );
@@ -490,7 +496,8 @@ pub async fn upload_dir(
             .into_owned();
 
         attempted += 1;
-        let size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+        let file_meta = tokio::fs::metadata(file_path).await.ok();
+        let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
 
         eprintln!(
             "  [{}/{}] 📄 {} ({})",
@@ -501,9 +508,7 @@ pub async fn upload_dir(
         );
 
         // Upload via metadata + bytes
-        let modified = std::fs::metadata(file_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let modified = file_meta.and_then(|m| m.modified().ok());
         let now = std::time::SystemTime::now();
         let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
         let contenttype = mime_type_from_name(&name);
@@ -554,9 +559,28 @@ pub async fn upload_dir(
     Ok(())
 }
 
+/// How a directory entry should be treated when walking a local tree.
+enum EntryKind {
+    Dir,
+    File,
+    /// A symlink pointing at a directory. Never followed: a link back to
+    /// an ancestor would otherwise recurse forever.
+    SymlinkedDir,
+}
+
+fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {
+    // `DirEntry::file_type` does not follow symlinks, unlike `Path::is_dir`.
+    match entry.file_type() {
+        Ok(t) if t.is_dir() => EntryKind::Dir,
+        Ok(t) if t.is_symlink() && entry.path().is_dir() => EntryKind::SymlinkedDir,
+        _ => EntryKind::File,
+    }
+}
+
 /// Recursively collect files and directories under `dir`, skipping any
 /// entry (file or directory) whose name starts with `.` — O2 Cloud
 /// rejects dotfiles, and dotdirs like `.git` should never be uploaded.
+/// Symlinked files are followed; symlinked directories are skipped.
 fn walk_dir(
     dir: &Path,
     entries: &mut Vec<(PathBuf, bool)>,
@@ -584,10 +608,12 @@ fn walk_dir(
             *skipped_hidden += 1;
             continue;
         }
-        if path.is_dir() {
-            walk_dir(&path, entries, skipped_hidden)?;
-        } else {
-            entries.push((path, false));
+        match entry_kind(&entry) {
+            EntryKind::Dir => walk_dir(&path, entries, skipped_hidden)?,
+            EntryKind::File => entries.push((path, false)),
+            EntryKind::SymlinkedDir => {
+                eprintln!("  ⚠ Skipping symlinked directory {}", path.display())
+            }
         }
     }
     Ok(())
@@ -605,10 +631,14 @@ fn dir_size(dir: &Path) -> u64 {
             if is_hidden {
                 continue;
             }
-            if path.is_dir() {
-                total += dir_size(&path);
-            } else if let Ok(meta) = std::fs::metadata(&path) {
-                total += meta.len();
+            match entry_kind(&entry) {
+                EntryKind::Dir => total += dir_size(&path),
+                EntryKind::File => {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        total += meta.len();
+                    }
+                }
+                EntryKind::SymlinkedDir => {}
             }
         }
     }
@@ -652,6 +682,20 @@ pub async fn upload_zip(
     result
 }
 
+/// Run synchronous filesystem work on tokio's blocking thread pool.
+async fn spawn_blocking_io<T, F>(f: F) -> Result<T, O2Error>
+where
+    F: FnOnce() -> Result<T, O2Error> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        O2Error::Io(std::io::Error::other(format!(
+            "Background task failed: {}",
+            e
+        )))
+    })?
+}
+
 /// Create a new, uniquely named directory under the system temp dir that
 /// only the current user can access.
 fn create_private_temp_dir() -> Result<PathBuf, O2Error> {
@@ -686,7 +730,8 @@ async fn zip_and_upload(
     folder_id: Option<u64>,
 ) -> Result<(), O2Error> {
     eprintln!("→ Zipping {}...", local_dir.display());
-    let total_size = build_zip(local_dir, tmp_zip)?;
+    let (dir, zip_path) = (local_dir.to_path_buf(), tmp_zip.to_path_buf());
+    let total_size = spawn_blocking_io(move || build_zip(&dir, &zip_path)).await?;
     eprintln!(
         "  Created {} ({})",
         tmp_zip.display(),
@@ -739,31 +784,35 @@ fn add_dir_to_zip(
         let path = entry.path();
         let relative = path.strip_prefix(base).unwrap();
 
-        if path.is_dir() {
-            add_dir_to_zip(zip, base, &path, options)?;
-        } else {
-            // ZIP entries always use `/` as the separator, regardless of
-            // the host OS path separator (important on Windows).
-            let entry_name = relative
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            zip.start_file(&entry_name, options)
-                .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
-            let mut src = std::fs::File::open(&path).map_err(|e| {
-                O2Error::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("Cannot read {}: {}", path.display(), e),
-                ))
-            })?;
-            std::io::copy(&mut src, zip).map_err(|e| {
-                O2Error::Io(std::io::Error::other(format!(
-                    "Zip write error for {}: {}",
-                    path.display(),
-                    e
-                )))
-            })?;
+        match entry_kind(&entry) {
+            EntryKind::Dir => add_dir_to_zip(zip, base, &path, options)?,
+            EntryKind::SymlinkedDir => {
+                eprintln!("  ⚠ Skipping symlinked directory {}", path.display())
+            }
+            EntryKind::File => {
+                // ZIP entries always use `/` as the separator, regardless of
+                // the host OS path separator (important on Windows).
+                let entry_name = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                zip.start_file(&entry_name, options)
+                    .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
+                let mut src = std::fs::File::open(&path).map_err(|e| {
+                    O2Error::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("Cannot read {}: {}", path.display(), e),
+                    ))
+                })?;
+                std::io::copy(&mut src, zip).map_err(|e| {
+                    O2Error::Io(std::io::Error::other(format!(
+                        "Zip write error for {}: {}",
+                        path.display(),
+                        e
+                    )))
+                })?;
+            }
         }
     }
     Ok(())
@@ -1285,6 +1334,40 @@ mod tests {
         assert_eq!(count_recursive(3, &folders, &media), (2, 0));
         // Root has no direct files, only the "docs" subtree.
         assert_eq!(count_recursive(1, &folders, &media), (3, 2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_walk_dir_and_zip_skip_symlinked_dir_loops() {
+        let tmp = std::env::temp_dir().join(format!("o2cli_test_symlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("f.txt"), b"x").unwrap();
+        std::fs::write(tmp.join("outside.txt"), b"linked").unwrap();
+        // Directory link back to an ancestor (would recurse forever) and a
+        // file link (should be followed).
+        std::os::unix::fs::symlink(&src, src.join("sub").join("loop")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("outside.txt"), src.join("link.txt")).unwrap();
+
+        let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+        let mut skipped = 0u32;
+        walk_dir(&src, &mut entries, &mut skipped).unwrap();
+        let mut files: Vec<_> = entries
+            .iter()
+            .filter(|(_, is_dir)| !is_dir)
+            .map(|(p, _)| p.strip_prefix(&src).unwrap().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(files, vec!["link.txt", "sub/f.txt"]);
+        assert_eq!(dir_size(&src), 7);
+
+        let zip_path = tmp.join("out.zip");
+        build_zip(&src, &zip_path).unwrap();
+        let archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert_eq!(archive.len(), 2);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
