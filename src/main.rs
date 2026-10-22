@@ -41,7 +41,7 @@ enum Commands {
 
     /// List files (default: root folder contents)
     Ls {
-        /// Folder path or ID (e.g. /DMHAIR/app or 24440698)
+        /// Folder path or ID (e.g. /Photos/2024 or 12345678)
         path: Option<String>,
 
         /// Show all files across all folders
@@ -85,7 +85,7 @@ enum Commands {
 
     /// Delete a file or folder (move to trash)
     Rm {
-        /// File/folder ID or path (e.g. 1195003130 or /DMHAIR)
+        /// File/folder ID or path (e.g. 1234567890 or /Photos)
         target: String,
 
         /// Recursive: delete folder and all its contents
