@@ -184,7 +184,8 @@ fn print_tree(
 ///
 /// Supported formats:
 /// - `None` → root folder
-/// - `"24440698"` (numeric) → direct ID
+/// - `"24440698"` (numeric) → direct ID, or a root folder with that name
+///   (e.g. `2024`) if no folder has that ID
 /// - `"/DMHAIR/app"` (absolute path) → traverse tree
 /// - `"app"` (single name) → search direct children of root
 fn resolve_target(
@@ -203,16 +204,12 @@ fn resolve_target(
         }
     };
 
-    // Numeric → direct folder ID (must exist)
+    // Numeric → direct folder ID; otherwise fall through and treat it as
+    // a folder name, so folders like `2024` stay reachable.
     if let Ok(id) = path.parse::<u64>() {
-        return if folder_name.contains_key(&id) {
-            Ok(id)
-        } else {
-            Err(O2Error::NotFound(format!(
-                "Folder id {} not found. Try `o2cloud ls` to browse from root.",
-                id
-            )))
-        };
+        if folder_name.contains_key(&id) {
+            return Ok(id);
+        }
     }
 
     // Absolute path → split and traverse
@@ -942,7 +939,8 @@ pub async fn find(client: &O2Client, auth: &AuthConfig, query: &str) -> Result<(
 // Delete
 // ------------------------------------------------------------------
 
-/// Delete a file or folder.  `target` can be a numeric ID or a path.
+/// Delete a file or folder.  `target` can be a numeric ID, a folder path,
+/// a file path (e.g. `/docs/a.txt`), or a bare file name if it is unique.
 /// With `--recursive`, deletes a folder and all its contents; unless
 /// `assume_yes` is set, this prompts for confirmation first.
 pub async fn delete_target(
@@ -953,47 +951,135 @@ pub async fn delete_target(
     assume_yes: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-    // Try numeric ID first
+    // Numeric ID: a folder or a file. If it matches neither, fall through
+    // and treat it as a name (e.g. a folder called `2024`).
     if let Ok(id) = target.parse::<u64>() {
-        // Is it a folder or a file?
         if folder_name.contains_key(&id) {
-            let media = client.get_all_media(auth).await?;
-            if !confirm_recursive_delete(id, &folders, &media, recursive, assume_yes)? {
-                eprintln!("Aborted.");
-                return Ok(());
-            }
-            return delete_folder(client, auth, id, &folders, &media, recursive).await;
-        } else {
-            return delete_file(client, auth, id).await;
+            return delete_folder_checked(
+                client,
+                auth,
+                id,
+                &folders,
+                &folder_name,
+                &media,
+                recursive,
+                assume_yes,
+            )
+            .await;
+        }
+        if let Some(item) = media.iter().find(|m| m.id == id) {
+            return delete_file(client, auth, item).await;
         }
     }
 
-    // Resolve as path
-    let path = Some(target.to_string());
-    match resolve_target(path, &folders, &folder_name) {
-        Ok(folder_id) => {
-            let media = client.get_all_media(auth).await?;
-            if !confirm_recursive_delete(folder_id, &folders, &media, recursive, assume_yes)? {
-                eprintln!("Aborted.");
-                return Ok(());
-            }
-            return delete_folder(client, auth, folder_id, &folders, &media, recursive).await;
+    if let Ok(folder_id) = resolve_target(Some(target.to_string()), &folders, &folder_name) {
+        return delete_folder_checked(
+            client,
+            auth,
+            folder_id,
+            &folders,
+            &folder_name,
+            &media,
+            recursive,
+            assume_yes,
+        )
+        .await;
+    }
+
+    let item = find_file(target, &folders, &folder_name, &media)?;
+    delete_file(client, auth, item).await
+}
+
+/// Find exactly one file by path (`/docs/a.txt`) or by bare name
+/// (`a.txt`, searched across all folders). Errors if nothing matches, or
+/// if a bare name matches several files — deleting an arbitrary one of
+/// them would be a guess.
+fn find_file<'a>(
+    target: &str,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+    media: &'a [crate::api::MediaItem],
+) -> Result<&'a crate::api::MediaItem, O2Error> {
+    let not_found = || {
+        O2Error::NotFound(format!(
+            "'{}'. Use a numeric ID, a folder path, or a file path.",
+            target
+        ))
+    };
+
+    let matches: Vec<&crate::api::MediaItem> = match target.rsplit_once('/') {
+        Some((dir, name)) => {
+            let dir = if dir.is_empty() { "/" } else { dir };
+            let folder_id = resolve_target(Some(dir.to_string()), folders, folder_name)
+                .map_err(|_| not_found())?;
+            media
+                .iter()
+                .filter(|m| m.folderid == Some(folder_id) && m.name.as_deref() == Some(name))
+                .collect()
         }
-        Err(_) => {
-            // Not a folder — maybe it's a filename? Search media
-            let media = client.get_all_media(auth).await?;
-            if let Some(item) = media.iter().find(|m| m.name.as_deref() == Some(target)) {
-                return delete_file(client, auth, item.id).await;
-            }
+        None => media
+            .iter()
+            .filter(|m| m.name.as_deref() == Some(target))
+            .collect(),
+    };
+
+    match matches.as_slice() {
+        [] => Err(not_found()),
+        [item] => Ok(item),
+        many => {
+            let listing: Vec<String> = many
+                .iter()
+                .map(|m| {
+                    let dir = m
+                        .folderid
+                        .map(|fid| resolve_path(fid, folder_name, folders))
+                        .unwrap_or_else(|| "/".into());
+                    format!("  {}  {}", m.id, dir)
+                })
+                .collect();
             Err(O2Error::NotFound(format!(
-                "'{}'. Use a numeric ID or folder path.",
-                target
+                "'{}' is ambiguous — {} files have that name:\n{}\nUse the ID or the full path.",
+                target,
+                many.len(),
+                listing.join("\n")
             )))
         }
     }
+}
+
+/// The account's root folder (`/`). Deleting it would trash everything.
+fn is_root_folder(folder_id: u64, folders: &[crate::api::FolderEntry]) -> bool {
+    folders.iter().any(|f| f.id == folder_id && f.name == "/")
+}
+
+/// Guard, confirm, then delete a folder.
+#[allow(clippy::too_many_arguments)]
+async fn delete_folder_checked(
+    client: &O2Client,
+    auth: &AuthConfig,
+    folder_id: u64,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+    media: &[crate::api::MediaItem],
+    recursive: bool,
+    assume_yes: bool,
+) -> Result<(), O2Error> {
+    if is_root_folder(folder_id, folders) {
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to delete the root folder",
+        )));
+    }
+    let path = resolve_path(folder_id, folder_name, folders);
+    if !confirm_recursive_delete(folder_id, &path, folders, media, recursive, assume_yes)? {
+        eprintln!("Aborted.");
+        return Ok(());
+    }
+    delete_folder(client, auth, folder_id, folders, media, recursive).await
 }
 
 /// Count all files and subfolders nested (at any depth) under `folder_id`.
@@ -1022,6 +1108,7 @@ fn count_recursive(
 /// always proceed without prompting.
 fn confirm_recursive_delete(
     folder_id: u64,
+    path: &str,
     folders: &[crate::api::FolderEntry],
     media: &[crate::api::MediaItem],
     recursive: bool,
@@ -1040,16 +1127,16 @@ fn confirm_recursive_delete(
         return Err(O2Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "refusing to delete {} file(s) and {} subfolder(s) without a TTY; \
+                "refusing to delete {}/ ({} file(s), {} subfolder(s)) without a TTY; \
                  re-run with --yes (-y) to confirm non-interactively",
-                files, dirs
+                path, files, dirs
             ),
         )));
     }
 
     eprint!(
-        "⚠ This will permanently delete {} file(s) and {} subfolder(s). Continue? [y/N] ",
-        files, dirs
+        "⚠ This will move {}/ and its {} file(s) and {} subfolder(s) to the trash. Continue? [y/N] ",
+        path, files, dirs
     );
     let mut input = String::new();
     std::io::stdin()
@@ -1080,14 +1167,16 @@ async fn delete_folder(
     let child_dirs: Vec<_> = folders.iter().filter(|f| f.parentid == folder_id).collect();
 
     if !recursive && (!child_dirs.is_empty() || file_count > 0) {
-        eprintln!(
-            "📁 {}/ contains {} files and {} subfolders.",
-            name,
-            file_count,
-            child_dirs.len()
-        );
-        eprintln!("Use --recursive (-r) to delete folder and all its contents.");
-        return Ok(());
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{}/ contains {} files and {} subfolders; use --recursive (-r) \
+                 to delete the folder and all its contents",
+                name,
+                file_count,
+                child_dirs.len()
+            ),
+        )));
     }
 
     // Recursively delete child folders
@@ -1115,13 +1204,13 @@ async fn delete_folder(
 }
 
 /// Soft-delete a file by media ID (move to trash).
-async fn delete_file(client: &O2Client, auth: &AuthConfig, media_id: u64) -> Result<(), O2Error> {
-    let media = client.get_all_media(auth).await?;
-    let name = media
-        .iter()
-        .find(|m| m.id == media_id)
-        .and_then(|m| m.name.as_deref())
-        .unwrap_or("?");
+async fn delete_file(
+    client: &O2Client,
+    auth: &AuthConfig,
+    item: &crate::api::MediaItem,
+) -> Result<(), O2Error> {
+    let media_id = item.id;
+    let name = item.name.as_deref().unwrap_or("?");
 
     eprintln!("→ Deleting {} ({})...", name, media_id);
     client.delete_media(media_id, auth).await?;
@@ -1297,6 +1386,81 @@ mod tests {
         let folder_name = std::collections::HashMap::from([(1u64, "/".into())]);
 
         assert!(resolve_target(Some("/nope".into()), &folders, &folder_name).is_err());
+    }
+
+    fn sample_tree() -> (
+        Vec<crate::api::FolderEntry>,
+        HashMap<u64, String>,
+        Vec<crate::api::MediaItem>,
+    ) {
+        let folders = vec![
+            crate::api::FolderEntry {
+                id: 1,
+                name: "/".into(),
+                parentid: 0,
+            },
+            crate::api::FolderEntry {
+                id: 2,
+                name: "docs".into(),
+                parentid: 1,
+            },
+            crate::api::FolderEntry {
+                id: 3,
+                name: "2024".into(),
+                parentid: 1,
+            },
+        ];
+        let folder_name = folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let media: Vec<crate::api::MediaItem> = serde_json::from_str(
+            r#"[
+                {"id": 100, "name": "a.txt", "folderid": 2},
+                {"id": 101, "name": "dup.txt", "folderid": 2},
+                {"id": 102, "name": "dup.txt", "folderid": 3},
+                {"id": 103, "name": "root.txt", "folderid": 1}
+            ]"#,
+        )
+        .unwrap();
+        (folders, folder_name, media)
+    }
+
+    #[test]
+    fn test_resolve_target_numeric_name_fallback() {
+        let (folders, folder_name, _) = sample_tree();
+        // "2024" is not a folder ID, but it is a folder name under root.
+        assert_eq!(
+            resolve_target(Some("2024".into()), &folders, &folder_name).unwrap(),
+            3
+        );
+        // A real ID still wins.
+        assert_eq!(
+            resolve_target(Some("2".into()), &folders, &folder_name).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_find_file() {
+        let (folders, folder_name, media) = sample_tree();
+        let find = |t: &str| find_file(t, &folders, &folder_name, &media).map(|m| m.id);
+
+        assert_eq!(find("a.txt").unwrap(), 100);
+        assert_eq!(find("/docs/a.txt").unwrap(), 100);
+        assert_eq!(find("/root.txt").unwrap(), 103);
+        assert_eq!(find("/2024/dup.txt").unwrap(), 102);
+        // Same bare name in two folders: refuse to guess.
+        let err = find("dup.txt").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(find("missing.txt").is_err());
+        assert!(find("/nope/a.txt").is_err());
+        assert!(find("/2024/a.txt").is_err());
+    }
+
+    #[test]
+    fn test_is_root_folder() {
+        let (folders, _, _) = sample_tree();
+        assert!(is_root_folder(1, &folders));
+        assert!(!is_root_folder(2, &folders));
+        assert!(!is_root_folder(999, &folders));
     }
 
     #[test]
