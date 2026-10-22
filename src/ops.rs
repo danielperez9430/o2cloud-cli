@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::api::{O2Client, UploadMeta, UploadMetaResponse};
@@ -634,13 +633,73 @@ pub async fn upload_zip(
         )));
     }
 
-    let zip_name = format!("{}.zip", local_dir.file_name().unwrap().to_string_lossy());
-    let tmp_zip = std::env::temp_dir().join(&zip_name);
+    // `file_name()` is `None` for paths like `.` or `..`, so resolve first.
+    let dir_name = local_dir
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "archive".to_string());
+    let zip_name = format!("{}.zip", dir_name);
 
+    // Build the zip inside a fresh private directory rather than directly
+    // in the shared temp dir, so a pre-existing file or symlink planted at
+    // a predictable path can't be clobbered or followed. The directory is
+    // removed afterwards whether or not the upload succeeds.
+    let tmp_dir = create_private_temp_dir()?;
+    let tmp_zip = tmp_dir.join(&zip_name);
+    let result = zip_and_upload(client, auth, local_dir, &tmp_zip, folder_id).await;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    result
+}
+
+/// Create a new, uniquely named directory under the system temp dir that
+/// only the current user can access.
+fn create_private_temp_dir() -> Result<PathBuf, O2Error> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let dir =
+        std::env::temp_dir().join(format!("o2cloud-zip-{}-{:08x}", std::process::id(), nanos));
+
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // `create` (non-recursive) fails if the path already exists.
+    builder.create(&dir).map_err(|e| {
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("Cannot create temp dir {}: {}", dir.display(), e),
+        ))
+    })?;
+    Ok(dir)
+}
+
+async fn zip_and_upload(
+    client: &O2Client,
+    auth: &AuthConfig,
+    local_dir: &Path,
+    tmp_zip: &Path,
+    folder_id: Option<u64>,
+) -> Result<(), O2Error> {
     eprintln!("→ Zipping {}...", local_dir.display());
+    let total_size = build_zip(local_dir, tmp_zip)?;
+    eprintln!(
+        "  Created {} ({})",
+        tmp_zip.display(),
+        format_size(total_size)
+    );
 
-    // Create zip
-    let file = std::fs::File::create(&tmp_zip).map_err(|e| {
+    upload_file(client, auth, tmp_zip, folder_id).await
+}
+
+/// Write a complete zip archive of `local_dir` to `zip_path`, returning
+/// its size in bytes.
+fn build_zip(local_dir: &Path, zip_path: &Path) -> Result<u64, O2Error> {
+    let file = std::fs::File::create(zip_path).map_err(|e| {
         O2Error::Io(std::io::Error::new(
             e.kind(),
             format!("Cannot create zip: {}", e),
@@ -650,22 +709,13 @@ pub async fn upload_zip(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let base = local_dir;
-    add_dir_to_zip(&mut zip, base, base, options)?;
+    add_dir_to_zip(&mut zip, local_dir, local_dir, options)?;
+    // Write the central directory; without this the archive is unreadable.
+    let file = zip
+        .finish()
+        .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
 
-    let total_size = std::fs::metadata(&tmp_zip).map(|m| m.len()).unwrap_or(0);
-    eprintln!(
-        "  Created {} ({})",
-        tmp_zip.display(),
-        format_size(total_size)
-    );
-
-    // Upload the zip
-    upload_file(client, auth, &tmp_zip, folder_id).await?;
-
-    // Cleanup
-    let _ = std::fs::remove_file(&tmp_zip);
-    Ok(())
+    Ok(file.metadata().map(|m| m.len()).unwrap_or(0))
 }
 
 fn add_dir_to_zip(
@@ -701,14 +751,18 @@ fn add_dir_to_zip(
                 .join("/");
             zip.start_file(&entry_name, options)
                 .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
-            let data = std::fs::read(&path).map_err(|e| {
+            let mut src = std::fs::File::open(&path).map_err(|e| {
                 O2Error::Io(std::io::Error::new(
                     e.kind(),
                     format!("Cannot read {}: {}", path.display(), e),
                 ))
             })?;
-            zip.write_all(&data).map_err(|e| {
-                O2Error::Io(std::io::Error::other(format!("Zip write error: {}", e)))
+            std::io::copy(&mut src, zip).map_err(|e| {
+                O2Error::Io(std::io::Error::other(format!(
+                    "Zip write error for {}: {}",
+                    path.display(),
+                    e
+                )))
             })?;
         }
     }
@@ -719,10 +773,23 @@ fn add_dir_to_zip(
 // Download
 // ------------------------------------------------------------------
 
+/// Reduce a server-supplied media name to a bare file name that is safe to
+/// create in the current directory: any directory components (`../`,
+/// absolute paths, either slash style) are stripped. Returns `None` if
+/// nothing usable remains.
+fn safe_local_file_name(name: &str) -> Option<String> {
+    let last = name.rsplit(['/', '\\']).next()?;
+    match last {
+        "" | "." | ".." => None,
+        n => Some(n.to_string()),
+    }
+}
+
 /// Download a file from O2 Cloud by its media ID.
 ///
 /// If `output` is `None`, the file is saved under its real name in the
-/// current directory (falling back to `{id}.bin` if the name is empty).
+/// current directory (falling back to `{id}.bin` if the name is empty or
+/// unsafe).
 /// Refuses to overwrite an existing local file.
 pub async fn download_file(
     client: &O2Client,
@@ -743,7 +810,7 @@ pub async fn download_file(
 
     let output_path = match output {
         Some(p) => p,
-        None => match item.name.as_deref().filter(|n| !n.is_empty()) {
+        None => match item.name.as_deref().and_then(safe_local_file_name) {
             Some(name) => PathBuf::from(name),
             None => PathBuf::from(format!("{}.bin", media_id)),
         },
@@ -1016,6 +1083,57 @@ async fn delete_file(client: &O2Client, auth: &AuthConfig, media_id: u64) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_zip_produces_readable_archive() {
+        let tmp = std::env::temp_dir().join(format!("o2cli_test_zip_{}", std::process::id()));
+        let src = tmp.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), b"hello").unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), b"world").unwrap();
+
+        let zip_path = tmp.join("out.zip");
+        let size = build_zip(&src, &zip_path).unwrap();
+        assert_eq!(size, std::fs::metadata(&zip_path).unwrap().len());
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut names: Vec<String> = archive
+            .file_names()
+            .map(|n| n.unwrap().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "sub/b.txt"]);
+
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("sub/b.txt").unwrap(), &mut contents)
+            .unwrap();
+        assert_eq!(contents, "world");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_safe_local_file_name() {
+        assert_eq!(
+            safe_local_file_name("photo.jpg").as_deref(),
+            Some("photo.jpg")
+        );
+        assert_eq!(
+            safe_local_file_name("../../.bashrc").as_deref(),
+            Some(".bashrc")
+        );
+        assert_eq!(
+            safe_local_file_name("/etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(
+            safe_local_file_name("..\\evil.exe").as_deref(),
+            Some("evil.exe")
+        );
+        assert_eq!(safe_local_file_name(""), None);
+        assert_eq!(safe_local_file_name(".."), None);
+        assert_eq!(safe_local_file_name("dir/"), None);
+    }
 
     #[test]
     fn test_resolve_path() {

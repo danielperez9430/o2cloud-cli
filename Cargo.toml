@@ -27,7 +27,7 @@ url = "2"
 thiserror = "2"
 dirs = "6"
 base64 = "0.22"
-zip = "2"
+zip = "9"
 
 [profile.release]
 lto = "thin"
