@@ -19,6 +19,10 @@ All notable changes to o2cloud-cli will be documented in this file.
   directory. Only the final file-name component is used now.
 - `download` could overwrite a file created between the existence check
   and the download; the file is now created with `create_new`.
+- `upload-dir ./my-folder` uploaded the folder's contents straight into
+  the target instead of into a `my-folder/` folder (only subfolders were
+  created). It now creates `my-folder/` in the target, or reuses it if a
+  folder with that name already exists.
 - `upload-dir` and `upload-zip` recursed forever on a symlink pointing
   back to an ancestor directory. Symlinked directories are now skipped
   (with a warning); symlinked files are still followed.

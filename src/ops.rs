@@ -393,8 +393,9 @@ pub async fn upload_file(
 // Recursive Directory Upload
 // ------------------------------------------------------------------
 
-/// Upload a local directory recursively.  Creates matching folders in
-/// O2 Cloud as needed, then uploads all files.
+/// Upload a local directory recursively.  The directory is recreated as a
+/// folder of the same name inside the target (reusing it if it exists),
+/// with matching subfolders, then all files are uploaded.
 pub async fn upload_dir(
     client: &O2Client,
     auth: &AuthConfig,
@@ -439,9 +440,20 @@ pub async fn upload_dir(
         entries.iter().filter(|(_, is_dir)| *is_dir).count() - 1, // -1 for root
     );
 
-    // Map: local dir path → o2 folder id
+    // Map: local dir path → o2 folder id. The uploaded directory itself
+    // becomes a folder of the same name inside the target (like `cp -r`);
+    // `canonicalize` gives `.`/`..` their real name.
     let mut folder_map: HashMap<PathBuf, u64> = HashMap::new();
-    folder_map.insert(local_dir.to_path_buf(), root_parent);
+    let top_name = local_dir
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let top_id = match top_name {
+        Some(name) => ensure_folder(client, auth, &existing_folders, &name, root_parent).await?,
+        // Only `/` has no name: upload its contents into the target.
+        None => root_parent,
+    };
+    folder_map.insert(local_dir.to_path_buf(), top_id);
 
     // Create folders first (breadth-first: parent must exist before child)
     let mut dirs: Vec<_> = entries.iter().filter(|(_, is_dir)| *is_dir).collect();
@@ -452,23 +464,9 @@ pub async fn upload_dir(
             continue;
         }
         let parent_local = dir_path.parent().unwrap();
-        let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(root_parent);
+        let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(top_id);
         let name = dir_path.file_name().unwrap().to_string_lossy().into_owned();
-
-        // Check if folder already exists
-        let existing_id = existing_folders
-            .iter()
-            .find(|f| f.name == name && f.parentid == parent_o2)
-            .map(|f| f.id);
-
-        let folder_id = if let Some(id) = existing_id {
-            eprintln!("  📁 {}/ (exists id:{})", name, id);
-            id
-        } else {
-            let id = client.create_folder(&name, parent_o2, auth).await?;
-            eprintln!("  📁 {}/ (created id:{})", name, id);
-            id
-        };
+        let folder_id = ensure_folder(client, auth, &existing_folders, &name, parent_o2).await?;
         folder_map.insert(dir_path.clone(), folder_id);
     }
 
@@ -481,7 +479,7 @@ pub async fn upload_dir(
             continue;
         }
         let parent_local = file_path.parent().unwrap();
-        let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(root_parent);
+        let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(top_id);
         let name = file_path
             .file_name()
             .unwrap()
@@ -541,6 +539,27 @@ pub async fn upload_dir(
         )));
     }
     Ok(())
+}
+
+/// Return the ID of the folder `name` inside `parent`, creating it if it
+/// doesn't exist yet.
+async fn ensure_folder(
+    client: &O2Client,
+    auth: &AuthConfig,
+    existing_folders: &[crate::api::FolderEntry],
+    name: &str,
+    parent: u64,
+) -> Result<u64, O2Error> {
+    if let Some(f) = existing_folders
+        .iter()
+        .find(|f| f.name == name && f.parentid == parent)
+    {
+        eprintln!("  📁 {}/ (exists id:{})", name, f.id);
+        return Ok(f.id);
+    }
+    let id = client.create_folder(name, parent, auth).await?;
+    eprintln!("  📁 {}/ (created id:{})", name, id);
+    Ok(id)
 }
 
 /// How a directory entry should be treated when walking a local tree.
