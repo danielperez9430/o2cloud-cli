@@ -23,7 +23,29 @@ All notable changes to o2cloud-cli will be documented in this file.
   back to an ancestor directory. Symlinked directories are now skipped
   (with a warning); symlinked files are still followed.
 
+- `rm` could trash the whole account: `rm / -r` resolved to the root
+  folder. Deleting the root folder is now refused.
+- `rm <name>` deleted the first file with that name found anywhere in
+  the account. If several files share the name it now errors and lists
+  their IDs and folders instead of guessing.
+- `rm` on a non-empty folder without `-r` printed a hint but exited 0;
+  it now fails with a non-zero exit code.
+- `rm <id>` with an ID that matched no file or folder still sent a delete
+  request; it now reports "not found".
+- Numeric names like `2024` couldn't be used as folder names in `ls`/`rm`
+  (always parsed as an ID). If no folder has that ID, the name is used.
+- Being offline (or any network error) during the session check was
+  treated as an expired session and opened the login window; the network
+  error is now reported instead.
+- `login` without a graphical session (no `DISPLAY`/`WAYLAND_DISPLAY`)
+  panicked; it now reports a clear error. Same for a missing config
+  directory.
+
 ### Changed
+- `rm` accepts file paths (`o2cloud rm /docs/a.txt`), and the recursive
+  delete prompt now shows which folder will be moved to the trash (it
+  previously said "permanently delete", but deletes are soft).
+- When silent session renewal fails, the reason is printed.
 - Directory walking, zipping, and file metadata reads now run off the
   async runtime (`spawn_blocking` / `tokio::fs`), and `upload-dir` reads
   each file's metadata once instead of twice.

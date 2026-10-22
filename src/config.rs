@@ -92,20 +92,20 @@ impl AuthConfig {
 }
 
 /// Returns the configuration directory: `~/.config/o2cli/`
-pub fn config_dir() -> PathBuf {
+pub fn config_dir() -> Result<PathBuf, O2Error> {
     dirs::config_dir()
-        .expect("Could not determine config directory")
-        .join("o2cli")
+        .map(|d| d.join("o2cli"))
+        .ok_or_else(|| O2Error::Config("Could not determine config directory".into()))
 }
 
 /// Returns the path to the auth file: `~/.config/o2cli/auth.json`
-fn auth_file() -> PathBuf {
-    config_dir().join("auth.json")
+fn auth_file() -> Result<PathBuf, O2Error> {
+    Ok(config_dir()?.join("auth.json"))
 }
 
 /// Save authentication configuration to disk.
 pub fn save_auth(config: &AuthConfig) -> Result<(), O2Error> {
-    let dir = config_dir();
+    let dir = config_dir()?;
     fs::create_dir_all(&dir).map_err(|e| {
         O2Error::Config(format!(
             "Failed to create config directory {}: {}",
@@ -114,7 +114,7 @@ pub fn save_auth(config: &AuthConfig) -> Result<(), O2Error> {
         ))
     })?;
 
-    let path = auth_file();
+    let path = auth_file()?;
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| O2Error::Config(format!("Failed to serialize auth config: {}", e)))?;
 
@@ -153,7 +153,7 @@ pub fn save_auth(config: &AuthConfig) -> Result<(), O2Error> {
 
 /// Load authentication configuration from disk.
 pub fn load_auth() -> Result<AuthConfig, O2Error> {
-    let path = auth_file();
+    let path = auth_file()?;
     let json = fs::read_to_string(&path).map_err(|e| {
         O2Error::Config(format!(
             "Failed to read auth file {}: {}. Have you logged in?",
@@ -171,12 +171,12 @@ pub fn load_auth() -> Result<AuthConfig, O2Error> {
 /// Check if authentication configuration exists on disk.
 #[allow(dead_code)]
 pub fn is_logged_in() -> bool {
-    auth_file().exists()
+    auth_file().is_ok_and(|p| p.exists())
 }
 
 /// Remove stored authentication configuration.
 pub fn clear_auth() -> Result<(), O2Error> {
-    let path = auth_file();
+    let path = auth_file()?;
     if path.exists() {
         fs::remove_file(&path).map_err(|e| {
             O2Error::Config(format!(
