@@ -990,11 +990,9 @@ pub async fn delete_target(
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-    // Numeric ID: a folder or a file. If it matches neither, fall through
-    // and treat it as a name (e.g. a folder called `2024`).
-    if let Ok(id) = target.parse::<u64>() {
-        if folder_name.contains_key(&id) {
-            return delete_folder_checked(
+    match resolve_item(target, &folders, &folder_name, &media)? {
+        Item::Folder(id) => {
+            delete_folder_checked(
                 client,
                 auth,
                 id,
@@ -1004,29 +1002,274 @@ pub async fn delete_target(
                 recursive,
                 assume_yes,
             )
-            .await;
+            .await
+        }
+        Item::File(item) => delete_file(client, auth, item).await,
+    }
+}
+
+/// A file or folder named on the command line.
+enum Item<'a> {
+    Folder(u64),
+    File(&'a crate::api::MediaItem),
+}
+
+/// Resolve `target` to a folder or a file. Tried in order: a numeric
+/// folder ID, a numeric file ID, a folder path/name, then a file path or
+/// unique file name (see `find_file`).
+fn resolve_item<'a>(
+    target: &str,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+    media: &'a [crate::api::MediaItem],
+) -> Result<Item<'a>, O2Error> {
+    // Numeric ID: a folder or a file. If it matches neither, fall through
+    // and treat it as a name (e.g. a folder called `2024`).
+    if let Ok(id) = target.parse::<u64>() {
+        if folder_name.contains_key(&id) {
+            return Ok(Item::Folder(id));
         }
         if let Some(item) = media.iter().find(|m| m.id == id) {
-            return delete_file(client, auth, item).await;
+            return Ok(Item::File(item));
+        }
+    }
+    if let Ok(folder_id) = resolve_target(Some(target.to_string()), folders, folder_name) {
+        return Ok(Item::Folder(folder_id));
+    }
+    find_file(target, folders, folder_name, media).map(Item::File)
+}
+
+/// Full cloud path of a file, e.g. `/docs/a.txt`.
+fn file_path(
+    item: &crate::api::MediaItem,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+) -> String {
+    let dir = item
+        .folderid
+        .map(|fid| resolve_path(fid, folder_name, folders))
+        .unwrap_or_else(|| "/".into());
+    let name = item.name.as_deref().unwrap_or("?");
+    if dir == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", dir, name)
+    }
+}
+
+/// Error for operations the web client does differently for folders and
+/// that the CLI doesn't support yet.
+fn folder_unsupported(what: &str) -> O2Error {
+    O2Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{} folders isn't supported yet (only files)", what),
+    ))
+}
+
+// ------------------------------------------------------------------
+// Share
+// ------------------------------------------------------------------
+
+/// Create a public link to a file or folder and print its URL (to stdout,
+/// alone, so it can be captured by scripts).
+pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result<(), O2Error> {
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    let (link, what, is_folder) = match resolve_item(target, &folders, &folder_name, &media)? {
+        Item::Folder(id) => {
+            if is_root_folder(id, &folders) {
+                return Err(O2Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "refusing to share the root folder (it would publish the whole account)",
+                )));
+            }
+            let path = format!("{}/", resolve_path(id, &folder_name, &folders));
+            (client.share_folder(id, auth).await?, path, true)
+        }
+        Item::File(item) => (
+            client.share_files(&[item.id], auth).await?,
+            file_path(item, &folders, &folder_name),
+            false,
+        ),
+    };
+
+    eprintln!(
+        "✓ Public link created for {} — anyone with it can access it:",
+        what
+    );
+    println!("{}", link.url);
+    if is_folder {
+        eprintln!(
+            "  (link {}; remove it with `o2cloud unshare {}`)",
+            link.id, link.id
+        );
+    }
+    Ok(())
+}
+
+/// List public folder links.
+pub async fn list_shares(client: &O2Client, auth: &AuthConfig) -> Result<(), O2Error> {
+    let links = client.list_links(auth).await?;
+    if links.is_empty() {
+        println!("No shared folders.");
+        return Ok(());
+    }
+    let folders = client.get_all_folders(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    println!("{:<10} {:>5}  {:<30}  URL", "LINK ID", "USES", "FOLDER");
+    for link in &links {
+        let folder = match link.folderid {
+            Some(fid) if folder_name.contains_key(&fid) => {
+                format!("{}/", resolve_path(fid, &folder_name, &folders))
+            }
+            _ => link.foldername.clone().unwrap_or_else(|| "?".into()),
+        };
+        let uses = link
+            .usages
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!("{:<10} {:>5}  {:<30}  {}", link.id, uses, folder, link.url);
+    }
+    Ok(())
+}
+
+/// Remove the public link(s) of a folder, or a link by its ID (as shown
+/// by `o2cloud shares`).
+pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Result<(), O2Error> {
+    let links = client.list_links(auth).await?;
+
+    // A link ID from `o2cloud shares`.
+    if let Ok(id) = target.parse::<u64>() {
+        if links.iter().any(|l| l.id == id) {
+            client.delete_links(&[id], auth).await?;
+            eprintln!("✓ Removed public link {}", id);
+            return Ok(());
         }
     }
 
-    if let Ok(folder_id) = resolve_target(Some(target.to_string()), &folders, &folder_name) {
-        return delete_folder_checked(
-            client,
-            auth,
-            folder_id,
-            &folders,
-            &folder_name,
-            &media,
-            recursive,
-            assume_yes,
-        )
-        .await;
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    match resolve_item(target, &folders, &folder_name, &media)? {
+        Item::Folder(id) => {
+            let path = format!("{}/", resolve_path(id, &folder_name, &folders));
+            let ids: Vec<u64> = links
+                .iter()
+                .filter(|l| l.folderid == Some(id))
+                .map(|l| l.id)
+                .collect();
+            if ids.is_empty() {
+                return Err(O2Error::NotFound(format!("{} is not shared", path)));
+            }
+            client.delete_links(&ids, auth).await?;
+            eprintln!("✓ {} is no longer shared", path);
+            Ok(())
+        }
+        Item::File(_) => Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsharing files isn't supported yet; remove the link from the O2 Cloud website",
+        ))),
+    }
+}
+
+// ------------------------------------------------------------------
+// Move & rename
+// ------------------------------------------------------------------
+
+/// Move a file into another folder.
+pub async fn move_item(
+    client: &O2Client,
+    auth: &AuthConfig,
+    source: &str,
+    destination: &str,
+) -> Result<(), O2Error> {
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    let item = match resolve_item(source, &folders, &folder_name, &media)? {
+        Item::File(item) => item,
+        Item::Folder(_) => return Err(folder_unsupported("Moving")),
+    };
+    let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
+    let dest_path = resolve_path(dest_id, &folder_name, &folders);
+    let from = file_path(item, &folders, &folder_name);
+
+    if item.folderid == Some(dest_id) {
+        eprintln!("{} is already in {}", from, dest_path);
+        return Ok(());
+    }
+    if media
+        .iter()
+        .any(|m| m.folderid == Some(dest_id) && m.name == item.name)
+    {
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} already has a file named '{}'",
+                dest_path,
+                item.name.as_deref().unwrap_or("?")
+            ),
+        )));
     }
 
-    let item = find_file(target, &folders, &folder_name, &media)?;
-    delete_file(client, auth, item).await
+    client
+        .update_file(item.id, serde_json::json!({ "folderid": dest_id }), auth)
+        .await?;
+    eprintln!("✓ Moved {} → {}", from, dest_path);
+    Ok(())
+}
+
+/// Rename a file (the new name is a bare name, not a path).
+pub async fn rename_item(
+    client: &O2Client,
+    auth: &AuthConfig,
+    target: &str,
+    new_name: &str,
+) -> Result<(), O2Error> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "invalid name '{}' (use `o2cloud mv` to move between folders)",
+                new_name
+            ),
+        )));
+    }
+
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    let item = match resolve_item(target, &folders, &folder_name, &media)? {
+        Item::File(item) => item,
+        Item::Folder(_) => return Err(folder_unsupported("Renaming")),
+    };
+    let from = file_path(item, &folders, &folder_name);
+    if media.iter().any(|m| {
+        m.id != item.id && m.folderid == item.folderid && m.name.as_deref() == Some(new_name)
+    }) {
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("a file named '{}' already exists there", new_name),
+        )));
+    }
+
+    client
+        .update_file(item.id, serde_json::json!({ "name": new_name }), auth)
+        .await?;
+    eprintln!("✓ Renamed {} → {}", from, new_name);
+    Ok(())
 }
 
 /// Find exactly one file by path (`/docs/a.txt`) or by bare name
@@ -1068,19 +1311,7 @@ fn find_file<'a>(
         many => {
             let listing: Vec<String> = many
                 .iter()
-                .map(|m| {
-                    let dir = m
-                        .folderid
-                        .map(|fid| resolve_path(fid, folder_name, folders))
-                        .unwrap_or_else(|| "/".into());
-                    let name = m.name.as_deref().unwrap_or("?");
-                    let path = if dir == "/" {
-                        format!("/{}", name)
-                    } else {
-                        format!("{}/{}", dir, name)
-                    };
-                    format!("  {:<12}  {}", m.id, path)
-                })
+                .map(|m| format!("  {:<12}  {}", m.id, file_path(m, folders, folder_name)))
                 .collect();
             Err(O2Error::Ambiguous(format!(
                 "'{}' is ambiguous — {} files have that name:\n{}\nUse the ID or the full path.",
@@ -1518,6 +1749,24 @@ mod tests {
         assert_eq!(shown(2), vec![1]);
         assert_eq!(shown(1), vec![2, 3]);
         assert_eq!(shown(3), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_resolve_item() {
+        let (folders, folder_name, media) = sample_tree();
+        let kind = |t: &str| match resolve_item(t, &folders, &folder_name, &media) {
+            Ok(Item::Folder(id)) => format!("folder {id}"),
+            Ok(Item::File(m)) => format!("file {}", m.id),
+            Err(_) => "error".into(),
+        };
+        assert_eq!(kind("2"), "folder 2"); // folder ID
+        assert_eq!(kind("103"), "file 103"); // file ID
+        assert_eq!(kind("/docs"), "folder 2");
+        assert_eq!(kind("2024"), "folder 3"); // numeric name, not an ID
+        assert_eq!(kind("/docs/a.txt"), "file 100");
+        assert_eq!(kind("root.txt"), "file 103");
+        assert_eq!(kind("dup.txt"), "error"); // ambiguous
+        assert_eq!(kind("/nope"), "error");
     }
 
     #[test]

@@ -57,6 +57,16 @@ o2cloud rm /path/to/file.txt         # file by path
 o2cloud rm /path/to/folder -r        # recursive folder (prompts for confirmation)
 o2cloud rm /path/to/folder -r -y     # recursive folder, skip confirmation
 
+# Share (public links)
+o2cloud share /path/to/folder        # prints the public URL
+o2cloud share /path/to/file.txt
+o2cloud shares                       # list shared folders
+o2cloud unshare /path/to/folder      # or by link ID from `shares`
+
+# Move & rename files
+o2cloud mv /path/to/file.txt /other/folder
+o2cloud rename /path/to/file.txt new-name.txt
+
 # Session
 o2cloud status
 o2cloud logout
@@ -71,6 +81,10 @@ o2cloud logout
 - `upload-dir` and `upload-zip` follow symlinks to files, but **skip
   symlinks to folders** (with a warning), so a link pointing back to a
   parent folder can't cause an endless loop.
+- `share` creates a public link: anyone with the URL can access the file
+  or folder. Sharing the root folder is refused. For now `unshare`,
+  `mv` and `rename` work on folders' links and on files respectively;
+  unsharing a file and moving/renaming folders must be done on the website.
 - `download` never overwrites an existing local file. Without `-o`, only
   the file name is used (any directory part sent by the server is ignored).
 
