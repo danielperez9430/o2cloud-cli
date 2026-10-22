@@ -29,7 +29,7 @@ cargo build --release
 ## Usage
 
 ```bash
-# Authentication (opens WebView)
+# Authentication (opens a login window: enter your phone number and the SMS code there)
 o2cloud login
 
 # List files
@@ -80,7 +80,7 @@ o2cloud logout
 
 ## How it works
 
-O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication goes through **Telefónica Mobile Connect** (OAuth2/OpenID Connect). The CLI opens a WebView where you enter your phone number and verify via SMS. After login, tokens are stored in:
+O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication uses the same flow as the O2 Cloud website: Telefónica's OAuth2/OpenID Connect login, with PKCE handled by the O2 Cloud server (no client secret involved). The CLI opens a login window where you enter your phone number and verify via SMS. After login, the session is stored in:
 
 - macOS: `~/Library/Application Support/o2cli/auth.json`
 - Linux: `~/.config/o2cli/auth.json`
@@ -88,7 +88,7 @@ O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication goe
 
 On macOS/Linux the file is only readable by your user (`0600`).
 
-Sessions are silently renewed when expired — no need to re-login.
+A session lasts about 24 hours. When it expires, the next command opens the login window again.
 
 ## License
 

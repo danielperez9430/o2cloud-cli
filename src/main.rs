@@ -25,10 +25,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in to O2 Cloud via Mobile Connect (opens a webview window)
+    /// Log in to O2 Cloud (opens a login window)
     Login {
-        /// Spanish phone number (without country code, e.g. 686942006)
-        #[arg(short, long)]
+        /// No longer used: the phone number is entered in the login window.
+        /// Kept so existing scripts don't break.
+        #[arg(short, long, hide = true)]
         phone: Option<String>,
     },
 
@@ -113,14 +114,18 @@ enum Commands {
     },
 }
 
-/// Load stored credentials and an API client, silently refreshing (or, as
-/// a last resort, re-running the interactive login flow) if the session
-/// has expired.
+/// Load stored credentials and an API client. If the session has
+/// expired, sessions from the old login are renewed silently with their
+/// stored token; otherwise (or if that fails) the login window opens.
 async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig), O2Error> {
     let auth = config::load_auth()?;
-    let client = api::O2Client::new()?;
+    let client = api::O2Client::new(&auth.device_id)?;
 
-    if !client.is_session_valid(&auth).await? {
+    if client.is_session_valid(&auth).await? {
+        return Ok((client, auth));
+    }
+
+    if auth.sapi_auth_header().is_some() {
         eprintln!("→ Session expired, trying silent re-login...");
         match client.silent_login(&auth).await {
             Ok(login_resp) => {
@@ -132,6 +137,7 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                     encryption_token: login_resp.encryption_token,
                     msisdn: auth.msisdn.clone(),
                     platform: auth.platform.clone(),
+                    device_id: client.device_id().to_string(),
                 };
                 if let Err(e) = config::save_auth(&new_auth) {
                     eprintln!("Failed to save refreshed auth: {}", e);
@@ -139,52 +145,41 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                 eprintln!("✓ Session refreshed silently");
                 return Ok((client, new_auth));
             }
-            Err(e) => {
-                eprintln!("→ Silent re-login failed ({e}), opening login window...");
-                let msisdn = auth
-                    .msisdn
-                    .strip_prefix("34")
-                    .unwrap_or(&auth.msisdn)
-                    .to_string();
-                let new_auth = crate::auth::login(&msisdn).await?;
-                eprintln!("✓ Re-login successful");
-                let new_client = api::O2Client::new()?;
-                return Ok((new_client, new_auth));
-            }
+            Err(e) => eprintln!("→ Silent re-login failed ({e})"),
         }
+    } else {
+        eprintln!("→ Session expired");
     }
 
-    Ok((client, auth))
+    eprintln!("→ Opening login window...");
+    let new_auth = crate::auth::login().await?;
+    eprintln!("✓ Re-login successful");
+    let new_client = api::O2Client::new(&new_auth.device_id)?;
+    Ok((new_client, new_auth))
 }
 
 async fn run(cli: Cli) -> Result<(), O2Error> {
     match cli.command {
         Commands::Login { phone } => {
-            let phone = match phone {
-                Some(p) => p,
-                None => {
-                    eprint!("Enter your phone number (+34): ");
-                    let mut input = String::new();
-                    std::io::stdin()
-                        .read_line(&mut input)
-                        .map_err(O2Error::Io)?;
-                    input.trim().to_string()
-                }
-            };
-
-            if phone.trim().is_empty() {
-                return Err(O2Error::Auth("phone number is required".into()));
+            if phone.is_some() {
+                eprintln!(
+                    "Note: --phone is no longer needed; enter the number in the login window."
+                );
             }
-            let phone = util::normalize_spanish_msisdn(&phone).map_err(O2Error::Auth)?;
-
-            let config = auth::login(&phone).await?;
-            println!("Logged in as +34 {}", config.msisdn);
+            let config = auth::login().await?;
+            if config.msisdn.is_empty() {
+                println!("Logged in");
+            } else {
+                println!("Logged in as +34 {}", config.msisdn);
+            }
         }
 
         Commands::Status => match config::load_auth() {
             Ok(cfg) => {
                 println!("✓ Logged in");
-                println!("  Phone: +34 {}", cfg.msisdn);
+                if !cfg.msisdn.is_empty() {
+                    println!("  Phone: +34 {}", cfg.msisdn);
+                }
                 println!("  Platform: {}", cfg.platform);
                 println!(
                     "  Validation key: {}...",

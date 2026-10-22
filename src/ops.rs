@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::api::{O2Client, UploadMeta, UploadMetaResponse};
+use crate::api::{O2Client, UploadMeta};
 use crate::config::AuthConfig;
 use crate::error::O2Error;
 use crate::util::{format_size, mime_type_from_name, system_time_to_compact_iso};
@@ -368,7 +368,6 @@ pub async fn upload_file(
         }
     };
 
-    // Step 1 — Save metadata
     let meta = UploadMeta {
         contenttype,
         creationdate: date_str.clone(),
@@ -383,11 +382,8 @@ pub async fn upload_file(
         local_path.display(),
         format_size(size)
     );
-    let UploadMetaResponse { id, .. } = client.upload_metadata(&meta, auth).await?;
-    eprintln!("  Metadata saved (id: {})", id);
-
-    // Step 2 — Upload bytes (streamed from disk, not buffered in memory)
-    client.upload_bytes(&id, local_path, size, auth).await?;
+    // Metadata and contents in one request, streamed from disk
+    let id = client.upload_file(&meta, local_path, auth).await?;
 
     eprintln!("✓ Uploaded successfully (id: {})", id);
     Ok(())
@@ -504,7 +500,6 @@ pub async fn upload_dir(
             format_size(size)
         );
 
-        // Upload via metadata + bytes
         let modified = file_meta.and_then(|m| m.modified().ok());
         let now = std::time::SystemTime::now();
         let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
@@ -519,16 +514,8 @@ pub async fn upload_dir(
             size,
         };
 
-        let UploadMetaResponse { id, .. } = match client.upload_metadata(&meta, auth).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  ⚠ Skipping {}: {}", name, e);
-                failed += 1;
-                continue;
-            }
-        };
-        if let Err(e) = client.upload_bytes(&id, file_path, size, auth).await {
-            eprintln!("  ⚠ Byte upload failed for {}: {}", name, e);
+        if let Err(e) = client.upload_file(&meta, file_path, auth).await {
+            eprintln!("  ⚠ Upload failed for {}: {}", name, e);
             failed += 1;
             continue;
         }
@@ -1184,7 +1171,8 @@ async fn delete_folder(
         Box::pin(delete_folder(client, auth, child.id, folders, media, true)).await?;
     }
 
-    // Delete files in this folder (paginated, 1000 at a time)
+    // Delete files in this folder, in batches of up to 1000 IDs
+    // (the server's `folders.softdelete-updates-limit`)
     let files: Vec<u64> = media
         .iter()
         .filter(|m| m.folderid == Some(folder_id))
@@ -1192,9 +1180,7 @@ async fn delete_folder(
         .collect();
 
     for chunk in files.chunks(1000) {
-        for &mid in chunk {
-            client.delete_media(mid, auth).await?;
-        }
+        client.delete_files(chunk, auth).await?;
     }
 
     // Delete the folder itself
@@ -1213,7 +1199,7 @@ async fn delete_file(
     let name = item.name.as_deref().unwrap_or("?");
 
     eprintln!("→ Deleting {} ({})...", name, media_id);
-    client.delete_media(media_id, auth).await?;
+    client.delete_files(&[media_id], auth).await?;
     eprintln!("✓ Deleted {} ({})", name, media_id);
     Ok(())
 }
