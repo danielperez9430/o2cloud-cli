@@ -72,9 +72,10 @@ o2cloud logout
 
 ## Requisitos
 
-- macOS o Linux
+- macOS, Linux o Windows
 - Cuenta de O2 Cloud (Telefónica España)
 - Linux: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev`
+- Windows: el [runtime de WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalado en Windows 11 y en Windows 10 actualizado)
 
 ## Cómo funciona
 
@@ -82,6 +83,7 @@ O2 Cloud usa **Synchronoss OneMediaHub v31** como backend. La autenticación va 
 
 - macOS: `~/Library/Application Support/o2cli/auth.json`
 - Linux: `~/.config/o2cli/auth.json`
+- Windows: `%APPDATA%\o2cli\auth.json`
 
 En macOS/Linux el archivo solo es legible por tu usuario (`0600`).
 
