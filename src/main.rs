@@ -120,7 +120,7 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     let auth = config::load_auth()?;
     let client = api::O2Client::new()?;
 
-    if !client.is_session_valid(&auth).await {
+    if !client.is_session_valid(&auth).await? {
         eprintln!("→ Session expired, trying silent re-login...");
         match client.silent_login(&auth).await {
             Ok(login_resp) => {
@@ -139,8 +139,8 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                 eprintln!("✓ Session refreshed silently");
                 return Ok((client, new_auth));
             }
-            Err(_) => {
-                eprintln!("→ Silent re-login failed, opening login window...");
+            Err(e) => {
+                eprintln!("→ Silent re-login failed ({e}), opening login window...");
                 let msisdn = auth
                     .msisdn
                     .strip_prefix("34")

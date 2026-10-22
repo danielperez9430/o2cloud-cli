@@ -114,10 +114,12 @@ impl O2Client {
         Ok(new_jsessionid)
     }
 
-    /// Check if the stored session is still valid by probing an
-    /// authenticated endpoint.  Returns the auth header so callers
-    /// can reuse it.
-    async fn session_probe(&self, auth: &AuthConfig) -> Result<(), O2Error> {
+    /// Check whether the stored session is still valid by probing an
+    /// authenticated endpoint.  Returns `Ok(false)` only on a 401;
+    /// other non-2xx statuses are treated as transient and don't block.
+    /// Network failures are returned as errors, so being offline doesn't
+    /// trigger a re-login (and its login window).
+    pub async fn is_session_valid(&self, auth: &AuthConfig) -> Result<bool, O2Error> {
         let url = format!("{}/sapi/profile/role", BASE_URL);
         let auth_header = auth.to_sapi_auth_header();
         let resp = self
@@ -131,18 +133,7 @@ impl O2Client {
             .await?;
         let status = resp.status();
         let _ = resp.text().await?;
-        if status.is_success() {
-            Ok(())
-        } else if status.as_u16() == 401 {
-            Err(O2Error::Auth("session expired".into()))
-        } else {
-            Ok(()) // non-401 = probably transient, don't block
-        }
-    }
-
-    /// Probe the session.  Returns `true` if the session is valid.
-    pub async fn is_session_valid(&self, auth: &AuthConfig) -> bool {
-        self.session_probe(auth).await.is_ok()
+        Ok(status != reqwest::StatusCode::UNAUTHORIZED)
     }
 
     /// Attempt a silent re-login using the stored `access_token` (pat token).

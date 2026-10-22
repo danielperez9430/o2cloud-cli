@@ -21,12 +21,23 @@ enum AppEvent {
 /// State for the temporary WebView window.
 struct WebViewState {
     auth_url: String,
-    tx: Option<mpsc::Sender<Result<(String, String), String>>>,
+    tx: Option<mpsc::Sender<Result<(String, String), O2Error>>>,
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     #[allow(dead_code)]
     window: Option<Window>,
     #[allow(dead_code)]
     webview: Option<wry::WebView>,
+}
+
+impl WebViewState {
+    /// Report a setup failure (e.g. no display available) to the caller
+    /// and stop the event loop, instead of panicking.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, msg: String) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Err(O2Error::WebView(msg)));
+        }
+        event_loop.exit();
+    }
 }
 
 impl ApplicationHandler<AppEvent> for WebViewState {
@@ -40,9 +51,10 @@ impl ApplicationHandler<AppEvent> for WebViewState {
         attributes.title = "O2 Cloud — Iniciar sesión".into();
         attributes.inner_size = Some(winit::dpi::LogicalSize::new(480, 700).into());
 
-        let window = event_loop
-            .create_window(attributes)
-            .expect("failed to create window");
+        let window = match event_loop.create_window(attributes) {
+            Ok(w) => w,
+            Err(e) => return self.fail(event_loop, format!("failed to create window: {e}")),
+        };
 
         let webview = WebViewBuilder::new()
             .with_url(&self.auth_url)
@@ -66,8 +78,11 @@ impl ApplicationHandler<AppEvent> for WebViewState {
                     true
                 }
             })
-            .build(&window)
-            .expect("failed to build webview");
+            .build(&window);
+        let webview = match webview {
+            Ok(w) => w,
+            Err(e) => return self.fail(event_loop, format!("failed to build webview: {e}")),
+        };
 
         self.window = Some(window);
         self.webview = Some(webview);
@@ -78,9 +93,9 @@ impl ApplicationHandler<AppEvent> for WebViewState {
             AppEvent::AuthCodeReceived(code, state) => {
                 if code.is_empty() || state.is_empty() {
                     if let Some(tx) = self.tx.take() {
-                        let _ = tx.send(Err(
+                        let _ = tx.send(Err(O2Error::Auth(
                             "Failed to extract OAuth2 code/state from redirect URL".into(),
-                        ));
+                        )));
                     }
                 } else if let Some(tx) = self.tx.take() {
                     let _ = tx.send(Ok((code, state)));
@@ -99,7 +114,7 @@ impl ApplicationHandler<AppEvent> for WebViewState {
         if let WindowEvent::CloseRequested = event {
             // User closed the window before completing authentication
             if let Some(tx) = self.tx.take() {
-                let _ = tx.send(Err("Login cancelled by user".into()));
+                let _ = tx.send(Err(O2Error::Auth("Login cancelled by user".into())));
             }
             event_loop.exit();
         }
@@ -115,12 +130,16 @@ impl ApplicationHandler<AppEvent> for WebViewState {
 /// live on the main thread.  It blocks until the user completes (or
 /// cancels) authentication.
 pub fn intercept_oauth_code_sync(auth_url: &str) -> Result<(String, String), O2Error> {
-    let (tx, rx) = mpsc::channel::<Result<(String, String), String>>();
+    let (tx, rx) = mpsc::channel::<Result<(String, String), O2Error>>();
     let auth_url = auth_url.to_string();
 
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
-        .expect("failed to build event loop");
+        .map_err(|e| {
+            O2Error::WebView(format!(
+                "cannot open the login window ({e}); a graphical session is required"
+            ))
+        })?;
     let proxy = event_loop.create_proxy();
 
     let mut state = WebViewState {
@@ -136,7 +155,6 @@ pub fn intercept_oauth_code_sync(auth_url: &str) -> Result<(String, String), O2E
 
     rx.recv()
         .map_err(|_| O2Error::WebView("WebView closed unexpectedly".into()))?
-        .map_err(O2Error::Auth)
 }
 
 /// Parse the `code` and `state` query parameters from a URL.
