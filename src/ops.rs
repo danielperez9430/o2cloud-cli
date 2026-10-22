@@ -52,6 +52,23 @@ pub async fn list_folder(
 // Display helpers
 // ------------------------------------------------------------------
 
+/// Whether `item` is listed in folder `folder`. Files without a folder,
+/// or whose folder isn't in the folder list (the server can return a
+/// fresh upload like that while it's still processing it), are listed in
+/// the root, as `find` already shows them — otherwise they'd appear
+/// nowhere.
+fn shown_in_folder(
+    item: &crate::api::MediaItem,
+    folder: u64,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+) -> bool {
+    match item.folderid {
+        Some(fid) if folder_name.contains_key(&fid) => fid == folder,
+        _ => is_root_folder(folder, folders),
+    }
+}
+
 fn print_folder_contents(
     folders: &[crate::api::FolderEntry],
     media: &[crate::api::MediaItem],
@@ -84,7 +101,7 @@ fn print_folder_contents(
     // Files
     let files: Vec<_> = media
         .iter()
-        .filter(|m| m.folderid == Some(target))
+        .filter(|m| shown_in_folder(m, target, folders, folder_name))
         .collect();
     if files.is_empty() && child_folders.is_empty() {
         println!("  (empty folder)");
@@ -152,7 +169,7 @@ fn print_tree(
     // Files in this folder
     let here: Vec<_> = media
         .iter()
-        .filter(|m| m.folderid == Some(current))
+        .filter(|m| shown_in_folder(m, current, folders, folder_name))
         .collect();
 
     // Child folders (excluding root which has parentid=0)
@@ -1478,6 +1495,29 @@ mod tests {
         assert!(find("missing.txt").is_err());
         assert!(find("/nope/a.txt").is_err());
         assert!(find("/2024/a.txt").is_err());
+    }
+
+    #[test]
+    fn test_shown_in_folder_puts_orphans_in_root() {
+        let (folders, folder_name, _) = sample_tree();
+        let media: Vec<crate::api::MediaItem> = serde_json::from_str(
+            r#"[
+                {"id": 1, "name": "in-docs", "folderid": 2},
+                {"id": 2, "name": "no-folder"},
+                {"id": 3, "name": "unknown-folder", "folderid": 999}
+            ]"#,
+        )
+        .unwrap();
+        let shown = |folder: u64| -> Vec<u64> {
+            media
+                .iter()
+                .filter(|m| shown_in_folder(m, folder, &folders, &folder_name))
+                .map(|m| m.id)
+                .collect()
+        };
+        assert_eq!(shown(2), vec![1]);
+        assert_eq!(shown(1), vec![2, 3]);
+        assert_eq!(shown(3), Vec::<u64>::new());
     }
 
     #[test]

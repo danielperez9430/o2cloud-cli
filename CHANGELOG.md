@@ -19,6 +19,9 @@ All notable changes to o2cloud-cli will be documented in this file.
   directory. Only the final file-name component is used now.
 - `download` could overwrite a file created between the existence check
   and the download; the file is now created with `create_new`.
+- `ls` and `ls -t` never showed files the server returns without a folder
+  (or with an unknown one), e.g. a large upload still being processed;
+  `find` showed them under `/`. They are now listed in the root too.
 - `upload-dir ./my-folder` uploaded the folder's contents straight into
   the target instead of into a `my-folder/` folder (only subfolders were
   created). It now creates `my-folder/` in the target, or reuses it if a
