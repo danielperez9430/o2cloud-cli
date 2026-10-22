@@ -58,6 +58,36 @@ fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
+/// Normalize a Spanish mobile number as typed by the user to its 9 national
+/// digits. Accepts spaces, dashes, dots and parentheses, and an optional
+/// `+34`, `0034` or `34` prefix — e.g. `+34 686 94 20 06` → `686942006`.
+pub fn normalize_spanish_msisdn(input: &str) -> Result<String, String> {
+    let compact: String = input
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '.' | '(' | ')'))
+        .collect();
+    let digits = compact
+        .strip_prefix('+')
+        .or_else(|| compact.strip_prefix("00"))
+        .unwrap_or(&compact);
+    let national = match digits.strip_prefix("34") {
+        Some(rest) if rest.len() == 9 => rest,
+        _ => digits,
+    };
+    let valid = national.len() == 9
+        && national.chars().all(|c| c.is_ascii_digit())
+        && matches!(national.as_bytes()[0], b'6' | b'7');
+    if valid {
+        Ok(national.to_string())
+    } else {
+        Err(format!(
+            "'{}' is not a valid Spanish mobile number (expected 9 digits starting \
+             with 6 or 7, optionally prefixed with +34)",
+            input.trim()
+        ))
+    }
+}
+
 /// Guess a MIME content-type from a file's extension.
 pub fn mime_type_from_name(name: &str) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -94,6 +124,33 @@ pub fn mime_type_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_spanish_msisdn() {
+        for ok in [
+            "686942006",
+            "686 942 006",
+            "686-94-20-06",
+            "+34686942006",
+            "+34 686 942 006",
+            "0034686942006",
+            "34686942006",
+            " 686942006\n",
+        ] {
+            assert_eq!(normalize_spanish_msisdn(ok).unwrap(), "686942006", "{ok:?}");
+        }
+        assert_eq!(normalize_spanish_msisdn("712345678").unwrap(), "712345678");
+        for bad in [
+            "",
+            "68694200",
+            "6869420061",
+            "+44 7700 900123",
+            "912345678",
+            "68694200a",
+        ] {
+            assert!(normalize_spanish_msisdn(bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn test_format_size() {
