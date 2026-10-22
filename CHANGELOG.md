@@ -2,7 +2,11 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.3.0] — 2026-10-23
+
+**Upgrading:** run `o2cloud login` again. The phone number and SMS code
+are now entered in the login window (the old login no longer works on
+O2's side), and sessions last about 24 hours.
 
 ### Added
 - `share <file|folder>` creates a public link and prints its URL (the
@@ -17,6 +21,13 @@ All notable changes to o2cloud-cli will be documented in this file.
   the CLI says so instead of guessing at the requests.
 
 ### Fixed
+- **`login` was broken** (#2): O2 Cloud retired the Mobile Connect login
+  the CLI used, so `mobileconnect?action=start` failed with
+  `PAPI-0000 Unknown exception` for every number. The CLI now uses the
+  same OAuth2 login as the O2 Cloud website (`/sapi/oauth/pkce/authorize`
+  → Telefónica login → `/sapi/login/oauth`), with PKCE handled by the
+  server. The phone number and SMS code are now entered in the login
+  window; `--phone` is accepted but ignored.
 - `upload-zip` uploaded a corrupt archive: the zip's central directory was
   only written when the writer was dropped, after the upload had already
   happened. The archive is now finalized before uploading.
@@ -56,13 +67,6 @@ All notable changes to o2cloud-cli will be documented in this file.
 - Being offline (or any network error) during the session check was
   treated as an expired session and opened the login window; the network
   error is now reported instead.
-- **`login` was broken** (#2): O2 Cloud retired the Mobile Connect login
-  the CLI used, so `mobileconnect?action=start` failed with
-  `PAPI-0000 Unknown exception` for every number. The CLI now uses the
-  same OAuth2 login as the O2 Cloud website (`/sapi/oauth/pkce/authorize`
-  → Telefónica login → `/sapi/login/oauth`), with PKCE handled by the
-  server. The phone number and SMS code are now entered in the login
-  window; `--phone` is accepted but ignored.
 - Uploads now use the website's single multipart request
   (`/sapi/upload?action=save`), and file deletes its batch endpoint
   (`/sapi/media/file?action=delete&softdelete=true`), so `rm -r` sends one
