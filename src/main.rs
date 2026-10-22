@@ -103,10 +103,11 @@ enum Commands {
         query: String,
     },
 
-    /// Download a file from O2 Cloud by media ID
+    /// Download a file from O2 Cloud
     Download {
-        /// Media ID (shown in `o2cloud ls`)
-        id: u64,
+        /// Media ID (shown in `o2cloud ls`), file path (e.g. /docs/a.txt),
+        /// or file name if it is unique
+        target: String,
 
         /// Output file path (defaults to current directory)
         #[arg(short, long)]
@@ -248,10 +249,10 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::find(&client, &auth, &query).await?;
         }
 
-        Commands::Download { id, output } => {
+        Commands::Download { target, output } => {
             let (client, auth) = require_client_and_auth().await?;
             let output_path = output.map(PathBuf::from);
-            ops::download_file(&client, &auth, id, output_path).await?;
+            ops::download_file(&client, &auth, &target, output_path).await?;
         }
     }
     Ok(())

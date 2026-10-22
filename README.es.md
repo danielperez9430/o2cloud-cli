@@ -47,7 +47,8 @@ o2cloud upload-dir ./mi-carpeta      # recursivo
 o2cloud upload-zip ./mi-carpeta      # zip + subir
 
 # Descargar
-o2cloud download 1195003130          # se guarda con su nombre en la nube, en el dir actual
+o2cloud download 1195003130          # por ID; se guarda con su nombre en la nube, en el dir actual
+o2cloud download /ruta/archivo.txt   # por ruta (o solo el nombre, si es único)
 o2cloud download 1195003130 -o archivo.txt
 
 # Borrar (papelera)

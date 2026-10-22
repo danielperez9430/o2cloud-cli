@@ -837,7 +837,8 @@ fn safe_local_file_name(name: &str) -> Option<String> {
     }
 }
 
-/// Download a file from O2 Cloud by its media ID.
+/// Download a file from O2 Cloud. `target` is a media ID, a file path
+/// (`/docs/a.txt`) or a file name if it is unique, as for `rm`.
 ///
 /// If `output` is `None`, the file is saved under its real name in the
 /// current directory (falling back to `{id}.bin` if the name is empty or
@@ -846,15 +847,26 @@ fn safe_local_file_name(name: &str) -> Option<String> {
 pub async fn download_file(
     client: &O2Client,
     auth: &AuthConfig,
-    media_id: u64,
+    target: &str,
     output: Option<PathBuf>,
 ) -> Result<(), O2Error> {
     // Fetch the signed download URL (and real name) from the media listing
     let media = client.get_all_media(auth).await?;
-    let item = media
-        .iter()
-        .find(|m| m.id == media_id)
-        .ok_or_else(|| O2Error::NotFound(format!("Media {} not found", media_id)))?;
+    let by_id = target
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| media.iter().find(|m| m.id == id));
+    let item = match by_id {
+        Some(item) => item,
+        // Not a known ID: resolve as a file path or unique file name.
+        None => {
+            let folders = client.get_all_folders(auth).await?;
+            let folder_name: HashMap<u64, String> =
+                folders.iter().map(|f| (f.id, f.name.clone())).collect();
+            find_file(target, &folders, &folder_name, &media)?
+        }
+    };
+    let media_id = item.id;
     let download_url = item
         .url
         .as_deref()
