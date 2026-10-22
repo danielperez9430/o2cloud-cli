@@ -63,7 +63,9 @@ o2cloud logout
 
 ### Notas
 
-- `upload-dir` recorre todas las subcarpetas. Los archivos y carpetas
+- `upload-dir ./mi-carpeta` crea `mi-carpeta/` en la carpeta de destino
+  (o reutiliza la que ya exista) y sube todo dentro, recorriendo todas las
+  subcarpetas. Los archivos y carpetas
   ocultos (`.git`, `.DS_Store`, …) se omiten porque O2 Cloud los rechaza.
 - `upload-dir` y `upload-zip` siguen los enlaces simbólicos a archivos,
   pero **omiten los enlaces a carpetas** (con un aviso), para que un enlace

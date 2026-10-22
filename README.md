@@ -63,7 +63,9 @@ o2cloud logout
 
 ### Notes
 
-- `upload-dir` recurses into all subfolders. Hidden files and folders
+- `upload-dir ./my-folder` creates `my-folder/` in the target folder (or
+  reuses it if it exists) and uploads everything inside it, recursing
+  into all subfolders. Hidden files and folders
   (`.git`, `.DS_Store`, …) are skipped because O2 Cloud rejects them.
 - `upload-dir` and `upload-zip` follow symlinks to files, but **skip
   symlinks to folders** (with a warning), so a link pointing back to a
