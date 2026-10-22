@@ -47,6 +47,7 @@ o2cloud upload-dir ./mi-carpeta      # recursivo
 o2cloud upload-zip ./mi-carpeta      # zip + subir
 
 # Descargar
+o2cloud download 1195003130          # se guarda con su nombre en la nube, en el dir actual
 o2cloud download 1195003130 -o archivo.txt
 
 # Borrar (papelera)
@@ -58,6 +59,16 @@ o2cloud rm /ruta/carpeta -r -y       # carpeta recursiva, sin confirmación
 o2cloud status
 o2cloud logout
 ```
+
+### Notas
+
+- `upload-dir` recorre todas las subcarpetas. Los archivos y carpetas
+  ocultos (`.git`, `.DS_Store`, …) se omiten porque O2 Cloud los rechaza.
+- `upload-dir` y `upload-zip` siguen los enlaces simbólicos a archivos,
+  pero **omiten los enlaces a carpetas** (con un aviso), para que un enlace
+  que apunte a una carpeta padre no provoque un bucle infinito.
+- `download` nunca sobrescribe un archivo local existente. Sin `-o`, solo
+  se usa el nombre del archivo (se ignora cualquier ruta que envíe el servidor).
 
 ## Requisitos
 
@@ -71,6 +82,8 @@ O2 Cloud usa **Synchronoss OneMediaHub v31** como backend. La autenticación va 
 
 - macOS: `~/Library/Application Support/o2cli/auth.json`
 - Linux: `~/.config/o2cli/auth.json`
+
+En macOS/Linux el archivo solo es legible por tu usuario (`0600`).
 
 La sesión se renueva silenciosamente al expirar — no necesitas volver a hacer login.
 

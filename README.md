@@ -47,6 +47,7 @@ o2cloud upload-dir ./my-folder       # recursive
 o2cloud upload-zip ./my-folder       # zip + upload
 
 # Download
+o2cloud download 1195003130          # saved under its cloud name in the current dir
 o2cloud download 1195003130 -o file.txt
 
 # Delete (trash)
@@ -58,6 +59,16 @@ o2cloud rm /path/to/folder -r -y     # recursive folder, skip confirmation
 o2cloud status
 o2cloud logout
 ```
+
+### Notes
+
+- `upload-dir` recurses into all subfolders. Hidden files and folders
+  (`.git`, `.DS_Store`, …) are skipped because O2 Cloud rejects them.
+- `upload-dir` and `upload-zip` follow symlinks to files, but **skip
+  symlinks to folders** (with a warning), so a link pointing back to a
+  parent folder can't cause an endless loop.
+- `download` never overwrites an existing local file. Without `-o`, only
+  the file name is used (any directory part sent by the server is ignored).
 
 ## Requirements
 
@@ -71,6 +82,8 @@ O2 Cloud uses **Synchronoss OneMediaHub v31** as its backend. Authentication goe
 
 - macOS: `~/Library/Application Support/o2cli/auth.json`
 - Linux: `~/.config/o2cli/auth.json`
+
+On macOS/Linux the file is only readable by your user (`0600`).
 
 Sessions are silently renewed when expired — no need to re-login.
 
