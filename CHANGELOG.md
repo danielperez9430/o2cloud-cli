@@ -4,6 +4,15 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `share <file|folder>` creates a public link and prints its URL (the
+  root folder is refused); `shares` lists shared folders with their link
+  ID, uses and URL; `unshare <folder|link-id>` removes a folder's link.
+- `mv <file> <folder>` moves a file and `rename <file> <name>` renames
+  it; both refuse to overwrite a file with the same name.
+- Folders aren't supported yet by `mv`/`rename`, nor files by `unshare`:
+  the CLI says so instead of guessing at the requests.
+
 ### Fixed
 - `upload-zip` uploaded a corrupt archive: the zip's central directory was
   only written when the writer was dropped, after the upload had already

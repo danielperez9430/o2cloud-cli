@@ -57,6 +57,16 @@ o2cloud rm /ruta/archivo.txt         # archivo por ruta
 o2cloud rm /ruta/carpeta -r          # carpeta recursiva (pide confirmación)
 o2cloud rm /ruta/carpeta -r -y       # carpeta recursiva, sin confirmación
 
+# Compartir (enlaces públicos)
+o2cloud share /ruta/carpeta          # imprime la URL pública
+o2cloud share /ruta/archivo.txt
+o2cloud shares                       # lista las carpetas compartidas
+o2cloud unshare /ruta/carpeta        # o por ID de enlace de `shares`
+
+# Mover y renombrar archivos
+o2cloud mv /ruta/archivo.txt /otra/carpeta
+o2cloud rename /ruta/archivo.txt nuevo-nombre.txt
+
 # Sesión
 o2cloud status
 o2cloud logout
@@ -71,6 +81,11 @@ o2cloud logout
 - `upload-dir` y `upload-zip` siguen los enlaces simbólicos a archivos,
   pero **omiten los enlaces a carpetas** (con un aviso), para que un enlace
   que apunte a una carpeta padre no provoque un bucle infinito.
+- `share` crea un enlace público: cualquiera con la URL puede acceder al
+  archivo o la carpeta. Compartir la carpeta raíz no está permitido. De
+  momento `unshare` funciona con enlaces de carpetas, y `mv` y `rename`
+  con archivos; dejar de compartir un archivo y mover/renombrar carpetas
+  hay que hacerlo desde la web.
 - `download` nunca sobrescribe un archivo local existente. Sin `-o`, solo
   se usa el nombre del archivo (se ignora cualquier ruta que envíe el servidor).
 

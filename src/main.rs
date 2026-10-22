@@ -103,6 +103,39 @@ enum Commands {
         query: String,
     },
 
+    /// Create a public link to a file or folder and print its URL
+    Share {
+        /// File/folder ID, path (e.g. /docs or /docs/a.txt), or unique file name
+        target: String,
+    },
+
+    /// List shared folders (public links)
+    Shares,
+
+    /// Remove the public link of a folder
+    Unshare {
+        /// Folder ID or path, or a link ID from `o2cloud shares`
+        target: String,
+    },
+
+    /// Move a file into another folder
+    Mv {
+        /// File ID, path (e.g. /docs/a.txt), or unique file name
+        source: String,
+
+        /// Destination folder ID or path (e.g. /archive)
+        destination: String,
+    },
+
+    /// Rename a file
+    Rename {
+        /// File ID, path (e.g. /docs/a.txt), or unique file name
+        target: String,
+
+        /// New name (just the name, not a path)
+        new_name: String,
+    },
+
     /// Download a file from O2 Cloud
     Download {
         /// Media ID (shown in `o2cloud ls`), file path (e.g. /docs/a.txt),
@@ -247,6 +280,34 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         Commands::Find { query } => {
             let (client, auth) = require_client_and_auth().await?;
             ops::find(&client, &auth, &query).await?;
+        }
+
+        Commands::Share { target } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::share(&client, &auth, &target).await?;
+        }
+
+        Commands::Shares => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::list_shares(&client, &auth).await?;
+        }
+
+        Commands::Unshare { target } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::unshare(&client, &auth, &target).await?;
+        }
+
+        Commands::Mv {
+            source,
+            destination,
+        } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::move_item(&client, &auth, &source, &destination).await?;
+        }
+
+        Commands::Rename { target, new_name } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::rename_item(&client, &auth, &target, &new_name).await?;
         }
 
         Commands::Download { target, output } => {

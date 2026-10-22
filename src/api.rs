@@ -772,6 +772,147 @@ impl O2Client {
     }
 
     // ------------------------------------------------------------------
+    // Sharing, move & rename (requests as sent by the web client)
+    // ------------------------------------------------------------------
+
+    /// POST a JSON body to a SAPI endpoint and return the raw response,
+    /// failing on a non-2xx status or an error envelope. `what` names the
+    /// operation in error messages.
+    async fn sapi_post_json(
+        &self,
+        path: &str,
+        action: &str,
+        body: &serde_json::Value,
+        auth: &AuthConfig,
+        what: &str,
+    ) -> Result<String, O2Error> {
+        let url = format!("{}{}", BASE_URL, path);
+        let req = self
+            .client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("action", action), ("validationkey", &auth.validationkey)])
+            .json(body);
+        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let status = resp.status();
+        let raw_body = resp.text().await?;
+        if !status.is_success() {
+            return Err(O2Error::Api(format!(
+                "{} failed (status {}): {}",
+                what,
+                status,
+                truncate_utf8(&raw_body, 300)
+            )));
+        }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("{} failed: {}", what, err)));
+        }
+        Ok(raw_body)
+    }
+
+    /// Create a public link to a folder.
+    ///
+    /// `POST /sapi/link/folder?action=save` with `{"data":{"folderid":<id>}}`
+    pub async fn share_folder(
+        &self,
+        folder_id: u64,
+        auth: &AuthConfig,
+    ) -> Result<SharedLink, O2Error> {
+        let body = serde_json::json!({ "data": { "folderid": folder_id } });
+        let raw = self
+            .sapi_post_json("/sapi/link/folder", "save", &body, auth, "Share folder")
+            .await?;
+        let resp: RawResponse<SharedLink> = parse_json(&raw, "share folder response")?;
+        Ok(resp.data)
+    }
+
+    /// Create a public link to a set of files.
+    ///
+    /// `POST /sapi/media/set?action=save` with `{"data":{"set":{"items":[<id>, ...]}}}`
+    pub async fn share_files(
+        &self,
+        media_ids: &[u64],
+        auth: &AuthConfig,
+    ) -> Result<SharedLink, O2Error> {
+        let body = serde_json::json!({ "data": { "set": { "items": media_ids } } });
+        let raw = self
+            .sapi_post_json("/sapi/media/set", "save", &body, auth, "Share file")
+            .await?;
+        // Unlike folder links, the set's id and url are at the top level.
+        parse_json(&raw, "share file response")
+    }
+
+    /// List the account's public folder links.
+    ///
+    /// `POST /sapi/link?action=get` with `{"data":{}}`
+    pub async fn list_links(&self, auth: &AuthConfig) -> Result<Vec<PublicLink>, O2Error> {
+        #[derive(Deserialize)]
+        struct LinkList {
+            #[serde(default)]
+            links: Vec<PublicLink>,
+        }
+        let body = serde_json::json!({ "data": {} });
+        let raw = self
+            .sapi_post_json("/sapi/link", "get", &body, auth, "List shared links")
+            .await?;
+        let resp: RawResponse<LinkList> = parse_json(&raw, "link list")?;
+        Ok(resp.data.links)
+    }
+
+    /// Delete public links by link ID.
+    ///
+    /// `POST /sapi/link?action=delete` with `{"data":{"ids":[<id>, ...]}}`
+    pub async fn delete_links(&self, link_ids: &[u64], auth: &AuthConfig) -> Result<(), O2Error> {
+        let body = serde_json::json!({ "data": { "ids": link_ids } });
+        self.sapi_post_json("/sapi/link", "delete", &body, auth, "Unshare")
+            .await?;
+        Ok(())
+    }
+
+    /// Change a file's metadata — `{"name": ...}` to rename it or
+    /// `{"folderid": ...}` to move it.
+    ///
+    /// `POST /sapi/upload/file?action=save-metadata`, form-encoded
+    /// `data={"data":{"id":<id>, ...changes}}`
+    pub async fn update_file(
+        &self,
+        media_id: u64,
+        changes: serde_json::Value,
+        auth: &AuthConfig,
+    ) -> Result<(), O2Error> {
+        let mut data = serde_json::json!({ "id": media_id });
+        if let (Some(obj), Some(changes)) = (data.as_object_mut(), changes.as_object()) {
+            obj.extend(changes.clone());
+        }
+        let form_value = serde_json::json!({ "data": data }).to_string();
+
+        let url = format!("{}/sapi/upload/file", BASE_URL);
+        let req = self
+            .client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[
+                ("action", "save-metadata"),
+                ("validationkey", &auth.validationkey),
+            ])
+            .form(&[("data", form_value)]);
+        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let status = resp.status();
+        let raw_body = resp.text().await?;
+        if !status.is_success() {
+            return Err(O2Error::Api(format!(
+                "Update file failed (status {}): {}",
+                status,
+                truncate_utf8(&raw_body, 300)
+            )));
+        }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Update file failed: {}", err)));
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // Download
     // ------------------------------------------------------------------
 
@@ -1027,6 +1168,40 @@ pub struct UploadMeta {
     pub size: u64,
 }
 
+/// A newly created public link (folder link or file set).
+#[derive(Debug, Deserialize)]
+pub struct SharedLink {
+    #[serde(deserialize_with = "deserialize_id")]
+    pub id: u64,
+    pub url: String,
+}
+
+/// A public folder link, as listed by `/sapi/link?action=get`.
+#[derive(Debug, Deserialize)]
+pub struct PublicLink {
+    #[serde(deserialize_with = "deserialize_id")]
+    pub id: u64,
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    pub folderid: Option<u64>,
+    #[serde(default)]
+    pub foldername: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub usages: Option<u64>,
+}
+
+/// Parse a JSON response body, naming `what` in the error.
+fn parse_json<T: serde::de::DeserializeOwned>(raw: &str, what: &str) -> Result<T, O2Error> {
+    serde_json::from_str(raw).map_err(|e| {
+        O2Error::Parse(format!(
+            "Failed to parse {}: {} — body: {}",
+            what,
+            e,
+            truncate_utf8(raw, 300)
+        ))
+    })
+}
+
 /// Response to an upload: `{"success": "...", "id": "1539028003", ...}`.
 #[derive(Debug, Deserialize)]
 struct UploadResponse {
@@ -1066,6 +1241,32 @@ mod tests {
             Some("0123456789abcdef")
         );
         assert_eq!(set_cookie_value(&headers, "validationkey"), None);
+    }
+
+    #[test]
+    fn test_parse_share_and_link_responses() {
+        // Shapes from captured web traffic (tokens shortened).
+        let folder: RawResponse<SharedLink> = parse_json(
+            r#"{"data":{"id":133707,"success":"Public link created successfully","url":"https://cloud.o2online.es/share/f/abc"},"responsetime":1}"#,
+            "t",
+        )
+        .unwrap();
+        assert_eq!(folder.data.id, 133707);
+        assert_eq!(folder.data.url, "https://cloud.o2online.es/share/f/abc");
+
+        let set: SharedLink = parse_json(
+            r#"{"success":"Media set saved successfully","id":"5282331","url":"https://cloud.o2online.es/share/xyz","responsetime":1}"#,
+            "t",
+        )
+        .unwrap();
+        assert_eq!(set.id, 5282331);
+
+        let link: PublicLink = serde_json::from_str(
+            r#"{"owner":{"userid":"u"},"id":133708,"name":"CSVs","allowchanges":false,"usages":0,"password":false,"folderid":35559600,"subfolderaccess":true,"foldername":"CSVs","url":"https://cloud.o2online.es/share/f/abc"}"#,
+        )
+        .unwrap();
+        assert_eq!(link.folderid, Some(35559600));
+        assert_eq!(link.usages, Some(0));
     }
 
     #[test]
