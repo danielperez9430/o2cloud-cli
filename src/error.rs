@@ -31,6 +31,11 @@ pub enum O2Error {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// A request the CLI refuses or can't carry out as asked (bad
+    /// argument, would overwrite something, not supported yet).
+    #[error("{0}")]
+    Invalid(String),
+
     /// A name matched several items; the message lists them.
     #[error("{0}")]
     Ambiguous(String),

@@ -172,6 +172,7 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                     msisdn: auth.msisdn.clone(),
                     platform: auth.platform.clone(),
                     device_id: client.device_id().to_string(),
+                    logged_in_at: config::now_unix(),
                 };
                 if let Err(e) = config::save_auth(&new_auth) {
                     eprintln!("Failed to save refreshed auth: {}", e);
@@ -210,15 +211,31 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
 
         Commands::Status => match config::load_auth() {
             Ok(cfg) => {
+                // Check the session against the server, without renewing it.
+                let session = match api::O2Client::new(&cfg.device_id) {
+                    Ok(client) => match client.is_session_valid(&cfg).await {
+                        Ok(true) => "active".to_string(),
+                        Ok(false) if cfg.sapi_auth_header().is_some() => {
+                            "expired (the next command renews it silently)".to_string()
+                        }
+                        Ok(false) => {
+                            "expired (the next command opens the login window)".to_string()
+                        }
+                        Err(e) => format!("unknown — couldn't reach O2 Cloud ({e})"),
+                    },
+                    Err(e) => format!("unknown ({e})"),
+                };
                 println!("✓ Logged in");
                 if !cfg.msisdn.is_empty() {
                     println!("  Phone: +34 {}", cfg.msisdn);
                 }
-                println!("  Platform: {}", cfg.platform);
-                println!(
-                    "  Validation key: {}...",
-                    &cfg.validationkey[..16.min(cfg.validationkey.len())]
-                );
+                if cfg.logged_in_at > 0 {
+                    println!("  Since: {}", util::format_unix_utc(cfg.logged_in_at));
+                }
+                println!("  Session: {}", session);
+                if cfg.sapi_auth_header().is_none() {
+                    println!("  Sessions last about 24 h and aren't renewed automatically.");
+                }
             }
             Err(_) => {
                 println!("✗ Not logged in. Run `o2cloud login` to authenticate.");
@@ -239,10 +256,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
-                return Err(O2Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("not a directory: {}", path),
-                )));
+                return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
             ops::upload_dir(&client, &auth, &local_path, folder).await?;
         }
@@ -251,10 +265,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
-                return Err(O2Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("not a directory: {}", path),
-                )));
+                return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
             ops::upload_zip(&client, &auth, &local_path, folder).await?;
         }

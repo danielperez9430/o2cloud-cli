@@ -22,6 +22,17 @@ pub struct AuthConfig {
     /// `x-deviceid` the session was created with.
     #[serde(default)]
     pub device_id: String,
+    /// When the session was created (Unix seconds); 0 if unknown.
+    #[serde(default)]
+    pub logged_in_at: u64,
+}
+
+/// Current time in Unix seconds.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl AuthConfig {
@@ -215,6 +226,7 @@ mod tests {
             msisdn: "600000000".into(),
             platform: "macos".into(),
             device_id: String::new(),
+            logged_in_at: 0,
         }
     }
 

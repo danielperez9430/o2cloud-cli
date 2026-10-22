@@ -358,12 +358,7 @@ pub async fn upload_file(
     let name = local_path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            O2Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid file name",
-            ))
-        })?
+        .ok_or_else(|| O2Error::Invalid("Invalid file name".into()))?
         .to_string();
 
     let modified = metadata.modified().ok();
@@ -677,9 +672,9 @@ pub async fn upload_zip(
     folder_id: Option<u64>,
 ) -> Result<(), O2Error> {
     if !local_dir.is_dir() {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Not a directory: {}", local_dir.display()),
+        return Err(O2Error::Invalid(format!(
+            "Not a directory: {}",
+            local_dir.display()
         )));
     }
 
@@ -898,12 +893,9 @@ pub async fn download_file(
     };
 
     if output_path.exists() {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "Refusing to overwrite existing file: {}",
-                output_path.display()
-            ),
+        return Err(O2Error::Invalid(format!(
+            "Refusing to overwrite existing file: {}",
+            output_path.display()
         )));
     }
 
@@ -1060,10 +1052,7 @@ fn file_path(
 /// Error for operations the web client does differently for folders and
 /// that the CLI doesn't support yet.
 fn folder_unsupported(what: &str) -> O2Error {
-    O2Error::Io(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        format!("{} folders isn't supported yet (only files)", what),
-    ))
+    O2Error::Invalid(format!("{} folders isn't supported yet (only files)", what))
 }
 
 // ------------------------------------------------------------------
@@ -1081,10 +1070,9 @@ pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result
     let (link, what, is_folder) = match resolve_item(target, &folders, &folder_name, &media)? {
         Item::Folder(id) => {
             if is_root_folder(id, &folders) {
-                return Err(O2Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "refusing to share the root folder (it would publish the whole account)",
-                )));
+                return Err(O2Error::Invalid(
+                    "refusing to share the root folder (it would publish the whole account)".into(),
+                ));
             }
             let path = format!("{}/", resolve_path(id, &folder_name, &folders));
             (client.share_folder(id, auth).await?, path, true)
@@ -1121,7 +1109,8 @@ pub async fn list_shares(client: &O2Client, auth: &AuthConfig) -> Result<(), O2E
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-    println!("{:<10} {:>5}  {:<30}  URL", "LINK ID", "USES", "FOLDER");
+    // The folder goes last: its length varies, the URLs' doesn't.
+    println!("{:<10} {:>5}  {:<88}  FOLDER", "LINK ID", "USES", "URL");
     for link in &links {
         let folder = match link.folderid {
             Some(fid) if folder_name.contains_key(&fid) => {
@@ -1133,7 +1122,7 @@ pub async fn list_shares(client: &O2Client, auth: &AuthConfig) -> Result<(), O2E
             .usages
             .map(|u| u.to_string())
             .unwrap_or_else(|| "-".into());
-        println!("{:<10} {:>5}  {:<30}  {}", link.id, uses, folder, link.url);
+        println!("{:<10} {:>5}  {:<88}  {}", link.id, uses, link.url, folder);
     }
     Ok(())
 }
@@ -1172,10 +1161,9 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
             eprintln!("✓ {} is no longer shared", path);
             Ok(())
         }
-        Item::File(_) => Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "unsharing files isn't supported yet; remove the link from the O2 Cloud website",
-        ))),
+        Item::File(_) => Err(O2Error::Invalid(
+            "unsharing files isn't supported yet; remove the link from the O2 Cloud website".into(),
+        )),
     }
 }
 
@@ -1211,13 +1199,10 @@ pub async fn move_item(
         .iter()
         .any(|m| m.folderid == Some(dest_id) && m.name == item.name)
     {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "{} already has a file named '{}'",
-                dest_path,
-                item.name.as_deref().unwrap_or("?")
-            ),
+        return Err(O2Error::Invalid(format!(
+            "{} already has a file named '{}'",
+            dest_path,
+            item.name.as_deref().unwrap_or("?")
         )));
     }
 
@@ -1237,12 +1222,9 @@ pub async fn rename_item(
 ) -> Result<(), O2Error> {
     let new_name = new_name.trim();
     if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "invalid name '{}' (use `o2cloud mv` to move between folders)",
-                new_name
-            ),
+        return Err(O2Error::Invalid(format!(
+            "invalid name '{}' (use `o2cloud mv` to move between folders)",
+            new_name
         )));
     }
 
@@ -1259,9 +1241,9 @@ pub async fn rename_item(
     if media.iter().any(|m| {
         m.id != item.id && m.folderid == item.folderid && m.name.as_deref() == Some(new_name)
     }) {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("a file named '{}' already exists there", new_name),
+        return Err(O2Error::Invalid(format!(
+            "a file named '{}' already exists there",
+            new_name
         )));
     }
 
@@ -1341,10 +1323,9 @@ async fn delete_folder_checked(
     assume_yes: bool,
 ) -> Result<(), O2Error> {
     if is_root_folder(folder_id, folders) {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "refusing to delete the root folder",
-        )));
+        return Err(O2Error::Invalid(
+            "refusing to delete the root folder".into(),
+        ));
     }
     let path = resolve_path(folder_id, folder_name, folders);
     if !confirm_recursive_delete(folder_id, &path, folders, media, recursive, assume_yes)? {
@@ -1396,13 +1377,10 @@ fn confirm_recursive_delete(
 
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to delete {}/ ({} file(s), {} subfolder(s)) without a TTY; \
+        return Err(O2Error::Invalid(format!(
+            "refusing to delete {}/ ({} file(s), {} subfolder(s)) without a TTY; \
                  re-run with --yes (-y) to confirm non-interactively",
-                path, files, dirs
-            ),
+            path, files, dirs
         )));
     }
 
@@ -1439,15 +1417,12 @@ async fn delete_folder(
     let child_dirs: Vec<_> = folders.iter().filter(|f| f.parentid == folder_id).collect();
 
     if !recursive && (!child_dirs.is_empty() || file_count > 0) {
-        return Err(O2Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "{}/ contains {} files and {} subfolders; use --recursive (-r) \
+        return Err(O2Error::Invalid(format!(
+            "{}/ contains {} files and {} subfolders; use --recursive (-r) \
                  to delete the folder and all its contents",
-                name,
-                file_count,
-                child_dirs.len()
-            ),
+            name,
+            file_count,
+            child_dirs.len()
         )));
     }
 
