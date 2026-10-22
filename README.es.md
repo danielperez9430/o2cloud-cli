@@ -52,6 +52,7 @@ o2cloud download 1195003130 -o archivo.txt
 
 # Borrar (papelera)
 o2cloud rm 1195003130                # archivo por ID
+o2cloud rm /ruta/archivo.txt         # archivo por ruta
 o2cloud rm /ruta/carpeta -r          # carpeta recursiva (pide confirmación)
 o2cloud rm /ruta/carpeta -r -y       # carpeta recursiva, sin confirmación
 

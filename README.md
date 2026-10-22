@@ -52,6 +52,7 @@ o2cloud download 1195003130 -o file.txt
 
 # Delete (trash)
 o2cloud rm 1195003130                # file by ID
+o2cloud rm /path/to/file.txt         # file by path
 o2cloud rm /path/to/folder -r        # recursive folder (prompts for confirmation)
 o2cloud rm /path/to/folder -r -y     # recursive folder, skip confirmation
 
