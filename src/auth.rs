@@ -43,6 +43,7 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
         msisdn: String::new(),
         platform: "web".into(),
         device_id: client.device_id().to_string(),
+        logged_in_at: config::now_unix(),
     };
     // Only used for display, so a failure here doesn't fail the login.
     if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {

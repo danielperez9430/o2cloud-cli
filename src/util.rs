@@ -54,6 +54,20 @@ pub fn system_time_to_compact_iso(t: std::time::SystemTime) -> String {
     format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, m, d, h, min, s)
 }
 
+/// Format Unix seconds as `YYYY-MM-DD HH:MM UTC`.
+pub fn format_unix_utc(secs: u64) -> String {
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    let c = system_time_to_compact_iso(t); // YYYYMMDDTHHMMSS
+    format!(
+        "{}-{}-{} {}:{} UTC",
+        &c[0..4],
+        &c[4..6],
+        &c[6..8],
+        &c[9..11],
+        &c[11..13]
+    )
+}
+
 fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
@@ -121,6 +135,11 @@ mod tests {
             mime_type_from_name("unknown.xyz"),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn test_format_unix_utc() {
+        assert_eq!(format_unix_utc(1705314645), "2024-01-15 10:30 UTC");
     }
 
     #[test]
