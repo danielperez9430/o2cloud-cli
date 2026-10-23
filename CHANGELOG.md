@@ -2,6 +2,18 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `login --jsessionid <value> --validationkey <value>` logs in with the
+  session cookies of a logged-in browser, for machines where the login
+  window can't open (headless, some Wayland setups) (#4, thanks
+  @juliokarl). The values can also come from `O2CLOUD_JSESSIONID` and
+  `O2CLOUD_VALIDATIONKEY`, are checked against O2 Cloud before they're
+  saved, and stray whitespace from copying them is ignored.
+- When a session expires, the message before the login window opens
+  points to the cookie login.
+
 ## [0.3.0] — 2026-10-23
 
 **Upgrading:** run `o2cloud login` again. The phone number and SMS code
