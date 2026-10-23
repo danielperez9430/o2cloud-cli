@@ -51,6 +51,28 @@ enum Commands {
             requires = "jsessionid"
         )]
         validationkey: Option<String>,
+
+        /// Advanced: OAuth client id of the official mobile app, to log in
+        /// with a session that renews without SMS. You must supply your own
+        /// (needs --oauth-client-secret too). See the README.
+        #[arg(
+            long,
+            env = "O2CLOUD_OAUTH_CLIENT_ID",
+            hide = true,
+            hide_env_values = true,
+            requires = "oauth_client_secret"
+        )]
+        oauth_client_id: Option<String>,
+
+        /// Advanced: OAuth client secret paired with --oauth-client-id.
+        #[arg(
+            long,
+            env = "O2CLOUD_OAUTH_CLIENT_SECRET",
+            hide = true,
+            hide_env_values = true,
+            requires = "oauth_client_id"
+        )]
+        oauth_client_secret: Option<String>,
     },
 
     /// Show current login status
@@ -183,12 +205,28 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
         eprintln!("→ Session expired, trying silent re-login...");
         match client.silent_login(&auth).await {
             Ok(login_resp) => {
-                // Update stored config with new tokens
+                // Renewal gives a fresh JSESSIONID + validationkey. The
+                // renewal token itself does not rotate (see the native
+                // flow: it returns the same `access_token`), so if the
+                // response omits it, keep the one we already have rather
+                // than overwrite it with an empty string — losing it
+                // would leave the session unrenewable until the next SMS
+                // login. Same for the encryption token.
+                let access_token = if login_resp.access_token.is_empty() {
+                    auth.access_token.clone()
+                } else {
+                    login_resp.access_token
+                };
+                let encryption_token = if login_resp.encryption_token.is_empty() {
+                    auth.encryption_token.clone()
+                } else {
+                    login_resp.encryption_token
+                };
                 let new_auth = config::AuthConfig {
                     validationkey: login_resp.validationkey,
                     jsessionid: login_resp.jsessionid,
-                    access_token: login_resp.access_token,
-                    encryption_token: login_resp.encryption_token,
+                    access_token,
+                    encryption_token,
                     msisdn: auth.msisdn.clone(),
                     platform: auth.platform.clone(),
                     device_id: client.device_id().to_string(),
@@ -222,14 +260,24 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             phone,
             jsessionid,
             validationkey,
+            oauth_client_id,
+            oauth_client_secret,
         } => {
             if phone.is_some() {
                 eprintln!(
                     "Note: --phone is no longer needed; enter the number in the login window."
                 );
             }
-            let config = match (jsessionid, validationkey) {
-                (Some(jsessionid), Some(validationkey)) => {
+            let config = match (
+                oauth_client_id,
+                oauth_client_secret,
+                jsessionid,
+                validationkey,
+            ) {
+                (Some(client_id), Some(client_secret), _, _) => {
+                    auth::login_native(&client_id, &client_secret).await?
+                }
+                (_, _, Some(jsessionid), Some(validationkey)) => {
                     auth::login_manual(&jsessionid, &validationkey).await?
                 }
                 _ => auth::login().await?,

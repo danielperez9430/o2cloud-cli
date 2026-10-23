@@ -15,6 +15,9 @@ use crate::error::O2Error;
 /// Where Telefónica sends the browser back after login, with `code` and
 /// `state` (or `error`) query parameters.
 const LOGIN_REDIRECT_URL: &str = "https://cloud.o2online.es/sapi/login/oauth";
+/// Redirect target of the mobile-app OAuth flow (manual token login):
+/// `clientoauth.html?code=...&state=...`.
+const NATIVE_REDIRECT_URL: &str = "https://cloud.o2online.es/ui/html/clientoauth.html";
 /// Where O2 Cloud sends the browser when the OAuth flow fails.
 const LOGIN_ERROR_URL: &str = "https://cloud.o2online.es/ui/html/oauth.html";
 
@@ -154,7 +157,7 @@ fn classify_redirect(url: &str) -> Option<Result<(String, String), String>> {
     if url.starts_with(LOGIN_ERROR_URL) {
         return Some(Err("Login was rejected by O2 Cloud".into()));
     }
-    if !url.starts_with(LOGIN_REDIRECT_URL) {
+    if !url.starts_with(LOGIN_REDIRECT_URL) && !url.starts_with(NATIVE_REDIRECT_URL) {
         return None;
     }
     if let Some((code, state)) = extract_oauth_params(url) {

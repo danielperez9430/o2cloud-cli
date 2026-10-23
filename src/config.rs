@@ -46,6 +46,13 @@ impl AuthConfig {
             return None;
         }
 
+        // Sessions from the mobile-app OAuth login already store the full
+        // base64 `{"data":{...}}` wrapper (with a refresh token); send it
+        // verbatim instead of rebuilding it.
+        if let Some(h) = self.native_oauth_header() {
+            return Some(h);
+        }
+
         #[derive(Serialize)]
         struct OAuthData {
             accesstoken: String,
@@ -85,6 +92,27 @@ impl AuthConfig {
         let json = serde_json::to_string(&payload).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
         Some(format!("oauth {}", b64))
+    }
+
+    /// If `access_token` is already the full base64 `{"data":{...}}`
+    /// wrapper from the mobile-app OAuth login (i.e. it carries a refresh
+    /// token), return it verbatim as the `oauth <...>` header value.
+    fn native_oauth_header(&self) -> Option<String> {
+        use base64::Engine;
+        let b64 = &self.access_token;
+        let padding = (4 - b64.len() % 4) % 4;
+        let padded = format!("{}{}", b64, "=".repeat(padding));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(padded.as_bytes())
+            .ok()?;
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let has_refresh = parsed
+            .get("data")?
+            .get("refreshtoken")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        has_refresh.then(|| format!("oauth {}", self.access_token))
     }
 
     /// Extract the raw `pat=...` token from the JWT-wrapped access_token.

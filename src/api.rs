@@ -13,6 +13,31 @@ const AUTHORIZE_URL_PREFIX: &str = "https://apiseg.telefonica.es/";
 /// Separate host for binary uploads.
 const UPLOAD_URL: &str = "https://upload.cloud.o2online.es";
 
+/// Telefónica OpenID Connect endpoints used by the optional token-login
+/// flow (the one the mobile app uses). This flow exchanges the code on
+/// the client side with an OAuth `client_id`/`client_secret`, which the
+/// user must supply; see `login_native`.
+const OIDC_AUTHORIZE_URL: &str =
+    "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/authorize";
+const OIDC_TOKEN_URL: &str =
+    "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/token";
+/// Redirect URI registered for that OAuth client; the browser is sent
+/// here with `?code=...&state=...` once the user logs in.
+const OIDC_REDIRECT_URI: &str = "https://cloud.o2online.es/ui/html/clientoauth.html";
+/// User-Agent of the mobile client. SAPI serves the JSON API to this UA;
+/// a browser UA gets the HTML page instead. Used for the token login and
+/// for SAPI calls that carry the `oauth` token.
+const APP_USER_AGENT: &str = "omh ios client 4.0.1";
+
+/// `Origin` sent by the web client. Applied per request to the web-style
+/// calls only (session bootstrap, the web login exchange and SAPI calls
+/// on a web session). It is deliberately *not* a default header: the
+/// native app sends no `Origin`, and a default can't be removed for a
+/// single request, so leaving it default would leak `Origin` into the
+/// native token login (`/token` at Telefónica and `/sapi/login/oauth`)
+/// and the token-based SAPI calls, which breaks them.
+const WEB_ORIGIN: &str = "https://cloud.o2online.es";
+
 /// Per-request timeout applied to metadata/listing/login calls — never
 /// to the raw upload/download of file bytes, which can legitimately take
 /// much longer than this for large files.
@@ -75,12 +100,83 @@ pub fn generate_device_id() -> String {
     id
 }
 
+/// Generate a device ID in the mobile app's format: `ipad-omh-` followed
+/// by the standard base64 of 16 random bytes (on macOS the app presents
+/// itself as an iPad). The native (token) login uses this so the session
+/// it opens matches what the server links for an app client.
+pub fn generate_native_device_id() -> String {
+    use base64::Engine;
+    let bytes = random_bytes(16);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("ipad-omh-{}", b64)
+}
+
 /// Value of the cookie `name` from the response's `Set-Cookie` headers.
 fn set_cookie_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
     headers.get_all(header::SET_COOKIE).iter().find_map(|v| {
         let (key, rest) = v.to_str().ok()?.split_once('=')?;
         (key.trim() == name).then(|| rest.split(';').next().unwrap_or("").to_string())
     })
+}
+
+/// `n` random bytes from the OS (`/dev/urandom`), with a non-cryptographic
+/// fallback so a build without that device still works.
+fn random_bytes(n: usize) -> Vec<u8> {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = vec![0u8; n];
+        if f.read_exact(&mut buf).is_ok() {
+            return buf;
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = Vec::with_capacity(n + 8);
+    while out.len() < n {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        out.extend_from_slice(&h.finish().to_le_bytes());
+    }
+    out.truncate(n);
+    out
+}
+
+fn base64url_nopad(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// A PKCE pair: the `code_verifier` to keep and the S256 `code_challenge`
+/// to send in the authorization request.
+fn pkce_pair() -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let verifier = base64url_nopad(&random_bytes(32)); // 43 unreserved chars
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let challenge = base64url_nopad(&hasher.finalize());
+    (verifier, challenge)
+}
+
+/// Random UUID-shaped `nonce` for the OIDC authorization request.
+fn random_nonce() -> String {
+    let b = random_bytes(16);
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex_of(&b[0..4]),
+        hex_of(&b[4..6]),
+        hex_of(&b[6..8]),
+        hex_of(&b[8..10]),
+        hex_of(&b[10..16])
+    )
+    .to_uppercase()
 }
 
 /// O2 Cloud API client.
@@ -102,6 +198,12 @@ impl O2Client {
     /// should be the one stored with the session; pass `""` to generate a
     /// new one (e.g. for a fresh login).
     pub fn new(device_id: &str) -> Result<Self, O2Error> {
+        // Only headers common to both the web and native identities live
+        // here. The browser `User-Agent` is a safe default: the native
+        // calls override it cleanly with `APP_USER_AGENT` (reqwest keeps
+        // the per-request value and does not duplicate it). `Origin` is
+        // *not* a default — see `WEB_ORIGIN` — because the native app
+        // sends none and a default header can't be dropped per request.
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::USER_AGENT,
@@ -114,10 +216,6 @@ impl O2Client {
         headers.insert(
             header::ACCEPT_LANGUAGE,
             header::HeaderValue::from_static("es"),
-        );
-        headers.insert(
-            header::ORIGIN,
-            header::HeaderValue::from_static("https://cloud.o2online.es"),
         );
 
         let device_id = if device_id.is_empty() {
@@ -165,6 +263,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .header("x-deviceid", &self.device_id)
+            .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", "https://cloud.o2online.es/")
             .header("sec-fetch-site", "same-origin")
             .header("sec-fetch-mode", "cors")
@@ -198,66 +297,34 @@ impl O2Client {
         Ok(status != reqwest::StatusCode::UNAUTHORIZED)
     }
 
-    /// Attempt a silent re-login using the stored `access_token` (pat token).
-    /// Only sessions from the old Mobile Connect login have one; the
-    /// current OAuth login doesn't hand a token to the client.
-    /// First gets a fresh JSESSIONID cookie, then calls the login endpoint.
-    /// If successful, returns new `LoginResponse` with fresh tokens.
+    /// Renew the session silently with the stored OAuth token, without a
+    /// new SMS code. Posts the token to `/sapi/login/oauth?action=login`,
+    /// the same endpoint the first native login uses, and reads the fresh
+    /// `JSESSIONID` / `validationKey` from the redirect's cookies.
+    ///
+    /// The renewal token does not rotate (the server keeps accepting the
+    /// same one until the embedded `id_token` expires), so the stored
+    /// `access_token` is carried over unchanged.
     pub async fn silent_login(&self, auth: &AuthConfig) -> Result<LoginResponse, O2Error> {
         let auth_header = auth
             .sapi_auth_header()
             .ok_or_else(|| O2Error::Auth("no stored token for silent renewal".into()))?;
 
-        // Get a fresh session cookie first
-        self.init_session().await?;
-
-        let url = format!("{}/sapi/login", BASE_URL);
-
-        // Try with SAPI auth header (pat token) — this is what the
-        // desktop app uses for all its API calls
-        let resp = self
-            .client
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[("action", "login"), ("responsetime", "true")])
-            .header("authorization", &auth_header)
-            .header(
-                "content-type",
-                "application/x-www-form-urlencoded; charset=UTF-8",
-            )
-            .header("x-deviceid", &self.device_id)
-            .send()
+        let session = self
+            .sapi_oauth_session(&auth_header, Some((&auth.jsessionid, &auth.validationkey)))
             .await?;
 
-        let status = resp.status();
-        let raw_body = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(O2Error::Auth(format!(
-                "Silent login failed (status {}): {}",
-                status,
-                truncate_utf8(&raw_body, 300)
-            )));
-        }
-
-        if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Auth(format!("Login failed: {}", err)));
-        }
-
-        let body: RawResponse<LoginData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Auth(format!(
-                "Failed to parse silent login response: {} — body: {}",
-                e,
-                truncate_utf8(&raw_body, 300)
-            ))
-        })?;
-
         Ok(LoginResponse {
-            access_token: body.data.access_token,
-            jsessionid: body.data.jsessionid,
-            validationkey: body.data.validationkey,
-            encryption_token: body.data.encryption_token,
-            roles: body.data.roles,
+            // The renewal returns the token again (same one, refreshed
+            // `lastrefreshdate`); keep the stored one if it is absent.
+            access_token: session
+                .access_token
+                .unwrap_or_else(|| auth.access_token.clone()),
+            jsessionid: session.jsessionid,
+            validationkey: session.validationkey,
+            encryption_token: session
+                .encryption_token
+                .unwrap_or_else(|| auth.encryption_token.clone()),
         })
     }
 
@@ -277,6 +344,7 @@ impl O2Client {
         builder
             .timeout(REQUEST_TIMEOUT)
             .header("x-deviceid", &self.device_id)
+            .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", format!("https://cloud.o2online.es{}", path))
             .header("sec-fetch-site", "same-origin")
             .header("sec-fetch-mode", "cors")
@@ -304,10 +372,18 @@ impl O2Client {
             .header("x-request-id", req_id)
             .header("cookie", format!("JSESSIONID={}", auth.jsessionid));
         // The web client authenticates with the session cookie and
-        // validationkey alone; only legacy sessions carry an OAuth token.
+        // validationkey alone; only token sessions carry an OAuth header,
+        // and SAPI serves those the JSON API only under the app's UA.
+        //
+        // `Origin` goes out on the web session (where the browser sends
+        // it) but not on the native token session: the app identifies as
+        // `APP_USER_AGENT` and sends no `Origin`, and mixing the two can
+        // get the request rejected.
         match auth.sapi_auth_header() {
-            Some(h) => builder.header("authorization", h),
-            None => builder,
+            Some(h) => builder
+                .header(header::USER_AGENT, APP_USER_AGENT)
+                .header("authorization", h),
+            None => builder.header(header::ORIGIN, WEB_ORIGIN),
         }
     }
 
@@ -351,6 +427,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("platform", "web"), ("deviceid", &self.device_id)])
+            .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", "https://cloud.o2online.es/")
             .send()
             .await?;
@@ -394,6 +471,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("code", code), ("state", state)])
+            .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", "https://t3.o2online.es/")
             .send()
             .await?;
@@ -416,6 +494,205 @@ impl O2Client {
                 sapi_error(&raw_body).unwrap_or_else(|| "no session returned by O2 Cloud".into())
             ))),
         }
+    }
+
+    /// Build the authorization URL for the mobile-app OAuth flow, plus the
+    /// PKCE verifier needed to complete it. The caller opens the URL in the
+    /// login window and intercepts the redirect back to `clientoauth.html`.
+    ///
+    /// Returns `(authorize_url, code_verifier, state)`.
+    pub fn build_oidc_authorize_url(
+        &self,
+        client_id: &str,
+    ) -> Result<(String, String, String), O2Error> {
+        let (verifier, challenge) = pkce_pair();
+        let state = hex_of(&random_bytes(7)); // 14 hex chars, as the app sends
+        let nonce = random_nonce();
+        let mut url = url::Url::parse(OIDC_AUTHORIZE_URL)
+            .map_err(|e| O2Error::Auth(format!("bad authorize URL: {}", e)))?;
+        url.query_pairs_mut()
+            .append_pair("state", &state)
+            .append_pair("scope", "openid")
+            .append_pair("access_type", "offline")
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", OIDC_REDIRECT_URI)
+            .append_pair("response_type", "code")
+            .append_pair("acr_values", "2")
+            .append_pair("nonce", &nonce)
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256");
+        Ok((url.to_string(), verifier, state))
+    }
+
+    /// Complete the mobile-app OAuth flow: exchange the authorization code
+    /// for OIDC tokens at Telefónica (client-side, with the caller-supplied
+    /// `client_id`/`client_secret`), then open a SAPI session with them.
+    ///
+    /// The returned `LoginResponse.access_token` is the token wrapper that
+    /// renews the session later without a new SMS code (`silent_login`).
+    pub async fn login_native(
+        &self,
+        code: &str,
+        code_verifier: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<LoginResponse, O2Error> {
+        // 1. Exchange the code for OIDC tokens at Telefónica.
+        let token_resp = self
+            .client
+            .post(OIDC_TOKEN_URL)
+            .timeout(REQUEST_TIMEOUT)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", OIDC_REDIRECT_URI),
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("code_verifier", code_verifier),
+            ])
+            .send()
+            .await?;
+        let status = token_resp.status();
+        let raw = token_resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(O2Error::Auth(format!(
+                "Token exchange failed (status {}): {}",
+                status,
+                truncate_utf8(&raw, 300)
+            )));
+        }
+        let token: OidcToken = serde_json::from_str(&raw).map_err(|e| {
+            O2Error::Auth(format!(
+                "Failed to parse token response: {} — body: {}",
+                e,
+                truncate_utf8(&raw, 300)
+            ))
+        })?;
+
+        // 2. Wrap the token the way the app does and open a SAPI session.
+        //    The server answers with a 302 whose cookies carry the
+        //    session; the wrapper is stored as the renewal token so the
+        //    session can later renew itself without a new SMS.
+        let wrapper = token.sapi_wrapper();
+        let session = self
+            .sapi_oauth_session(&format!("oauth {}", wrapper), None)
+            .await?;
+        Ok(LoginResponse {
+            // Store the server's enriched token (returned in the 200 body),
+            // which is the one renewals must present; fall back to the
+            // wrapper only if the response carried none.
+            access_token: session.access_token.unwrap_or(wrapper),
+            jsessionid: session.jsessionid,
+            validationkey: session.validationkey,
+            encryption_token: session.encryption_token.unwrap_or_default(),
+        })
+    }
+
+    /// Open or renew a SAPI session with an `oauth <wrapper>` token by
+    /// posting to `/sapi/login/oauth?action=login`. Both the first native
+    /// login and the silent renewal use this; the server replies with a
+    /// 302 whose `Set-Cookie` carries the new `JSESSIONID` and
+    /// `validationKey`, which are returned as `(jsessionid, validationkey)`.
+    ///
+    /// The non-redirecting client is used on purpose: the default client
+    /// would follow the 302 to the web SPA and mask the session as a
+    /// `200 text/html` (the `index.html` response).
+    async fn sapi_oauth_session(
+        &self,
+        auth_header: &str,
+        existing: Option<(&str, &str)>,
+    ) -> Result<SapiSession, O2Error> {
+        let url = format!("{}/sapi/login/oauth", BASE_URL);
+        // The renewal carries the existing `validationkey` (CSRF guard);
+        // the first login has none yet.
+        let mut query = vec![("action", "login"), ("responsetime", "true")];
+        if let Some((_, vk)) = existing {
+            query.push(("validationkey", vk));
+        }
+        // First login has no session yet, so bootstrap an anonymous
+        // `JSESSIONID`. Renewal instead replays the stored (now-expired)
+        // cookie, exactly as the app does: the server pairs that cookie
+        // with the `validationkey` and the token and issues a fresh
+        // session. A new anonymous cookie would not match the stored
+        // `validationkey` and the server answers 401.
+        if existing.is_none() {
+            self.init_session().await?;
+        }
+        let mut builder = self
+            .no_redirect
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&query)
+            .header(header::USER_AGENT, APP_USER_AGENT)
+            .header("authorization", auth_header)
+            .header("x-deviceid", &self.device_id)
+            .header("x-devicename", "")
+            .header("x-request-id", random_nonce());
+        if let Some((jsessionid, _)) = existing {
+            builder = builder.header("cookie", format!("JSESSIONID={}", jsessionid));
+        }
+        let resp = builder.send().await?;
+
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let set_cookie_names: Vec<String> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|c| c.split('=').next().unwrap_or("").trim().to_string())
+            .collect();
+        let cookie_jsessionid = set_cookie_value(resp.headers(), "JSESSIONID");
+        let cookie_validationkey = set_cookie_value(resp.headers(), "validationKey");
+        let raw_body = resp.text().await.unwrap_or_default();
+
+        // Two response shapes carry the new session:
+        //  - first login: a 302 with `JSESSIONID` + `validationKey` in
+        //    `Set-Cookie` (no body);
+        //  - renewal: a 200 with a JSON body `{"data":{...}}` holding the
+        //    new `jsessionid` / `validationkey` (and a fresh token), plus
+        //    `JSESSIONID` in `Set-Cookie`.
+        let body: Option<serde_json::Value> = serde_json::from_str(&raw_body).ok();
+        let data = body.as_ref().and_then(|b| b.get("data"));
+        let field = |name: &str| {
+            data.and_then(|d| d.get(name))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let jsessionid = field("jsessionid").or(cookie_jsessionid);
+        let validationkey = field("validationkey").or(cookie_validationkey);
+        if let (Some(jsessionid), Some(validationkey)) = (jsessionid, validationkey) {
+            if !jsessionid.is_empty() && !validationkey.is_empty() {
+                return Ok(SapiSession {
+                    jsessionid,
+                    validationkey,
+                    access_token: field("access_token"),
+                    encryption_token: field("encryption-token"),
+                });
+            }
+        }
+        // No usable session: surface what the server actually returned.
+        Err(O2Error::Auth(format!(
+            "SAPI login returned no session (status {}, content-type {:?}, \
+             location {:?}, set-cookie {:?}): {}",
+            status,
+            content_type,
+            location,
+            set_cookie_names,
+            sapi_error(&raw_body).unwrap_or_else(|| truncate_utf8(&raw_body, 300).into())
+        )))
     }
 
     /// The account's phone number as 9 national digits, from the profile.
@@ -1045,22 +1322,63 @@ pub struct SessionTokens {
 
 // -- Login -------------------------------------------------------------
 
+/// OIDC token response from Telefónica's `/token` endpoint (mobile-app
+/// OAuth flow).
 #[derive(Debug, Deserialize)]
-struct LoginData {
+struct OidcToken {
     access_token: String,
-    jsessionid: String,
-    validationkey: String,
-    #[serde(rename = "encryption-token")]
-    encryption_token: String,
     #[serde(default)]
-    roles: Vec<Role>,
+    expires_in: serde_json::Value,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    id_token: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct Role {
-    pub name: String,
-    pub description: Option<String>,
+impl OidcToken {
+    /// Base64 of the `{"data":{...}}` JSON the app sends as the
+    /// `authorization: oauth <...>` value to `/sapi/login/oauth`.
+    fn sapi_wrapper(&self) -> String {
+        use base64::Engine;
+        let expires_in = match &self.expires_in {
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            _ => "3600".to_string(),
+        };
+        // The first-login token the app presents carries only the raw
+        // OIDC fields plus `platform` and `lastrefreshdate: 0`, in this
+        // order. The `0` marks it as never-refreshed, so the server
+        // answers 200 with the real, enriched token (tokentype/scope/
+        // keepmelogged and a live lastrefreshdate) to store for later
+        // renewals. Presenting the full renewal shape here instead makes
+        // the server answer 302 without a token in the body. A struct
+        // (not `json!`) keeps the fields in the app's order.
+        #[derive(Serialize)]
+        struct FirstLoginData<'a> {
+            refreshtoken: &'a str,
+            accesstoken: &'a str,
+            id_token: &'a str,
+            expiresin: String,
+            platform: &'a str,
+            lastrefreshdate: u8,
+        }
+        #[derive(Serialize)]
+        struct FirstLoginPayload<'a> {
+            data: FirstLoginData<'a>,
+        }
+        let payload = FirstLoginPayload {
+            data: FirstLoginData {
+                refreshtoken: &self.refresh_token,
+                accesstoken: &self.access_token,
+                id_token: &self.id_token,
+                expiresin: expires_in,
+                platform: "ios",
+                lastrefreshdate: 0,
+            },
+        };
+        let json = serde_json::to_string(&payload).unwrap_or_default();
+        base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+    }
 }
 
 #[derive(Debug)]
@@ -1070,7 +1388,16 @@ pub struct LoginResponse {
     pub jsessionid: String,
     pub validationkey: String,
     pub encryption_token: String,
-    pub roles: Vec<Role>,
+}
+
+/// The session a `/sapi/login/oauth` call hands back. `access_token` and
+/// `encryption_token` are only present on the renewal (JSON body) shape;
+/// the first-login (cookie) shape leaves them `None`.
+struct SapiSession {
+    jsessionid: String,
+    validationkey: String,
+    access_token: Option<String>,
+    encryption_token: Option<String>,
 }
 
 // -- Folder / Media Listing -------------------------------------------

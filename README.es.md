@@ -193,7 +193,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 ## ⚠️ A tener en cuenta
 
 > [!NOTE]
-> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login (o, si no tienes, vuelve a entrar con las [cookies del navegador](#️-login-sin-ventana-de-acceso)). `o2cloud status` te dice si la tuya sigue activa.
+> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login (o, si no tienes, vuelve a entrar con las [cookies del navegador](#️-login-sin-ventana-de-acceso)). `o2cloud status` te dice si la tuya sigue activa. El modo avanzado **Mantener la sesión sin SMS** de más abajo sí se renueva solo.
 
 > [!WARNING]
 > **Los enlaces compartidos son públicos**: cualquiera con la URL puede abrir el archivo o la carpeta. Compartir la carpeta raíz no está permitido, porque publicaría toda la cuenta.
@@ -225,9 +225,34 @@ o2cloud login
 
 Las cookies se comprueban contra O2 Cloud antes de guardarlas. Trátalas como una contraseña: cualquiera que las tenga puede entrar en tu cuenta hasta que la sesión caduque. Como cualquier sesión, dura unas 24 horas; después, copia cookies nuevas y vuelve a iniciar sesión.
 
+## 🧪 Avanzado: mantener la sesión sin SMS
+
+> [!WARNING]
+> **Avanzado, bajo tu responsabilidad.** Esto inicia sesión con el flujo OAuth de la **app móvil** en vez del flujo web. Necesita el **client id y el client secret** OAuth de la app —el CLI **no** los incluye, los aportas tú— y hace que el CLI se identifique ante Telefónica como la app oficial. Depende de un flujo no documentado que puede dejar de funcionar si Telefónica lo cambia o rota las credenciales. El `login` por defecto de arriba es el soportado.
+
+La ventaja: este login guarda un refresh token, así que la sesión **se renueva sola sin pedir otro SMS** (unos 60 días). Eso hace viables las tareas programadas y desatendidas.
+
+```bash
+export O2CLOUD_OAUTH_CLIENT_ID="<client-id>"
+export O2CLOUD_OAUTH_CLIENT_SECRET="<client-secret>"
+o2cloud login
+```
+
+El número de teléfono y el código SMS se introducen una vez en la ventana de login. A partir de ahí, cuando la sesión caduca, el siguiente comando la renueva en silencio:
+
+```console
+$ o2cloud ls
+→ Session expired, trying silent re-login...
+✓ Session refreshed silently
+📁 /
+...
+```
+
+`o2cloud status` indica si tu sesión se renueva sola. Mantén el client secret fuera del repositorio y del historial de la terminal: usa mejor las variables de entorno que las flags `--oauth-client-id` / `--oauth-client-secret`, y no lo subas a ningún sitio.
+
 ## ⚙️ Cómo funciona
 
-O2 Cloud funciona sobre **Synchronoss OneMediaHub**. `o2cloud` usa la misma API que la web de O2 Cloud, y hace el login de la misma forma: el login OAuth2 / OpenID Connect de Telefónica, con PKCE gestionado por el servidor de O2 Cloud (sin ningún secreto de cliente). El número de teléfono y el código SMS se escriben en la ventana de login, nunca en la terminal.
+O2 Cloud funciona sobre **Synchronoss OneMediaHub**. `o2cloud` usa la misma API que la web de O2 Cloud, y por defecto hace el login de la misma forma: el login OAuth2 / OpenID Connect de Telefónica, con PKCE gestionado por el servidor de O2 Cloud, así que el login por defecto no necesita ningún secreto de cliente. El número de teléfono y el código SMS se escriben en la ventana de login, nunca en la terminal. (El modo opcional **Mantener la sesión sin SMS** de arriba usa en su lugar el cliente OAuth de la app móvil, que aportas tú, para mantener la sesión viva sin SMS.)
 
 La sesión se guarda en:
 

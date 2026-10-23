@@ -95,6 +95,52 @@ pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthC
     Ok(config)
 }
 
+/// Log in with the mobile app's OAuth flow, using a `client_id`/
+/// `client_secret` the user supplies (the official mobile client's
+/// credentials). Unlike the web login, this stores a refresh token, so
+/// the session renews itself later without a new SMS code.
+///
+/// The login window is still shown (phone number + SMS); the difference
+/// is that the token exchange happens client-side and yields a renewable
+/// token.
+pub async fn login_native(client_id: &str, client_secret: &str) -> Result<AuthConfig, O2Error> {
+    // The native flow identifies as the mobile app, so it uses an
+    // app-style `ipad-omh-…` device ID (not the web client's `web-…`).
+    let client = O2Client::new(&crate::api::generate_native_device_id())?;
+
+    // Build the Telefónica authorization URL (with our own PKCE) and open
+    // the login window to intercept the code.
+    let (authorize_url, verifier, _state) = client.build_oidc_authorize_url(client_id)?;
+    eprintln!("→ Opening login window (enter your phone number there)...");
+    let (code, _state) = webview::intercept_oauth_code_sync(&authorize_url)?;
+    eprintln!("✓ Authorization code received");
+
+    eprintln!("→ Exchanging token and logging in...");
+    let session = client
+        .login_native(&code, &verifier, client_id, client_secret)
+        .await?;
+
+    let mut config = AuthConfig {
+        validationkey: session.validationkey,
+        jsessionid: session.jsessionid,
+        access_token: session.access_token,
+        encryption_token: session.encryption_token,
+        msisdn: String::new(),
+        platform: "ios".into(),
+        device_id: client.device_id().to_string(),
+        logged_in_at: config::now_unix(),
+    };
+    // Only used for display, so a failure here doesn't fail the login.
+    if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
+        config.msisdn = msisdn;
+    }
+
+    config::save_auth(&config)?;
+    eprintln!("✓ Login successful — tokens saved (session renews without SMS)");
+
+    Ok(config)
+}
+
 /// Cookie values never contain whitespace, so drop any that slipped in
 /// while copying (stray spaces, a trailing newline).
 fn clean_cookie_value(flag: &str, value: &str) -> Result<String, O2Error> {

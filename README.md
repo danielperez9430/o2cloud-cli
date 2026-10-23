@@ -193,7 +193,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 ## ⚠️ Good to know
 
 > [!NOTE]
-> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again (or, without one, log in again with [browser cookies](#️-logging-in-without-a-login-window)). `o2cloud status` tells you whether yours is still active.
+> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again (or, without one, log in again with [browser cookies](#️-logging-in-without-a-login-window)). `o2cloud status` tells you whether yours is still active. The advanced **Staying logged in without SMS** mode below renews itself.
 
 > [!WARNING]
 > **Shared links are public**: anyone with the URL can open the file or folder. Sharing the root folder is refused, since it would publish the whole account.
@@ -225,9 +225,34 @@ o2cloud login
 
 The cookies are checked against O2 Cloud before they are saved. Treat them like a password — anyone who has them can reach your account until the session expires. Like any session, this one lasts about 24 hours; after that, copy fresh cookies and log in again.
 
+## 🧪 Advanced: staying logged in without SMS
+
+> [!WARNING]
+> **Advanced, use at your own risk.** This logs in through the **mobile app's** OAuth flow instead of the web one. It needs the app's OAuth **client id and client secret** — the CLI does **not** ship them, you supply them — and makes the CLI identify to Telefónica as the official app. It relies on an undocumented flow that may stop working if Telefónica changes it or rotates the credentials. The default `login` above is the supported one.
+
+The upside: this login stores a refresh token, so the session **renews itself without a new SMS code** (for about 60 days). That makes scheduled and unattended jobs practical.
+
+```bash
+export O2CLOUD_OAUTH_CLIENT_ID="<client-id>"
+export O2CLOUD_OAUTH_CLIENT_SECRET="<client-secret>"
+o2cloud login
+```
+
+You still enter your phone number and SMS code once in the login window. After that, when the session expires the next command renews it silently:
+
+```console
+$ o2cloud ls
+→ Session expired, trying silent re-login...
+✓ Session refreshed silently
+📁 /
+...
+```
+
+`o2cloud status` shows whether your session renews on its own. Keep the client secret out of the repository and your shell history: prefer the environment variables over the `--oauth-client-id` / `--oauth-client-secret` flags, and never commit it.
+
 ## ⚙️ How it works
 
-O2 Cloud runs on **Synchronoss OneMediaHub**. `o2cloud` talks to the same API as the O2 Cloud website, and logs in the same way: Telefónica's OAuth2 / OpenID Connect login, with PKCE handled by the O2 Cloud server (no client secret involved). You type your phone number and SMS code in the login window, never in the terminal.
+O2 Cloud runs on **Synchronoss OneMediaHub**. `o2cloud` talks to the same API as the O2 Cloud website, and by default logs in the same way: Telefónica's OAuth2 / OpenID Connect login, with PKCE handled by the O2 Cloud server, so the default login needs no client secret. You type your phone number and SMS code in the login window, never in the terminal. (The optional **Staying logged in without SMS** mode above instead uses the mobile app's OAuth client, which you supply, to keep the session alive without SMS.)
 
 The session is stored in:
 

@@ -2,6 +2,26 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.5.0] — 2026-10-23
+
+### Added
+- **Advanced: silent session renewal (no repeated SMS).** `login
+  --oauth-client-id <id> --oauth-client-secret <secret>` — or the
+  `O2CLOUD_OAUTH_CLIENT_ID` / `O2CLOUD_OAUTH_CLIENT_SECRET` environment
+  variables — logs in through the mobile app's OAuth flow and stores a
+  refresh token, so the session renews itself without a new SMS code for
+  as long as the token is valid (about 60 days). You still enter the phone
+  number and SMS code once in the login window. The default web login and
+  the browser-cookie login are unchanged and still can't be renewed.
+
+### Security
+- The CLI does **not** ship the mobile app's OAuth client credentials — you
+  supply them — and this mode makes the CLI identify to Telefónica as the
+  official app, so it is advanced and use-at-your-own-risk: it may stop
+  working if the credentials or the flow change. Pass the credentials via
+  the environment variables rather than the flags so they don't land in
+  your shell history, and never commit them.
+
 ## [0.4.0] — 2026-10-23
 
 ### Added
