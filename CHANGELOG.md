@@ -14,6 +14,10 @@ All notable changes to o2cloud-cli will be documented in this file.
 - When a session expires, the message before the login window opens
   points to the cookie login.
 
+### Security
+- Updated `ctutils` 0.4.3 → 0.4.5 (used by `zip`) to clear
+  RUSTSEC-2026-0385.
+
 ## [0.3.0] — 2026-10-23
 
 **Upgrading:** run `o2cloud login` again. The phone number and SMS code
