@@ -2,7 +2,7 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.4.0] — 2026-10-23
 
 ### Added
 - `login --jsessionid <value> --validationkey <value>` logs in with the
