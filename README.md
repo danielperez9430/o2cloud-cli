@@ -206,24 +206,24 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 
 ## 🖥️ Logging in without a login window
 
-On a headless machine, or a Linux desktop where the login window can't open (for example some Wayland setups), you can log in with the session cookies of a browser instead:
+Normally `o2cloud login` opens a small window for your phone number and SMS code. On a headless machine, or a Linux desktop where that window can't open (for example some Wayland setups), log in with the session cookies of a browser instead:
 
 1. Log in at [cloud.o2online.es](https://cloud.o2online.es) in any browser.
-2. Open the developer tools (F12) → **Application** (Chrome) or **Storage** (Firefox) → **Cookies**.
-3. Copy the values of `JSESSIONID` and `validationkey`, and pass them to `login`:
+2. Open the developer tools (F12) → **Application** (Chrome/Edge) or **Storage** (Firefox) → **Cookies** → `https://cloud.o2online.es`.
+3. Copy the values of the `JSESSIONID` and `validationKey` cookies (the browser shows the second one as `validationKey`, with a capital K), and pass them to `login`:
 
 ```bash
 o2cloud login --jsessionid "<JSESSIONID>" --validationkey "<validationkey>"
 ```
 
-To keep them out of your shell history, use environment variables instead:
+To keep them out of your shell history, pass them as environment variables instead:
 
 ```bash
 export O2CLOUD_JSESSIONID="<JSESSIONID>" O2CLOUD_VALIDATIONKEY="<validationkey>"
 o2cloud login
 ```
 
-The cookies are checked before they are saved. Like any session, this one lasts about 24 hours; after that, copy fresh cookies and log in again.
+The cookies are checked against O2 Cloud before they are saved. Treat them like a password — anyone who has them can reach your account until the session expires. Like any session, this one lasts about 24 hours; after that, copy fresh cookies and log in again.
 
 ## ⚙️ How it works
 

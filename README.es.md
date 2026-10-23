@@ -206,24 +206,24 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 
 ## 🖥️ Login sin ventana de acceso
 
-En una máquina sin entorno gráfico, o en un escritorio Linux donde la ventana de login no se abre (por ejemplo en algunas configuraciones de Wayland), puedes iniciar sesión con las cookies de sesión de un navegador:
+Normalmente `o2cloud login` abre una ventana pequeña para tu número y el código SMS. En una máquina sin entorno gráfico, o en un escritorio Linux donde esa ventana no se abre (por ejemplo en algunas configuraciones de Wayland), inicia sesión con las cookies de sesión de un navegador:
 
 1. Inicia sesión en [cloud.o2online.es](https://cloud.o2online.es) en cualquier navegador.
-2. Abre las herramientas de desarrollo (F12) → **Application** (Chrome) o **Almacenamiento** (Firefox) → **Cookies**.
-3. Copia los valores de `JSESSIONID` y `validationkey`, y pásalos a `login`:
+2. Abre las herramientas de desarrollo (F12) → **Application** (Chrome/Edge) o **Almacenamiento** (Firefox) → **Cookies** → `https://cloud.o2online.es`.
+3. Copia los valores de las cookies `JSESSIONID` y `validationKey` (el navegador muestra la segunda como `validationKey`, con K mayúscula), y pásalos a `login`:
 
 ```bash
 o2cloud login --jsessionid "<JSESSIONID>" --validationkey "<validationkey>"
 ```
 
-Para que no queden en el historial de la terminal, usa variables de entorno:
+Para que no queden en el historial de la terminal, pásalos como variables de entorno:
 
 ```bash
 export O2CLOUD_JSESSIONID="<JSESSIONID>" O2CLOUD_VALIDATIONKEY="<validationkey>"
 o2cloud login
 ```
 
-Las cookies se comprueban antes de guardarlas. Como cualquier sesión, dura unas 24 horas; después, copia cookies nuevas y vuelve a iniciar sesión.
+Las cookies se comprueban contra O2 Cloud antes de guardarlas. Trátalas como una contraseña: cualquiera que las tenga puede entrar en tu cuenta hasta que la sesión caduque. Como cualquier sesión, dura unas 24 horas; después, copia cookies nuevas y vuelve a iniciar sesión.
 
 ## ⚙️ Cómo funciona
 
