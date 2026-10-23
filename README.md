@@ -218,6 +218,15 @@ The session is stored in:
 
 On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
 
+### 🔐 Manual Token Login (Headless / Wayland / Linux Fallback)
+
+If you are running in a headless environment or on Linux display servers (like Wayland) where opening a WebKit/GTK browser window fails, you can supply your session tokens manually:
+(You can extract these two values from your browser cookies after logging in at cloud.o2online.es)
+
+```bash
+o2cloud login --jsessionid "YOUR_JSESSIONID" --validationkey "YOUR_VALIDATION_KEY" --phone 6xxxxxxxx
+```
+
 ## 📄 License
 
 [MIT](./LICENSE)

@@ -218,6 +218,15 @@ La sesión se guarda en:
 
 En macOS y Linux el archivo solo lo puede leer tu usuario (`0600`). `o2cloud logout` lo borra.
 
+### 🔐 Login manual mediante Tokens (Servidores / Wayland / Entornos sin GUI)
+
+Si estás usando un entorno sin interfaz gráfica (headless) o servidores de pantalla en Linux (como Wayland) donde el navegador gráfico WebKit/GTK falla, puedes pasar tus tokens de sesión manualmente:
+(Puedes obtener ambos valores de las cookies de tu navegador tras iniciar sesión en cloud.o2online.es)
+
+```bash
+o2cloud login --jsessionid "TU_JSESSIONID" --validationkey "TU_VALIDATION_KEY" --phone 6xxxxxxxx
+```
+
 ## 📄 Licencia
 
 [MIT](./LICENSE)

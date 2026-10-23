@@ -27,10 +27,12 @@ struct Cli {
 enum Commands {
     /// Log in to O2 Cloud (opens a login window)
     Login {
-        /// No longer used: the phone number is entered in the login window.
-        /// Kept so existing scripts don't break.
-        #[arg(short, long, hide = true)]
+        #[arg(short, long)]
         phone: Option<String>,
+        #[arg(long)]
+        jsessionid: Option<String>,
+        #[arg(long)]
+        validationkey: Option<String>,
     },
 
     /// Show current login status
@@ -195,7 +197,13 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
 
 async fn run(cli: Cli) -> Result<(), O2Error> {
     match cli.command {
-        Commands::Login { phone } => {
+        Commands::Login { phone, jsessionid, validationkey } => {
+            if let (Some(jsessionid), Some(validationkey)) = (jsessionid, validationkey) {
+                let phone = phone.unwrap_or_else(|| "600000000".to_string());
+                let config = auth::login_manual(&phone, &jsessionid, &validationkey)?;
+                println!("✓ Manually logged in as +34 {}", config.msisdn);
+                return Ok(());
+            }
             if phone.is_some() {
                 eprintln!(
                     "Note: --phone is no longer needed; enter the number in the login window."
