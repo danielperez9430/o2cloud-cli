@@ -56,19 +56,39 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
     Ok(config)
 }
 
-pub fn login_manual(phone: &str, jsessionid: &str, validationkey: &str) -> Result<AuthConfig, O2Error> {
-    let config = AuthConfig {
-        validationkey: validationkey.to_string(),
-        jsessionid: jsessionid.to_string(),
-        access_token: "".to_string(),
-        encryption_token: "".to_string(),
-        msisdn: phone.to_string(),
-        platform: "web".to_string(),
-        device_id: crate::api::generate_device_id(),
-        logged_in_at: crate::config::now_unix(),
+/// Log in with the `JSESSIONID` and `validationkey` cookies of a browser
+/// session, for machines where the login window can't open (headless,
+/// some Wayland setups). The cookies are checked against O2 Cloud before
+/// they are saved.
+pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthConfig, O2Error> {
+    let client = O2Client::new("")?;
+
+    let mut config = AuthConfig {
+        validationkey: validationkey.trim().to_string(),
+        jsessionid: jsessionid.trim().to_string(),
+        access_token: String::new(),
+        encryption_token: String::new(),
+        msisdn: String::new(),
+        platform: "web".into(),
+        device_id: client.device_id().to_string(),
+        logged_in_at: config::now_unix(),
     };
-    
-    // Korrekter Aufruf der save_auth Funktion aus dem config-Modul
-    crate::config::save_auth(&config)?;
+
+    eprintln!("→ Checking session...");
+    if !client.is_session_valid(&config).await? {
+        return Err(O2Error::Auth(
+            "O2 Cloud rejected the session cookies; copy fresh JSESSIONID and \
+             validationkey values from a logged-in browser"
+                .into(),
+        ));
+    }
+    // Only used for display, so a failure here doesn't fail the login.
+    if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
+        config.msisdn = msisdn;
+    }
+
+    config::save_auth(&config)?;
+    eprintln!("✓ Login successful — tokens saved");
+
     Ok(config)
 }

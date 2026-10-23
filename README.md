@@ -193,7 +193,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 ## ⚠️ Good to know
 
 > [!NOTE]
-> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again. `o2cloud status` tells you whether yours is still active.
+> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again (or, without one, log in again with [browser cookies](#️-logging-in-without-a-login-window)). `o2cloud status` tells you whether yours is still active.
 
 > [!WARNING]
 > **Shared links are public**: anyone with the URL can open the file or folder. Sharing the root folder is refused, since it would publish the whole account.
@@ -203,6 +203,27 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them. `upload-zip` includes them inside the zip.
 - **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
 - **Not supported yet:** unsharing a file, and moving or renaming folders. Use the website for those for now.
+
+## 🖥️ Logging in without a login window
+
+On a headless machine, or a Linux desktop where the login window can't open (for example some Wayland setups), you can log in with the session cookies of a browser instead:
+
+1. Log in at [cloud.o2online.es](https://cloud.o2online.es) in any browser.
+2. Open the developer tools (F12) → **Application** (Chrome) or **Storage** (Firefox) → **Cookies**.
+3. Copy the values of `JSESSIONID` and `validationkey`, and pass them to `login`:
+
+```bash
+o2cloud login --jsessionid "<JSESSIONID>" --validationkey "<validationkey>"
+```
+
+To keep them out of your shell history, use environment variables instead:
+
+```bash
+export O2CLOUD_JSESSIONID="<JSESSIONID>" O2CLOUD_VALIDATIONKEY="<validationkey>"
+o2cloud login
+```
+
+The cookies are checked before they are saved. Like any session, this one lasts about 24 hours; after that, copy fresh cookies and log in again.
 
 ## ⚙️ How it works
 
@@ -217,15 +238,6 @@ The session is stored in:
 | Windows | `%APPDATA%\o2cli\auth.json` |
 
 On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
-
-### 🔐 Manual Token Login (Headless / Wayland / Linux Fallback)
-
-If you are running in a headless environment or on Linux display servers (like Wayland) where opening a WebKit/GTK browser window fails, you can supply your session tokens manually:
-(You can extract these two values from your browser cookies after logging in at cloud.o2online.es)
-
-```bash
-o2cloud login --jsessionid "YOUR_JSESSIONID" --validationkey "YOUR_VALIDATION_KEY" --phone 6xxxxxxxx
-```
 
 ## 📄 License
 
