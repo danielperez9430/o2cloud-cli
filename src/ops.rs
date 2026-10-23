@@ -4,29 +4,58 @@ use std::path::{Path, PathBuf};
 use crate::api::{O2Client, UploadMeta};
 use crate::config::AuthConfig;
 use crate::error::O2Error;
-use crate::util::{format_size, mime_type_from_name, system_time_to_compact_iso};
+use crate::util::{format_size, format_unix_utc, mime_type_from_name, system_time_to_compact_iso};
 
 // ------------------------------------------------------------------
 // List
 // ------------------------------------------------------------------
 
+/// How `ls` orders files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum SortKey {
+    Name,
+    Size,
+    Date,
+}
+
+/// Display options for `ls`.
+#[derive(Debug, Clone)]
+pub struct ListOptions {
+    /// Every file under the folder, recursively, as a flat list.
+    pub all: bool,
+    /// Hierarchical tree view.
+    pub tree: bool,
+    pub sort: SortKey,
+    pub reverse: bool,
+    /// Also show each file's date.
+    pub long: bool,
+    /// Only items whose name matches this `*`/`?` pattern.
+    pub pattern: Option<String>,
+    /// Show at most this many files.
+    pub limit: Option<usize>,
+    pub json: bool,
+}
+
 /// List files with multiple display modes:
-/// - Default: root folder contents (direct children)
+/// - Default: folder contents (direct children), root if no `path`
 /// - `path`: folder path (e.g. `/Photos/2024`) or ID (e.g. `12345678`)
-/// - `all`: all files flat list
+/// - `all`: every file under the folder, as a flat list
 /// - `tree`: hierarchical tree view
 pub async fn list_folder(
     client: &O2Client,
     auth: &AuthConfig,
     path: Option<String>,
-    all: bool,
-    tree: bool,
+    opts: &ListOptions,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let media = client.get_all_media(auth).await?;
 
     if media.is_empty() && folders.is_empty() {
-        println!("(empty)");
+        if opts.json {
+            println!("[]");
+        } else {
+            println!("(empty)");
+        }
         return Ok(());
     }
 
@@ -37,12 +66,12 @@ pub async fn list_folder(
     // Resolve target folder
     let target = resolve_target(path, &folders, &folder_name)?;
 
-    if tree {
-        print_tree(&folders, &media, &folder_name, target, "", true);
-    } else if all {
-        print_flat_all(&media, &folder_name, &folders);
+    if opts.tree {
+        print_tree(&folders, &media, &folder_name, target, "", true, opts);
+    } else if opts.all {
+        print_flat_all(&media, &folder_name, &folders, target, opts);
     } else {
-        print_folder_contents(&folders, &media, &folder_name, target);
+        print_folder_contents(&folders, &media, &folder_name, target, opts);
     }
 
     Ok(())
@@ -69,13 +98,254 @@ fn shown_in_folder(
     }
 }
 
+/// Case-insensitive match of `name` against a pattern where `*` matches
+/// any run of characters and `?` exactly one.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    // Where the last `*` was, and the name position it's matched up to
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            // Let the last `*` swallow one more character
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
+fn name_matches(name: &str, opts: &ListOptions) -> bool {
+    opts.pattern.as_deref().is_none_or(|p| glob_match(p, name))
+}
+
+/// The date shown and sorted on: when the file was created (for a photo,
+/// when it was taken), or else when it was uploaded. Unix milliseconds.
+fn file_date(item: &crate::api::MediaItem) -> Option<u64> {
+    item.creationdate.or(item.date)
+}
+
+fn format_date(ms: Option<u64>) -> String {
+    match ms {
+        Some(ms) => {
+            let s = format_unix_utc(ms / 1000);
+            s.trim_end_matches(" UTC").to_string()
+        }
+        None => "-".repeat(16),
+    }
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for JSON output.
+fn format_date_iso(ms: Option<u64>) -> serde_json::Value {
+    match ms {
+        Some(ms) => {
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+            let c = system_time_to_compact_iso(t); // YYYYMMDDTHHMMSS
+            format!(
+                "{}-{}-{}T{}:{}:{}Z",
+                &c[0..4],
+                &c[4..6],
+                &c[6..8],
+                &c[9..11],
+                &c[11..13],
+                &c[13..15]
+            )
+            .into()
+        }
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Sort files by `opts.sort`, ties broken by name.
+fn sort_files(files: &mut [&crate::api::MediaItem], opts: &ListOptions) {
+    let by_name = |a: &&crate::api::MediaItem, b: &&crate::api::MediaItem| {
+        let (a, b) = (
+            a.name.as_deref().unwrap_or(""),
+            b.name.as_deref().unwrap_or(""),
+        );
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    };
+    files.sort_by(|a, b| {
+        let primary = match opts.sort {
+            SortKey::Name => std::cmp::Ordering::Equal,
+            SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Date => file_date(a).cmp(&file_date(b)),
+        };
+        primary.then_with(|| by_name(a, b))
+    });
+    if opts.reverse {
+        files.reverse();
+    }
+}
+
+fn sort_folders(folders: &mut [&crate::api::FolderEntry]) {
+    folders.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+}
+
+/// Number of files and their total size in `folder_id` and below.
+fn folder_totals(
+    folder_id: u64,
+    folders: &[crate::api::FolderEntry],
+    media: &[crate::api::MediaItem],
+    folder_name: &HashMap<u64, String>,
+) -> (usize, u64) {
+    let ids = subtree_ids(folder_id, folders);
+    media
+        .iter()
+        .filter(|m| in_subtree(m, &ids, folders, folder_name))
+        .fold((0, 0), |(n, size), m| (n + 1, size + m.size.unwrap_or(0)))
+}
+
+/// `folder_id` and every folder below it.
+fn subtree_ids(
+    folder_id: u64,
+    folders: &[crate::api::FolderEntry],
+) -> std::collections::HashSet<u64> {
+    let mut ids = std::collections::HashSet::from([folder_id]);
+    let mut stack = vec![folder_id];
+    while let Some(id) = stack.pop() {
+        for child in folders.iter().filter(|f| f.parentid == id) {
+            if ids.insert(child.id) {
+                stack.push(child.id);
+            }
+        }
+    }
+    ids
+}
+
+/// Whether `item` is in one of the folders `ids` (see `shown_in_folder`
+/// for files without a known folder).
+fn in_subtree(
+    item: &crate::api::MediaItem,
+    ids: &std::collections::HashSet<u64>,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+) -> bool {
+    match item.folderid {
+        Some(fid) if folder_name.contains_key(&fid) => ids.contains(&fid),
+        _ => ids.iter().any(|&id| is_root_folder(id, folders)),
+    }
+}
+
+/// Apply the name filter, sort, then the limit. Returns the files to
+/// show and how many matched in total.
+fn select_files<'a>(
+    files: impl Iterator<Item = &'a crate::api::MediaItem>,
+    opts: &ListOptions,
+) -> (Vec<&'a crate::api::MediaItem>, usize, u64) {
+    let mut files: Vec<_> = files
+        .filter(|m| name_matches(m.name.as_deref().unwrap_or(""), opts))
+        .collect();
+    let total = files.len();
+    let total_size = files.iter().map(|m| m.size.unwrap_or(0)).sum();
+    sort_files(&mut files, opts);
+    if let Some(limit) = opts.limit {
+        files.truncate(limit);
+    }
+    (files, total, total_size)
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", n, if n == 1 { one } else { many })
+}
+
+fn file_json(item: &crate::api::MediaItem, path: Option<String>) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": item.id,
+        "name": item.name,
+        "size": item.size,
+        "date": format_date_iso(file_date(item)),
+    });
+    if let Some(path) = path {
+        v["path"] = path.into();
+    }
+    v
+}
+
+fn print_json(v: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".into())
+    );
+}
+
+/// Footer for the table views: what matched, its size, and how many
+/// files weren't shown.
+fn print_summary(folders: usize, shown: usize, total: usize, total_size: u64) {
+    let mut parts = Vec::new();
+    if folders > 0 {
+        parts.push(plural(folders, "folder", "folders"));
+    }
+    parts.push(plural(total, "file", "files"));
+    println!();
+    println!(
+        "  {}, {} in total",
+        parts.join(", "),
+        format_size(total_size)
+    );
+    if shown < total {
+        println!("  showing the first {} — raise --limit to see more", shown);
+    }
+}
+
 fn print_folder_contents(
     folders: &[crate::api::FolderEntry],
     media: &[crate::api::MediaItem],
     folder_name: &HashMap<u64, String>,
     target: u64,
+    opts: &ListOptions,
 ) {
     let path = resolve_path(target, folder_name, folders);
+
+    let mut child_folders: Vec<_> = folders
+        .iter()
+        .filter(|f| f.parentid == target && f.name != "/" && name_matches(&f.name, opts))
+        .collect();
+    sort_folders(&mut child_folders);
+    let folder_sizes: Vec<_> = child_folders
+        .iter()
+        .map(|f| folder_totals(f.id, folders, media, folder_name))
+        .collect();
+    let (files, total, total_size) = select_files(
+        media
+            .iter()
+            .filter(|m| shown_in_folder(m, target, folders, folder_name)),
+        opts,
+    );
+
+    if opts.json {
+        let folders_json: Vec<_> = child_folders
+            .iter()
+            .zip(&folder_sizes)
+            .map(|(f, (n, size))| {
+                serde_json::json!({ "id": f.id, "name": f.name, "files": n, "size": size })
+            })
+            .collect();
+        let files_json: Vec<_> = files.iter().map(|m| file_json(m, None)).collect();
+        print_json(&serde_json::json!({
+            "path": path,
+            "folders": folders_json,
+            "files": files_json,
+        }));
+        return;
+    }
 
     // Breadcrumb
     let show_path = if path == "/" {
@@ -86,58 +356,136 @@ fn print_folder_contents(
     println!("📁 {}", show_path);
     println!();
 
-    // Subfolders
-    let child_folders: Vec<_> = folders
-        .iter()
-        .filter(|f| f.parentid == target && f.name != "/")
-        .collect();
-    for f in &child_folders {
-        println!("  {:<8}  📁 {}/", f.id, f.name);
+    if files.is_empty() && child_folders.is_empty() {
+        if opts.pattern.is_some() {
+            println!("  (nothing matches)");
+        } else {
+            println!("  (empty folder)");
+        }
+        return;
     }
-    if !child_folders.is_empty() {
+
+    // Size the ID column to the longest ID shown
+    let id_width = child_folders
+        .iter()
+        .map(|f| f.id)
+        .chain(files.iter().map(|m| m.id))
+        .map(|id| id.to_string().len())
+        .max()
+        .unwrap_or(8);
+
+    // Subfolders
+    let name_width = child_folders
+        .iter()
+        .map(|f| f.name.chars().count() + 1)
+        .max()
+        .unwrap_or(0);
+    for (f, &(n, size)) in child_folders.iter().zip(&folder_sizes) {
+        println!(
+            "  {:<id_width$}  📁 {:<name_width$}  {}, {}",
+            f.id,
+            format!("{}/", f.name),
+            plural(n, "file", "files"),
+            format_size(size),
+        );
+    }
+    if !child_folders.is_empty() && !files.is_empty() {
         println!();
     }
 
     // Files
-    let files: Vec<_> = media
-        .iter()
-        .filter(|m| shown_in_folder(m, target, folders, folder_name))
-        .collect();
-    if files.is_empty() && child_folders.is_empty() {
-        println!("  (empty folder)");
-        return;
-    }
-
     for item in &files {
         let name = item.name.as_deref().unwrap_or("?");
         let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
-        println!("  {:<8}  {:>8}  {}", item.id, size, name,);
+        if opts.long {
+            let date = format_date(file_date(item));
+            println!("  {:<id_width$}  {:>9}  {}  {}", item.id, size, date, name);
+        } else {
+            println!("  {:<id_width$}  {:>9}  {}", item.id, size, name);
+        }
     }
+
+    // The total size includes what's inside the subfolders
+    let folders_size: u64 = folder_sizes.iter().map(|&(_, size)| size).sum();
+    print_summary(
+        child_folders.len(),
+        files.len(),
+        total,
+        total_size + folders_size,
+    );
 }
 
 fn print_flat_all(
     media: &[crate::api::MediaItem],
     folder_name: &HashMap<u64, String>,
     folders: &[crate::api::FolderEntry],
+    target: u64,
+    opts: &ListOptions,
 ) {
-    println!("{:<12} {:>8}  PATH", "ID", "SIZE");
-    println!("{:<12} {:>8}  ──", "──", "──");
-
-    for item in media {
+    let ids = subtree_ids(target, folders);
+    let (files, total, total_size) = select_files(
+        media
+            .iter()
+            .filter(|m| in_subtree(m, &ids, folders, folder_name)),
+        opts,
+    );
+    let full_path = |item: &crate::api::MediaItem| {
         let name = item.name.as_deref().unwrap_or("?");
-        let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
         let path = item
             .folderid
+            .filter(|fid| folder_name.contains_key(fid))
             .map(|fid| resolve_path(fid, folder_name, folders))
             .unwrap_or_else(|| "/".into());
-        let full = if path == "/" {
+        if path == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", path, name)
-        };
+        }
+    };
 
-        println!("{:<12} {:>8}  {}", item.id, size, full);
+    if opts.json {
+        let files_json: Vec<_> = files
+            .iter()
+            .map(|m| file_json(m, Some(full_path(m))))
+            .collect();
+        print_json(&serde_json::Value::Array(files_json));
+        return;
     }
+
+    let id_width = files
+        .iter()
+        .map(|m| m.id.to_string().len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    if opts.long {
+        println!(
+            "{:<id_width$}  {:>9}  {:<16}  PATH",
+            "ID", "SIZE", "DATE (UTC)"
+        );
+        println!("{:<id_width$}  {:>9}  {:<16}  ──", "──", "──", "──");
+    } else {
+        println!("{:<id_width$}  {:>9}  PATH", "ID", "SIZE");
+        println!("{:<id_width$}  {:>9}  ──", "──", "──");
+    }
+
+    for item in &files {
+        let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
+        if opts.long {
+            let date = format_date(file_date(item));
+            println!(
+                "{:<id_width$}  {:>9}  {}  {}",
+                item.id,
+                size,
+                date,
+                full_path(item)
+            );
+        } else {
+            println!("{:<id_width$}  {:>9}  {}", item.id, size, full_path(item));
+        }
+    }
+
+    print_summary(0, files.len(), total, total_size);
 }
 
 fn print_tree(
@@ -147,6 +495,7 @@ fn print_tree(
     current: u64,
     prefix: &str,
     is_last: bool,
+    opts: &ListOptions,
 ) {
     let name = folder_name.get(&current).map(|s| s.as_str()).unwrap_or("?");
 
@@ -167,16 +516,19 @@ fn print_tree(
     };
 
     // Files in this folder
-    let here: Vec<_> = media
-        .iter()
-        .filter(|m| shown_in_folder(m, current, folders, folder_name))
-        .collect();
+    let (here, _, _) = select_files(
+        media
+            .iter()
+            .filter(|m| shown_in_folder(m, current, folders, folder_name)),
+        opts,
+    );
 
     // Child folders (excluding root which has parentid=0)
-    let children: Vec<_> = folders
+    let mut children: Vec<_> = folders
         .iter()
         .filter(|f| f.parentid == current && f.name != "/" && f.parentid != 0)
         .collect();
+    sort_folders(&mut children);
 
     let total = here.len() + children.len();
     let mut idx = 0;
@@ -187,13 +539,26 @@ fn print_tree(
         let conn = if last { "└── " } else { "├── " };
         let fname = item.name.as_deref().unwrap_or("?");
         let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
-        println!("{}{}📄 {}  ({})", new_prefix, conn, fname, size);
+        if opts.long {
+            let date = format_date(file_date(item));
+            println!("{}{}📄 {}  ({}, {})", new_prefix, conn, fname, size, date);
+        } else {
+            println!("{}{}📄 {}  ({})", new_prefix, conn, fname, size);
+        }
     }
 
     for child in children.iter() {
         idx += 1;
         let last = idx == total;
-        print_tree(folders, media, folder_name, child.id, &new_prefix, last);
+        print_tree(
+            folders,
+            media,
+            folder_name,
+            child.id,
+            &new_prefix,
+            last,
+            opts,
+        );
     }
 }
 
@@ -1431,21 +1796,73 @@ async fn delete_folder(
         Box::pin(delete_folder(client, auth, child.id, folders, media, true)).await?;
     }
 
-    // Delete files in this folder, in batches of up to 1000 IDs
-    // (the server's `folders.softdelete-updates-limit`)
     let files: Vec<u64> = media
         .iter()
         .filter(|m| m.folderid == Some(folder_id))
         .map(|m| m.id)
         .collect();
-
-    for chunk in files.chunks(1000) {
-        client.delete_files(chunk, auth).await?;
-    }
+    delete_files_batched(client, auth, &files).await?;
 
     // Delete the folder itself
     client.delete_folder(folder_id, auth).await?;
     eprintln!("✓ Deleted folder {}/ (id:{})", name, folder_id);
+    Ok(())
+}
+
+/// Whether `err` is a SAPI error with the given code (e.g. `MED-1025`).
+fn is_sapi_code(err: &O2Error, code: &str) -> bool {
+    matches!(err, O2Error::Api(msg) if msg.contains(&format!("({})", code)))
+}
+
+/// Soft-delete files in batches. The server caps the number of IDs per
+/// request but doesn't say what the cap is: a batch over it fails with
+/// MED-1025, so halve the batch and retry.
+async fn delete_files_batched(
+    client: &O2Client,
+    auth: &AuthConfig,
+    ids: &[u64],
+) -> Result<(), O2Error> {
+    let mut batch = 1000;
+    let mut rest = ids;
+    while !rest.is_empty() {
+        let chunk = &rest[..batch.min(rest.len())];
+        match client.delete_files(chunk, auth).await {
+            Ok(()) => {}
+            Err(e) if is_sapi_code(&e, "MED-1025") && chunk.len() > 1 => {
+                batch = chunk.len() / 2;
+                continue;
+            }
+            Err(e) if is_sapi_code(&e, "MED-1022") => {
+                delete_files_skipping_trashed(client, auth, chunk).await?
+            }
+            Err(e) => return Err(e),
+        }
+        rest = &rest[chunk.len()..];
+    }
+    Ok(())
+}
+
+/// Delete a batch the server rejected with MED-1022 ("File already soft
+/// deleted"): one trashed file fails the whole request, so split the
+/// batch until the trashed files are isolated, and skip them.
+async fn delete_files_skipping_trashed(
+    client: &O2Client,
+    auth: &AuthConfig,
+    ids: &[u64],
+) -> Result<(), O2Error> {
+    if ids.len() <= 1 {
+        return Ok(());
+    }
+    let (left, right) = ids.split_at(ids.len() / 2);
+    for half in [left, right] {
+        match client.delete_files(half, auth).await {
+            Ok(()) => {}
+            Err(e) if is_sapi_code(&e, "MED-1022") => {
+                Box::pin(delete_files_skipping_trashed(client, auth, half)).await?
+            }
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -1846,5 +2263,105 @@ mod tests {
         assert_eq!(skipped, 2); // .hidden/ dir and .dotfile
 
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    fn list_opts() -> ListOptions {
+        ListOptions {
+            all: false,
+            tree: false,
+            sort: SortKey::Name,
+            reverse: false,
+            long: false,
+            pattern: None,
+            limit: None,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("*.heic", "IMG_0616.HEIC"));
+        assert!(glob_match("IMG_06??.*", "img_0616.heic"));
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*b*c", "aXXbYYc"));
+        assert!(glob_match("exact.txt", "Exact.TXT"));
+        assert!(!glob_match("*.heic", "IMG_0616.jpg"));
+        assert!(!glob_match("IMG_06?.HEIC", "IMG_0616.HEIC"));
+        assert!(!glob_match("a*b", "a"));
+    }
+
+    #[test]
+    fn test_select_files_sort_filter_limit() {
+        let media: Vec<crate::api::MediaItem> = serde_json::from_str(
+            r#"[
+                {"id": 1, "name": "b.jpg", "size": 30, "date": 5000, "creationdate": 1000},
+                {"id": 2, "name": "A.jpg", "size": 10, "date": 2000},
+                {"id": 3, "name": "c.mov", "size": 20, "date": 3000}
+            ]"#,
+        )
+        .unwrap();
+        let ids = |files: &[&crate::api::MediaItem]| files.iter().map(|m| m.id).collect::<Vec<_>>();
+
+        // Name sort is case-insensitive
+        let (files, total, size) = select_files(media.iter(), &list_opts());
+        assert_eq!(ids(&files), [2, 1, 3]);
+        assert_eq!((total, size), (3, 60));
+
+        let opts = ListOptions {
+            sort: SortKey::Size,
+            reverse: true,
+            ..list_opts()
+        };
+        assert_eq!(ids(&select_files(media.iter(), &opts).0), [1, 3, 2]);
+
+        // Date prefers creationdate over the upload date
+        let opts = ListOptions {
+            sort: SortKey::Date,
+            ..list_opts()
+        };
+        assert_eq!(ids(&select_files(media.iter(), &opts).0), [1, 2, 3]);
+
+        // The totals count every match, not just the ones within the limit
+        let opts = ListOptions {
+            pattern: Some("*.jpg".into()),
+            limit: Some(1),
+            ..list_opts()
+        };
+        let (files, total, size) = select_files(media.iter(), &opts);
+        assert_eq!(ids(&files), [2]);
+        assert_eq!((total, size), (2, 40));
+    }
+
+    #[test]
+    fn test_folder_totals_and_subtree() {
+        let (mut folders, _, _) = sample_tree();
+        folders.push(crate::api::FolderEntry {
+            id: 4,
+            name: "deep".into(),
+            parentid: 2,
+        });
+        let folder_name: HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let media: Vec<crate::api::MediaItem> = serde_json::from_str(
+            r#"[
+                {"id": 100, "name": "a.txt", "folderid": 2, "size": 5},
+                {"id": 101, "name": "b.txt", "folderid": 4, "size": 7},
+                {"id": 102, "name": "c.txt", "folderid": 3, "size": 1},
+                {"id": 103, "name": "lost.txt", "folderid": 999, "size": 2}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(folder_totals(2, &folders, &media, &folder_name), (2, 12));
+        assert_eq!(folder_totals(4, &folders, &media, &folder_name), (1, 7));
+        // The root counts everything, including files whose folder is unknown
+        assert_eq!(folder_totals(1, &folders, &media, &folder_name), (4, 15));
+    }
+
+    #[test]
+    fn test_format_dates() {
+        assert_eq!(format_date(Some(1705314645000)), "2024-01-15 10:30");
+        assert_eq!(format_date_iso(Some(1705314645000)), "2024-01-15T10:30:45Z");
+        assert_eq!(format_date_iso(None), serde_json::Value::Null);
     }
 }

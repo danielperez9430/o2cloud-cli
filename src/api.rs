@@ -788,7 +788,7 @@ impl O2Client {
         loop {
             let payload = MediaRequest {
                 data: MediaRequestData {
-                    fields: vec!["name", "size", "etag", "folderid", "url"],
+                    fields: vec!["name", "size", "etag", "folderid", "url", "creationdate"],
                 },
             };
 
@@ -1430,7 +1430,15 @@ pub struct MediaItem {
     pub size: Option<u64>,
     #[serde(default)]
     pub url: Option<String>,
-    /// Catch-all for fields we don't use (etag, mediatype, status, date, …).
+    /// When the file was uploaded, in Unix milliseconds. Sent even when
+    /// not asked for (asking for it is rejected).
+    #[serde(default)]
+    pub date: Option<u64>,
+    /// When the file itself was created (for a photo, when it was taken),
+    /// in Unix milliseconds.
+    #[serde(default)]
+    pub creationdate: Option<u64>,
+    /// Catch-all for fields we don't use (etag, mediatype, status, …).
     #[serde(flatten)]
     _rest: serde_json::Value,
 }

@@ -2,6 +2,40 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.6.0] — 2026-10-24
+
+### Added
+- `ls` sorts files by name (case-insensitive) instead of the server's
+  order; `-s size` / `-s date` sort by size or date, and `-r` reverses.
+- `ls` ends with a summary (`2 folders, 4039 files, 12.1 GB in total`),
+  and each folder shows how many files it holds and their size,
+  subfolders included.
+- `ls -l` adds each file's date: when it was taken or created, or else
+  when it was uploaded (UTC). `-t -l` shows it in the tree too.
+- `ls -n <pattern>` shows only names matching a `*`/`?` pattern
+  (case-insensitive), e.g. `-n '*.heic'`.
+- `ls --limit <n>` shows at most `n` files; the summary still counts all
+  of them and says how many were left out.
+- `ls --json` prints the listing as JSON for scripts.
+
+### Changed
+- `ls -a <folder>` lists every file under that folder; before, `-a`
+  ignored the folder and listed the whole account (still the default
+  without one).
+- The ID column widens to fit the IDs shown, so long file IDs no longer
+  push the columns out of line.
+
+### Fixed
+- `rm -r` failed on folders with many files with "Number of items in the
+  request is over the limit (MED-1025)": batches of 1000 IDs are too
+  many for the server. It now halves the batch and retries until the
+  server accepts it.
+- `rm -r` stopped with "File already soft deleted (MED-1022)" when a
+  file in a batch was already in the trash; it now skips those files and
+  deletes the rest.
+- Piping output into a command that exits early (`o2cloud ls | head`)
+  no longer crashes with "failed printing to stdout: Broken pipe".
+
 ## [0.5.0] — 2026-10-23
 
 ### Added

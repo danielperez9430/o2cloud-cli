@@ -70,10 +70,12 @@ Logged in as +34 600000000
 $ o2cloud ls
 📁 /
 
-  12345678  📁 Photos/
-  12345679  📁 Documents/
+  12345679    📁 Documents/  8 files, 3.4 MB
+  12345678    📁 Photos/     240 files, 610.2 MB
 
-  1234567890    1.2 MB  notes.pdf
+  1234567890     1.2 MB  notes.pdf
+
+  2 folders, 1 file, 614.8 MB in total
 
 $ o2cloud upload-dir ./holidays --folder 12345678
 → Uploading ./holidays (24.0 MB) — 12 files, 1 dirs...
@@ -89,7 +91,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 🔐 `login` | Log in (opens a login window) |
 | ℹ️ `status` | Show the account and whether the session is still active |
 | 🚪 `logout` | Remove the stored session |
-| 📂 `ls [folder]` | List a folder (`-t` tree view, `-a` all files) |
+| 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
 | ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where) |
 | 📁 `upload-dir <dir>` | Upload a folder and everything in it |
@@ -135,6 +137,11 @@ o2cloud ls /Photos/2024        # a folder by path
 o2cloud ls 12345678            # a folder by ID
 o2cloud ls -t                  # tree view
 o2cloud ls -a                  # every file, flat
+o2cloud ls -a /Photos          # every file under /Photos
+o2cloud ls -l -s date -r       # with dates, newest first
+o2cloud ls -s size -r --limit 10   # the 10 biggest files
+o2cloud ls -n '*.heic'         # only names matching a pattern
+o2cloud ls --json | jq '.files[].id'   # JSON for scripts
 o2cloud find invoice           # case-insensitive search
 ```
 

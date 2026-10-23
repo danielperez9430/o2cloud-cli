@@ -86,13 +86,39 @@ enum Commands {
         /// Folder path or ID (e.g. /Photos/2024 or 12345678)
         path: Option<String>,
 
-        /// Show all files across all folders
+        /// Show every file under the folder (all folders by default), as a flat list
         #[arg(short = 'a', long)]
         all: bool,
 
         /// Tree view (hierarchical)
-        #[arg(short = 't', long)]
+        #[arg(short = 't', long, conflicts_with_all = ["all", "json", "limit"])]
         tree: bool,
+
+        /// Sort files by name, size or date
+        #[arg(short = 's', long, value_enum, default_value_t = ops::SortKey::Name)]
+        sort: ops::SortKey,
+
+        /// Reverse the sort order
+        #[arg(short = 'r', long)]
+        reverse: bool,
+
+        /// Long format: also show each file's date (when it was taken or
+        /// created, else when it was uploaded; UTC)
+        #[arg(short = 'l', long)]
+        long: bool,
+
+        /// Only show names matching this pattern (`*` and `?` wildcards,
+        /// case-insensitive), e.g. '*.heic'
+        #[arg(short = 'n', long = "name", value_name = "PATTERN")]
+        pattern: Option<String>,
+
+        /// Show at most N files
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
     },
 
     /// Upload a file to O2 Cloud
@@ -327,9 +353,29 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             println!("✓ Logged out — tokens removed");
         }
 
-        Commands::Ls { path, all, tree } => {
+        Commands::Ls {
+            path,
+            all,
+            tree,
+            sort,
+            reverse,
+            long,
+            pattern,
+            limit,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::list_folder(&client, &auth, path, all, tree).await?;
+            let opts = ops::ListOptions {
+                all,
+                tree,
+                sort,
+                reverse,
+                long,
+                pattern,
+                limit,
+                json,
+            };
+            ops::list_folder(&client, &auth, path, &opts).await?;
         }
 
         Commands::UploadDir { path, folder } => {
@@ -412,6 +458,13 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
 
 #[tokio::main]
 async fn main() {
+    // Exit quietly when stdout is closed early (`o2cloud ls | head`)
+    // instead of panicking on the write: Rust ignores SIGPIPE by default.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     if let Err(e) = run(Cli::parse()).await {
         eprintln!("Error: {e}");
         std::process::exit(1);

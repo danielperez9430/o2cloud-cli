@@ -1,6 +1,6 @@
 [package]
 name = "o2cloud-cli"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "CLI for O2 Cloud (Telefónica Spain) — manage your cloud storage from the terminal"
 license = "MIT"
@@ -29,6 +29,9 @@ dirs = "6"
 base64 = "0.22"
 sha2 = "0.10"
 zip = "9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

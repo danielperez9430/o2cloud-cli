@@ -1982,12 +1982,13 @@ dependencies = [
 
 [[package]]
 name = "o2cloud-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs",
  "futures-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
