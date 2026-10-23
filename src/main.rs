@@ -31,6 +31,26 @@ enum Commands {
         /// Kept so existing scripts don't break.
         #[arg(short, long, hide = true)]
         phone: Option<String>,
+
+        /// Log in without the login window, using the JSESSIONID cookie of
+        /// a logged-in browser session (needs --validationkey too)
+        #[arg(
+            long,
+            env = "O2CLOUD_JSESSIONID",
+            hide_env_values = true,
+            requires = "validationkey"
+        )]
+        jsessionid: Option<String>,
+
+        /// The validationkey cookie of the same browser session (needs
+        /// --jsessionid too)
+        #[arg(
+            long,
+            env = "O2CLOUD_VALIDATIONKEY",
+            hide_env_values = true,
+            requires = "jsessionid"
+        )]
+        validationkey: Option<String>,
     },
 
     /// Show current login status
@@ -186,7 +206,10 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
         eprintln!("→ Session expired");
     }
 
-    eprintln!("→ Opening login window...");
+    eprintln!(
+        "→ Opening login window... (without one, run `o2cloud login --jsessionid ... \
+         --validationkey ...` instead)"
+    );
     let new_auth = crate::auth::login().await?;
     eprintln!("✓ Re-login successful");
     let new_client = api::O2Client::new(&new_auth.device_id)?;
@@ -195,13 +218,22 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
 
 async fn run(cli: Cli) -> Result<(), O2Error> {
     match cli.command {
-        Commands::Login { phone } => {
+        Commands::Login {
+            phone,
+            jsessionid,
+            validationkey,
+        } => {
             if phone.is_some() {
                 eprintln!(
                     "Note: --phone is no longer needed; enter the number in the login window."
                 );
             }
-            let config = auth::login().await?;
+            let config = match (jsessionid, validationkey) {
+                (Some(jsessionid), Some(validationkey)) => {
+                    auth::login_manual(&jsessionid, &validationkey).await?
+                }
+                _ => auth::login().await?,
+            };
             if config.msisdn.is_empty() {
                 println!("Logged in");
             } else {

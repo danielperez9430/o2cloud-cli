@@ -55,3 +55,70 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
 
     Ok(config)
 }
+
+/// Log in with the `JSESSIONID` and `validationkey` cookies of a browser
+/// session, for machines where the login window can't open (headless,
+/// some Wayland setups). The cookies are checked against O2 Cloud before
+/// they are saved.
+pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthConfig, O2Error> {
+    let jsessionid = clean_cookie_value("--jsessionid", jsessionid)?;
+    let validationkey = clean_cookie_value("--validationkey", validationkey)?;
+    let client = O2Client::new("")?;
+
+    let mut config = AuthConfig {
+        validationkey,
+        jsessionid,
+        access_token: String::new(),
+        encryption_token: String::new(),
+        msisdn: String::new(),
+        platform: "web".into(),
+        device_id: client.device_id().to_string(),
+        logged_in_at: config::now_unix(),
+    };
+
+    eprintln!("→ Checking session...");
+    if !client.is_session_valid(&config).await? {
+        return Err(O2Error::Auth(
+            "O2 Cloud rejected the session cookies; copy fresh JSESSIONID and \
+             validationkey values from a logged-in browser"
+                .into(),
+        ));
+    }
+    // Only used for display, so a failure here doesn't fail the login.
+    if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
+        config.msisdn = msisdn;
+    }
+
+    config::save_auth(&config)?;
+    eprintln!("✓ Login successful — tokens saved");
+
+    Ok(config)
+}
+
+/// Cookie values never contain whitespace, so drop any that slipped in
+/// while copying (stray spaces, a trailing newline).
+fn clean_cookie_value(flag: &str, value: &str) -> Result<String, O2Error> {
+    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if value.is_empty() {
+        return Err(O2Error::Invalid(format!("{flag} is empty")));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_cookie_value_drops_whitespace() {
+        assert_eq!(
+            clean_cookie_value("--jsessionid", " F96C3E53 83CF.2i46 \n").unwrap(),
+            "F96C3E5383CF.2i46"
+        );
+    }
+
+    #[test]
+    fn test_clean_cookie_value_rejects_empty() {
+        assert!(clean_cookie_value("--validationkey", "  \t").is_err());
+    }
+}

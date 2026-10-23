@@ -193,7 +193,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 ## ⚠️ A tener en cuenta
 
 > [!NOTE]
-> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login. `o2cloud status` te dice si la tuya sigue activa.
+> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login (o, si no tienes, vuelve a entrar con las [cookies del navegador](#️-login-sin-ventana-de-acceso)). `o2cloud status` te dice si la tuya sigue activa.
 
 > [!WARNING]
 > **Los enlaces compartidos son públicos**: cualquiera con la URL puede abrir el archivo o la carpeta. Compartir la carpeta raíz no está permitido, porque publicaría toda la cuenta.
@@ -203,6 +203,27 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 - **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza. `upload-zip` sí los incluye dentro del zip.
 - **Enlaces simbólicos:** los enlaces a archivos se siguen; los enlaces a carpetas se omiten con un aviso, para que un enlace a una carpeta superior no provoque un bucle infinito.
 - **Aún no soportado:** dejar de compartir un archivo, y mover o renombrar carpetas. De momento hazlo desde la web.
+
+## 🖥️ Login sin ventana de acceso
+
+En una máquina sin entorno gráfico, o en un escritorio Linux donde la ventana de login no se abre (por ejemplo en algunas configuraciones de Wayland), puedes iniciar sesión con las cookies de sesión de un navegador:
+
+1. Inicia sesión en [cloud.o2online.es](https://cloud.o2online.es) en cualquier navegador.
+2. Abre las herramientas de desarrollo (F12) → **Application** (Chrome) o **Almacenamiento** (Firefox) → **Cookies**.
+3. Copia los valores de `JSESSIONID` y `validationkey`, y pásalos a `login`:
+
+```bash
+o2cloud login --jsessionid "<JSESSIONID>" --validationkey "<validationkey>"
+```
+
+Para que no queden en el historial de la terminal, usa variables de entorno:
+
+```bash
+export O2CLOUD_JSESSIONID="<JSESSIONID>" O2CLOUD_VALIDATIONKEY="<validationkey>"
+o2cloud login
+```
+
+Las cookies se comprueban antes de guardarlas. Como cualquier sesión, dura unas 24 horas; después, copia cookies nuevas y vuelve a iniciar sesión.
 
 ## ⚙️ Cómo funciona
 
