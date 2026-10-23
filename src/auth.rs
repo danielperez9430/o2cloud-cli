@@ -61,11 +61,13 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
 /// some Wayland setups). The cookies are checked against O2 Cloud before
 /// they are saved.
 pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthConfig, O2Error> {
+    let jsessionid = clean_cookie_value("--jsessionid", jsessionid)?;
+    let validationkey = clean_cookie_value("--validationkey", validationkey)?;
     let client = O2Client::new("")?;
 
     let mut config = AuthConfig {
-        validationkey: validationkey.trim().to_string(),
-        jsessionid: jsessionid.trim().to_string(),
+        validationkey,
+        jsessionid,
         access_token: String::new(),
         encryption_token: String::new(),
         msisdn: String::new(),
@@ -91,4 +93,32 @@ pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthC
     eprintln!("✓ Login successful — tokens saved");
 
     Ok(config)
+}
+
+/// Cookie values never contain whitespace, so drop any that slipped in
+/// while copying (stray spaces, a trailing newline).
+fn clean_cookie_value(flag: &str, value: &str) -> Result<String, O2Error> {
+    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if value.is_empty() {
+        return Err(O2Error::Invalid(format!("{flag} is empty")));
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_cookie_value_drops_whitespace() {
+        assert_eq!(
+            clean_cookie_value("--jsessionid", " F96C3E53 83CF.2i46 \n").unwrap(),
+            "F96C3E5383CF.2i46"
+        );
+    }
+
+    #[test]
+    fn test_clean_cookie_value_rejects_empty() {
+        assert!(clean_cookie_value("--validationkey", "  \t").is_err());
+    }
 }
