@@ -2,6 +2,25 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.7.0] — 2026-10-24
+
+### Added
+- `mkdir <folder>` creates a folder; `-p` also creates missing parent
+  folders and doesn't fail if the folder already exists.
+- `mv` and `rename` work on folders too, with everything inside them.
+  Moving a folder into itself or one of its subfolders, and moving or
+  renaming the root folder, are refused.
+- `cp <file> <folder>` copies a file on the server, without downloading
+  it; `--name` gives the copy another name. Folders can't be copied yet.
+- `quota` shows the storage used, free and in the trash, and `status`
+  shows the storage used too.
+
+### Changed
+- `mkdir`, `mv`, `cp` and `rename` refuse to create a second file or
+  folder with a name already used in the same place. The server would
+  allow two folders with the same name, or rename the new one to
+  `name (1)` without saying so.
+
 ## [0.6.0] — 2026-10-24
 
 ### Added

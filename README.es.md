@@ -24,7 +24,8 @@
 - ⬆️ **Sube** archivos sueltos, carpetas enteras o una carpeta como `.zip`
 - ⬇️ **Descarga** por ID, ruta o nombre de archivo
 - 🔗 **Comparte** archivos y carpetas con un enlace público, y quítalo cuando quieras
-- ✏️ **Mueve** y **renombra** archivos
+- 🗂️ **Crea**, **mueve** y **renombra** carpetas; **mueve**, **renombra** y **copia** archivos (las copias se hacen en el servidor, no se descarga nada)
+- 📊 Consulta tu **almacenamiento**: usado, libre y en la papelera
 - 🗑️ **Borra** a la papelera, con comprobaciones de seguridad (confirmación para carpetas, la carpeta raíz no se puede borrar, los nombres ambiguos nunca se adivinan)
 
 ## 📦 Instalación
@@ -101,8 +102,11 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 🔗 `share <archivo o carpeta>` | Crea un enlace público e imprime su URL |
 | 📋 `shares` | Lista las carpetas compartidas |
 | 🚫 `unshare <carpeta>` | Quita el enlace público de una carpeta |
-| 📦 `mv <archivo> <carpeta>` | Mueve un archivo a otra carpeta |
-| ✏️ `rename <archivo> <nombre>` | Renombra un archivo |
+| 📁 `mkdir <carpeta>` | Crea una carpeta (`-p` para crear también las carpetas padre que falten) |
+| 📦 `mv <archivo o carpeta> <carpeta>` | Mueve un archivo o una carpeta a otra carpeta |
+| 📑 `cp <archivo> <carpeta>` | Copia un archivo en el servidor (`--name` para darle otro nombre) |
+| ✏️ `rename <archivo o carpeta> <nombre>` | Renombra un archivo o una carpeta |
+| 📊 `quota` | Muestra el almacenamiento usado, libre y en la papelera |
 
 Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 
@@ -184,11 +188,17 @@ La URL sale sola por la salida estándar, así que se puede usar en scripts: `ur
 </details>
 
 <details open>
-<summary><b>🗂️ Mover, renombrar y borrar</b></summary>
+<summary><b>🗂️ Organizar y borrar</b></summary>
 
 ```bash
-o2cloud mv /notas.pdf /Documentos
+o2cloud mkdir /Fotos/2024               # crea una carpeta
+o2cloud mkdir -p /Fotos/2024/Verano     # creando también las que falten
+o2cloud mv /notas.pdf /Documentos       # mueve un archivo...
+o2cloud mv /Fotos/2024 /Archivo         # ...o una carpeta entera
 o2cloud rename /Documentos/notas.pdf notas-2024.pdf
+o2cloud rename /Archivo/2024 Fotos-2024
+o2cloud cp /Documentos/notas.pdf /Copias                     # copia, en el servidor
+o2cloud cp /Documentos/notas.pdf /Copias --name antiguo.pdf  # con otro nombre
 
 o2cloud rm /Documentos/notas-2024.pdf   # un archivo
 o2cloud rm /Fotos/antiguas -r           # una carpeta con su contenido (pregunta antes)
@@ -209,7 +219,8 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 - **`download` nunca sobrescribe** un archivo local que ya exista. Sin `-o`, solo usa el nombre del archivo, nunca una carpeta enviada por el servidor.
 - **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza. `upload-zip` sí los incluye dentro del zip.
 - **Enlaces simbólicos:** los enlaces a archivos se siguen; los enlaces a carpetas se omiten con un aviso, para que un enlace a una carpeta superior no provoque un bucle infinito.
-- **Aún no soportado:** dejar de compartir un archivo, y mover o renombrar carpetas. De momento hazlo desde la web.
+- **No se sobrescribe nada:** `mkdir`, `mv`, `cp` y `rename` se niegan a crear un segundo archivo o carpeta con el mismo nombre en el mismo sitio.
+- **Aún no soportado:** dejar de compartir un archivo, y copiar carpetas. De momento hazlo desde la web.
 
 ## 🖥️ Login sin ventana de acceso
 

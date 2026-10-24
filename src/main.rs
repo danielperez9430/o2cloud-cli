@@ -186,23 +186,49 @@ enum Commands {
         target: String,
     },
 
-    /// Move a file into another folder
+    /// Move a file or folder into another folder
     Mv {
-        /// File ID, path (e.g. /docs/a.txt), or unique file name
+        /// File/folder ID, path (e.g. /docs/a.txt or /docs), or unique file name
         source: String,
 
         /// Destination folder ID or path (e.g. /archive)
         destination: String,
     },
 
-    /// Rename a file
-    Rename {
+    /// Copy a file into a folder, on the server (nothing is downloaded)
+    Cp {
         /// File ID, path (e.g. /docs/a.txt), or unique file name
+        source: String,
+
+        /// Destination folder ID or path (e.g. /archive)
+        destination: String,
+
+        /// Name for the copy (default: the same name)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+
+    /// Rename a file or folder
+    Rename {
+        /// File/folder ID, path (e.g. /docs/a.txt or /docs), or unique file name
         target: String,
 
         /// New name (just the name, not a path)
         new_name: String,
     },
+
+    /// Create a folder
+    Mkdir {
+        /// Folder path (e.g. /Photos/2024)
+        path: String,
+
+        /// Create missing parent folders too, and don't fail if the folder exists
+        #[arg(short, long)]
+        parents: bool,
+    },
+
+    /// Show storage used, free and in the trash
+    Quota,
 
     /// Download a file from O2 Cloud
     Download {
@@ -318,9 +344,13 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         Commands::Status => match config::load_auth() {
             Ok(cfg) => {
                 // Check the session against the server, without renewing it.
+                let mut storage = None;
                 let session = match api::O2Client::new(&cfg.device_id) {
                     Ok(client) => match client.is_session_valid(&cfg).await {
-                        Ok(true) => "active".to_string(),
+                        Ok(true) => {
+                            storage = client.storage_space(&cfg).await.ok();
+                            "active".to_string()
+                        }
                         Ok(false) if cfg.sapi_auth_header().is_some() => {
                             "expired (the next command renews it silently)".to_string()
                         }
@@ -339,6 +369,17 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                     println!("  Since: {}", util::format_unix_utc(cfg.logged_in_at));
                 }
                 println!("  Session: {}", session);
+                if let Some(space) = storage {
+                    if space.nolimit {
+                        println!("  Storage: {} used", util::format_size(space.used));
+                    } else {
+                        println!(
+                            "  Storage: {} of {} used",
+                            util::format_size(space.used),
+                            util::format_size(space.quota)
+                        );
+                    }
+                }
                 if cfg.sapi_auth_header().is_none() {
                     println!("  Sessions last about 24 h and aren't renewed automatically.");
                 }
@@ -445,6 +486,25 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         Commands::Rename { target, new_name } => {
             let (client, auth) = require_client_and_auth().await?;
             ops::rename_item(&client, &auth, &target, &new_name).await?;
+        }
+
+        Commands::Cp {
+            source,
+            destination,
+            name,
+        } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::copy_item(&client, &auth, &source, &destination, name.as_deref()).await?;
+        }
+
+        Commands::Mkdir { path, parents } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::make_folder(&client, &auth, &path, parents).await?;
+        }
+
+        Commands::Quota => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::show_quota(&client, &auth).await?;
         }
 
         Commands::Download { target, output } => {

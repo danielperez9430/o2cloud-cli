@@ -1536,7 +1536,7 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
 // Move & rename
 // ------------------------------------------------------------------
 
-/// Move a file into another folder.
+/// Move a file or folder into another folder.
 pub async fn move_item(
     client: &O2Client,
     auth: &AuthConfig,
@@ -1550,7 +1550,9 @@ pub async fn move_item(
 
     let item = match resolve_item(source, &folders, &folder_name, &media)? {
         Item::File(item) => item,
-        Item::Folder(_) => return Err(folder_unsupported("Moving")),
+        Item::Folder(id) => {
+            return move_folder(client, auth, id, destination, &folders, &folder_name).await
+        }
     };
     let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
     let dest_path = resolve_path(dest_id, &folder_name, &folders);
@@ -1578,20 +1580,73 @@ pub async fn move_item(
     Ok(())
 }
 
-/// Rename a file (the new name is a bare name, not a path).
+/// Move folder `folder_id` (and everything in it) into `destination`.
+async fn move_folder(
+    client: &O2Client,
+    auth: &AuthConfig,
+    folder_id: u64,
+    destination: &str,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+) -> Result<(), O2Error> {
+    if is_root_folder(folder_id, folders) {
+        return Err(O2Error::Invalid("refusing to move the root folder".into()));
+    }
+    let folder = folders
+        .iter()
+        .find(|f| f.id == folder_id)
+        .ok_or_else(|| O2Error::NotFound(format!("folder {}", folder_id)))?;
+    let dest_id = resolve_target(Some(destination.to_string()), folders, folder_name)?;
+    let from = resolve_path(folder_id, folder_name, folders);
+    let dest_path = resolve_path(dest_id, folder_name, folders);
+
+    if folder.parentid == dest_id {
+        eprintln!("{}/ is already in {}", from, dest_path);
+        return Ok(());
+    }
+    if subtree_ids(folder_id, folders).contains(&dest_id) {
+        return Err(O2Error::Invalid(format!(
+            "can't move {}/ into itself ({})",
+            from, dest_path
+        )));
+    }
+    if folders
+        .iter()
+        .any(|f| f.parentid == dest_id && f.name == folder.name)
+    {
+        return Err(O2Error::Invalid(format!(
+            "{} already has a folder named '{}'",
+            dest_path, folder.name
+        )));
+    }
+
+    client
+        .update_folder(folder_id, &folder.name, dest_id, auth)
+        .await?;
+    eprintln!("✓ Moved {}/ → {}", from, dest_path);
+    Ok(())
+}
+
+/// Check a bare file or folder name given on the command line.
+fn validate_name(name: &str) -> Result<&str, O2Error> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(O2Error::Invalid(format!(
+            "invalid name '{}' (use `o2cloud mv` to move between folders)",
+            name
+        )));
+    }
+    Ok(name)
+}
+
+/// Rename a file or folder (the new name is a bare name, not a path).
 pub async fn rename_item(
     client: &O2Client,
     auth: &AuthConfig,
     target: &str,
     new_name: &str,
 ) -> Result<(), O2Error> {
-    let new_name = new_name.trim();
-    if new_name.is_empty() || new_name.contains('/') || new_name == "." || new_name == ".." {
-        return Err(O2Error::Invalid(format!(
-            "invalid name '{}' (use `o2cloud mv` to move between folders)",
-            new_name
-        )));
-    }
+    let new_name = validate_name(new_name)?;
 
     let folders = client.get_all_folders(auth).await?;
     let media = client.get_all_media(auth).await?;
@@ -1600,7 +1655,9 @@ pub async fn rename_item(
 
     let item = match resolve_item(target, &folders, &folder_name, &media)? {
         Item::File(item) => item,
-        Item::Folder(_) => return Err(folder_unsupported("Renaming")),
+        Item::Folder(id) => {
+            return rename_folder(client, auth, id, new_name, &folders, &folder_name).await
+        }
     };
     let from = file_path(item, &folders, &folder_name);
     if media.iter().any(|m| {
@@ -1616,6 +1673,179 @@ pub async fn rename_item(
         .update_file(item.id, serde_json::json!({ "name": new_name }), auth)
         .await?;
     eprintln!("✓ Renamed {} → {}", from, new_name);
+    Ok(())
+}
+
+async fn rename_folder(
+    client: &O2Client,
+    auth: &AuthConfig,
+    folder_id: u64,
+    new_name: &str,
+    folders: &[crate::api::FolderEntry],
+    folder_name: &HashMap<u64, String>,
+) -> Result<(), O2Error> {
+    if is_root_folder(folder_id, folders) {
+        return Err(O2Error::Invalid(
+            "refusing to rename the root folder".into(),
+        ));
+    }
+    let folder = folders
+        .iter()
+        .find(|f| f.id == folder_id)
+        .ok_or_else(|| O2Error::NotFound(format!("folder {}", folder_id)))?;
+    let from = resolve_path(folder_id, folder_name, folders);
+    if folder.name == new_name {
+        eprintln!("{}/ is already called '{}'", from, new_name);
+        return Ok(());
+    }
+    if folders
+        .iter()
+        .any(|f| f.id != folder_id && f.parentid == folder.parentid && f.name == new_name)
+    {
+        return Err(O2Error::Invalid(format!(
+            "a folder named '{}' already exists there",
+            new_name
+        )));
+    }
+
+    client
+        .update_folder(folder_id, new_name, folder.parentid, auth)
+        .await?;
+    eprintln!("✓ Renamed {}/ → {}/", from, new_name);
+    Ok(())
+}
+
+// ------------------------------------------------------------------
+// Copy / mkdir / quota
+// ------------------------------------------------------------------
+
+/// Copy a file into a folder on the server (nothing is downloaded),
+/// optionally under a new name.
+pub async fn copy_item(
+    client: &O2Client,
+    auth: &AuthConfig,
+    source: &str,
+    destination: &str,
+    new_name: Option<&str>,
+) -> Result<(), O2Error> {
+    let new_name = new_name.map(validate_name).transpose()?;
+
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    let item = match resolve_item(source, &folders, &folder_name, &media)? {
+        Item::File(item) => item,
+        Item::Folder(_) => return Err(folder_unsupported("Copying")),
+    };
+    let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
+    let dest_path = resolve_path(dest_id, &folder_name, &folders);
+    let from = file_path(item, &folders, &folder_name);
+    let name = new_name.or(item.name.as_deref()).unwrap_or("?");
+
+    if media
+        .iter()
+        .any(|m| m.folderid == Some(dest_id) && m.name.as_deref() == Some(name))
+    {
+        return Err(O2Error::Invalid(format!(
+            "{} already has a file named '{}' (use --name to give the copy another name)",
+            dest_path, name
+        )));
+    }
+
+    let id = client.copy_file(item.id, dest_id, new_name, auth).await?;
+    let to = if dest_path == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", dest_path, name)
+    };
+    eprintln!("✓ Copied {} → {} (id:{})", from, to, id);
+    Ok(())
+}
+
+/// Create a folder. `path` is absolute (`/a/b`) or relative to the root
+/// (`a/b`). With `parents`, missing parent folders are created too and an
+/// existing folder isn't an error, as with `mkdir -p`.
+pub async fn make_folder(
+    client: &O2Client,
+    auth: &AuthConfig,
+    path: &str,
+    parents: bool,
+) -> Result<(), O2Error> {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(O2Error::Invalid("the root folder already exists".into()));
+    }
+    for part in &parts {
+        if *part == "." || *part == ".." {
+            return Err(O2Error::Invalid(format!("invalid folder name '{}'", part)));
+        }
+    }
+
+    let folders = client.get_all_folders(auth).await?;
+    let mut current = folders
+        .iter()
+        .find(|f| f.name == "/")
+        .map(|f| f.id)
+        .ok_or_else(|| O2Error::NotFound("the root folder".into()))?;
+    let mut shown = String::new();
+
+    for (i, part) in parts.iter().enumerate() {
+        shown.push('/');
+        shown.push_str(part);
+        let last = i == parts.len() - 1;
+        // Exact name match only: the server treats `Docs` and `docs` as
+        // different folders
+        match folders
+            .iter()
+            .find(|f| f.parentid == current && f.name == *part)
+        {
+            Some(f) if last && !parents => {
+                return Err(O2Error::Invalid(format!(
+                    "{}/ already exists (id:{})",
+                    shown, f.id
+                )));
+            }
+            Some(f) => current = f.id,
+            None if !last && !parents => {
+                return Err(O2Error::NotFound(format!(
+                    "folder {}/ (use -p to create missing parents)",
+                    shown
+                )));
+            }
+            None => {
+                current = client.create_folder(part, current, auth).await?;
+                eprintln!("✓ Created folder {}/ (id:{})", shown, current);
+            }
+        }
+    }
+    if parents && folders.iter().any(|f| f.id == current) {
+        eprintln!("{}/ already exists (id:{})", shown, current);
+    }
+    Ok(())
+}
+
+/// Print the storage quota and usage.
+pub async fn show_quota(client: &O2Client, auth: &AuthConfig) -> Result<(), O2Error> {
+    let space = client.storage_space(auth).await?;
+    if space.nolimit {
+        println!("Used:   {} (no storage limit)", format_size(space.used));
+    } else {
+        let pct = if space.quota > 0 {
+            space.used as f64 * 100.0 / space.quota as f64
+        } else {
+            0.0
+        };
+        println!(
+            "Used:   {} of {} ({:.1}%)",
+            format_size(space.used),
+            format_size(space.quota),
+            pct
+        );
+        println!("Free:   {}", format_size(space.free));
+    }
+    println!("Trash:  {}", format_size(space.softdeleted));
     Ok(())
 }
 
@@ -2363,5 +2593,27 @@ mod tests {
         assert_eq!(format_date(Some(1705314645000)), "2024-01-15 10:30");
         assert_eq!(format_date_iso(Some(1705314645000)), "2024-01-15T10:30:45Z");
         assert_eq!(format_date_iso(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_validate_name() {
+        assert_eq!(validate_name("  notes.pdf ").unwrap(), "notes.pdf");
+        assert_eq!(validate_name("Fotos 2024").unwrap(), "Fotos 2024");
+        for bad in ["", "   ", ".", "..", "a/b", "/x"] {
+            assert!(validate_name(bad).is_err(), "{:?} should be rejected", bad);
+        }
+    }
+
+    #[test]
+    fn test_parse_storage_space() {
+        let body: crate::api::StorageSpace = serde_json::from_str(
+            r#"{"quota":10995116277760,"softdeleted":5011,"free":10982145637694,
+                "used":12970640066,"nolimit":false,"individual":{"used":1,"softdeleted":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(body.quota, 10995116277760);
+        assert_eq!(body.used, 12970640066);
+        assert_eq!(body.softdeleted, 5011);
+        assert!(!body.nolimit);
     }
 }
