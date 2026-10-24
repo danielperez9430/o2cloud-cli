@@ -24,7 +24,8 @@
 - ⬆️ **Upload** single files, whole folders, or a folder as a `.zip`
 - ⬇️ **Download** by ID, path or file name
 - 🔗 **Share** files and folders with a public link, and remove the link again
-- ✏️ **Move** and **rename** files
+- 🗂️ **Create**, **move** and **rename** folders; **move**, **rename** and **copy** files (copies are made on the server, nothing is downloaded)
+- 📊 See your **storage**: used, free and in the trash
 - 🗑️ **Delete** to the trash, with safety checks (confirmation for folders, the root folder can't be deleted, ambiguous names are never guessed)
 
 ## 📦 Installation
@@ -101,8 +102,11 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 🔗 `share <file or folder>` | Create a public link and print its URL |
 | 📋 `shares` | List shared folders |
 | 🚫 `unshare <folder>` | Remove a folder's public link |
-| 📦 `mv <file> <folder>` | Move a file to another folder |
-| ✏️ `rename <file> <name>` | Rename a file |
+| 📁 `mkdir <folder>` | Create a folder (`-p` to create missing parents too) |
+| 📦 `mv <file or folder> <folder>` | Move a file or folder to another folder |
+| 📑 `cp <file> <folder>` | Copy a file on the server (`--name` to name the copy) |
+| ✏️ `rename <file or folder> <name>` | Rename a file or folder |
+| 📊 `quota` | Show storage used, free and in the trash |
 
 Run `o2cloud <command> --help` for all the options.
 
@@ -184,11 +188,17 @@ The URL is printed alone on standard output, so scripts can capture it: `url=$(o
 </details>
 
 <details open>
-<summary><b>🗂️ Move, rename and delete</b></summary>
+<summary><b>🗂️ Organize and delete</b></summary>
 
 ```bash
-o2cloud mv /notes.pdf /Documents
+o2cloud mkdir /Photos/2024              # create a folder
+o2cloud mkdir -p /Photos/2024/Summer    # creating missing parents too
+o2cloud mv /notes.pdf /Documents        # move a file...
+o2cloud mv /Photos/2024 /Archive        # ...or a whole folder
 o2cloud rename /Documents/notes.pdf notes-2024.pdf
+o2cloud rename /Archive/2024 Photos-2024
+o2cloud cp /Documents/notes.pdf /Backup                  # copy, on the server
+o2cloud cp /Documents/notes.pdf /Backup --name old.pdf   # with another name
 
 o2cloud rm /Documents/notes-2024.pdf    # a file
 o2cloud rm /Photos/old -r               # a folder and its contents (asks first)
@@ -209,7 +219,8 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
 - **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them. `upload-zip` includes them inside the zip.
 - **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
-- **Not supported yet:** unsharing a file, and moving or renaming folders. Use the website for those for now.
+- **Nothing is overwritten:** `mkdir`, `mv`, `cp` and `rename` refuse to create a second file or folder with the same name in the same place.
+- **Not supported yet:** unsharing a file, and copying folders. Use the website for those for now.
 
 ## 🖥️ Logging in without a login window
 

@@ -895,6 +895,9 @@ impl O2Client {
                 truncate_utf8(&raw_body, 300)
             )));
         }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Create folder failed: {}", err)));
+        }
 
         #[derive(Deserialize)]
         struct FolderCreateResponse {
@@ -915,6 +918,96 @@ impl O2Client {
     // ------------------------------------------------------------------
     // Delete
     // ------------------------------------------------------------------
+
+    /// Rename and/or move a folder: `name` is its (new) name and
+    /// `parent_id` its (new) parent. The server wants both even when only
+    /// one changes, and silently allows two folders with the same name in
+    /// one parent, so callers check for that first.
+    ///
+    /// `POST /sapi/media/folder?action=save` with `{"data":{"id","name","parentid"}}`
+    pub async fn update_folder(
+        &self,
+        folder_id: u64,
+        name: &str,
+        parent_id: u64,
+        auth: &AuthConfig,
+    ) -> Result<(), O2Error> {
+        let body = serde_json::json!({
+            "data": { "id": folder_id, "name": name, "parentid": parent_id }
+        });
+        self.sapi_post_json("/sapi/media/folder", "save", &body, auth, "Update folder")
+            .await?;
+        Ok(())
+    }
+
+    /// Copy a file on the server into folder `parent_id`, optionally under
+    /// a new name; returns the copy's media ID. On a name clash the server
+    /// renames the copy (`f (1).txt`), so callers check for that first.
+    ///
+    /// `POST /sapi/media/file?action=copy` with `{"data":{"id","parentid","name"?}}`
+    pub async fn copy_file(
+        &self,
+        media_id: u64,
+        parent_id: u64,
+        name: Option<&str>,
+        auth: &AuthConfig,
+    ) -> Result<u64, O2Error> {
+        let mut data = serde_json::json!({ "id": media_id, "parentid": parent_id });
+        if let Some(name) = name {
+            data["name"] = name.into();
+        }
+        let body = serde_json::json!({ "data": data });
+        let raw = self
+            .sapi_post_json("/sapi/media/file", "copy", &body, auth, "Copy")
+            .await?;
+
+        #[derive(Deserialize)]
+        struct CopyData {
+            #[serde(deserialize_with = "deserialize_id")]
+            id: u64,
+        }
+        let body: RawResponse<CopyData> = serde_json::from_str(&raw).map_err(|e| {
+            O2Error::Parse(format!(
+                "Failed to parse copy response: {} — body: {}",
+                e,
+                truncate_utf8(&raw, 200)
+            ))
+        })?;
+        Ok(body.data.id)
+    }
+
+    /// Storage quota and usage, in bytes.
+    ///
+    /// `GET /sapi/media?action=get-storage-space&softdeleted=true`
+    pub async fn storage_space(&self, auth: &AuthConfig) -> Result<StorageSpace, O2Error> {
+        let url = format!("{}/sapi/media", BASE_URL);
+        let req = self.client.get(&url).timeout(REQUEST_TIMEOUT).query(&[
+            ("action", "get-storage-space"),
+            ("softdeleted", "true"),
+            ("validationkey", &auth.validationkey),
+        ]);
+        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let status = resp.status();
+        let raw_body = resp.text().await?;
+        if !status.is_success() {
+            return Err(O2Error::Api(format!(
+                "Get storage space failed (status {}): {}",
+                status,
+                truncate_utf8(&raw_body, 300)
+            )));
+        }
+        if let Some(err) = sapi_error(&raw_body) {
+            return Err(O2Error::Api(format!("Get storage space failed: {}", err)));
+        }
+        let body: RawResponse<StorageSpace> = serde_json::from_str(&raw_body).map_err(|e| {
+            O2Error::Parse(format!(
+                "Failed to parse storage space: {} — body: {}",
+                e,
+                truncate_utf8(&raw_body, 300)
+            ))
+        })?;
+        Ok(body.data)
+    }
 
     /// Soft-delete a folder (move to trash).
     ///
@@ -1410,6 +1503,20 @@ pub struct FolderEntry {
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_id")]
     pub parentid: u64,
+}
+
+/// Storage figures from `get-storage-space`, in bytes.
+#[derive(Debug, Deserialize)]
+pub struct StorageSpace {
+    pub quota: u64,
+    pub used: u64,
+    pub free: u64,
+    /// Bytes in the trash.
+    #[serde(default)]
+    pub softdeleted: u64,
+    /// The plan has no storage limit.
+    #[serde(default)]
+    pub nolimit: bool,
 }
 
 /// A media item returned by `POST /sapi/media?action=get`.
