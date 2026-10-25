@@ -1539,15 +1539,24 @@ pub struct MediaItem {
     pub url: Option<String>,
     /// When the file was uploaded, in Unix milliseconds. Sent even when
     /// not asked for (asking for it is rejected).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub date: Option<u64>,
     /// When the file itself was created (for a photo, when it was taken),
     /// in Unix milliseconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub creationdate: Option<u64>,
     /// Catch-all for fields we don't use (etag, mediatype, status, …).
     #[serde(flatten)]
     _rest: serde_json::Value,
+}
+
+/// Unix-millisecond timestamp. O2 sends negative values for some old
+/// media; read those as unknown instead of failing the whole listing.
+fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<i64>::deserialize(deserializer)?.and_then(|ms| u64::try_from(ms).ok()))
 }
 
 fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -1709,6 +1718,26 @@ mod tests {
         .unwrap();
         assert_eq!(link.folderid, Some(35559600));
         assert_eq!(link.usages, Some(0));
+    }
+
+    #[test]
+    fn test_media_item_negative_timestamp_is_unknown() {
+        // Some old phone videos come back with a creation date before 1970.
+        let item: MediaItem = serde_json::from_str(
+            r#"{"id":"100","name":"VIDEO0001.3gp","date":1700000000000,"creationdate":-777523141000}"#,
+        )
+        .unwrap();
+        assert_eq!(item.creationdate, None);
+        assert_eq!(item.date, Some(1700000000000));
+
+        let item: MediaItem =
+            serde_json::from_str(r#"{"id":1,"date":null,"creationdate":0}"#).unwrap();
+        assert_eq!(item.date, None);
+        assert_eq!(item.creationdate, Some(0));
+
+        let item: MediaItem = serde_json::from_str(r#"{"id":1}"#).unwrap();
+        assert_eq!(item.date, None);
+        assert_eq!(item.creationdate, None);
     }
 
     #[test]

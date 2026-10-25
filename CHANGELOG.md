@@ -2,6 +2,14 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and
+  `unshare` no longer fail on accounts with a file that has a negative
+  creation date (some old phone videos). That date is treated as unknown,
+  so the upload date is shown instead.
+
 ## [0.7.0] — 2026-10-24
 
 ### Added
