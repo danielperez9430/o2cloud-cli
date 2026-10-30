@@ -110,6 +110,28 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 
 Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 
+### 🧩 Salida JSON
+
+`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `mkdir`, `cp`, `share`, `shares`, `status` y `quota` aceptan `--json` e imprimen un único valor JSON en stdout, para scripts y otras apps. Los mensajes de progreso siguen saliendo por stderr, y los errores son `Error: …` en stderr con código de salida 1.
+
+```console
+$ o2cloud upload ./pelicula.mkv --json 2>/dev/null
+{ "id": 1234567890, "name": "pelicula.mkv", "folderid": 12345678, "size": 1048576 }
+$ o2cloud mkdir -p /Copias --json 2>/dev/null
+{ "id": 12345679, "path": "/Copias", "created": false }
+```
+
+- `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
+- `upload` y `upload-zip`: `id`, `name`, `folderid`, `size`. Usa el `id` directamente: una subida nueva puede tardar un minuto en aparecer en `ls`.
+- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, y `id`, o `error` si ese archivo falló.
+- `download`: `id`, `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
+- `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
+- `cp`: `id` de la copia, `name`, `folderid`, `path` y `source` (el ID del original).
+- `share`: `id` y `url` del enlace, `path` y `folder` (`true` para una carpeta; su `id` es el que acepta `unshare`).
+- `shares`: un array de enlaces: `id`, `url`, `uses`, `folderid`, `path` y `foldername`.
+- `quota`: `quota`, `used`, `free`, `softdeleted` (en la papelera), en bytes, y `nolimit`.
+- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` o `unknown`), `renews_silently` y `storage` (como en `quota`, o `null`).
+
 ### 🎯 Cómo indicar archivos y carpetas
 
 Donde un comando pide un archivo o una carpeta, puedes usar cualquiera de estas formas:

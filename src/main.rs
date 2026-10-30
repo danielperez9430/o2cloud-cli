@@ -76,7 +76,11 @@ enum Commands {
     },
 
     /// Show current login status
-    Status,
+    Status {
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Log out (clear stored tokens)
     Logout,
@@ -129,6 +133,10 @@ enum Commands {
         /// Target folder ID (omit for root)
         #[arg(short, long)]
         folder: Option<u64>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// Upload a directory recursively
@@ -139,6 +147,10 @@ enum Commands {
         /// Target folder ID (omit for root)
         #[arg(short, long)]
         folder: Option<u64>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// Zip a directory and upload it as a single file
@@ -149,6 +161,10 @@ enum Commands {
         /// Target folder ID (omit for root)
         #[arg(short, long)]
         folder: Option<u64>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// Delete a file or folder (move to trash)
@@ -169,16 +185,28 @@ enum Commands {
     Find {
         /// Search query (case-insensitive substring match)
         query: String,
+
+        /// Print JSON instead of a list
+        #[arg(long)]
+        json: bool,
     },
 
     /// Create a public link to a file or folder and print its URL
     Share {
         /// File/folder ID, path (e.g. /docs or /docs/a.txt), or unique file name
         target: String,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// List shared folders (public links)
-    Shares,
+    Shares {
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Remove the public link of a folder
     Unshare {
@@ -206,6 +234,10 @@ enum Commands {
         /// Name for the copy (default: the same name)
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// Rename a file or folder
@@ -225,10 +257,18 @@ enum Commands {
         /// Create missing parent folders too, and don't fail if the folder exists
         #[arg(short, long)]
         parents: bool,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show storage used, free and in the trash
-    Quota,
+    Quota {
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Download a file from O2 Cloud
     Download {
@@ -239,6 +279,10 @@ enum Commands {
         /// Output file path (defaults to current directory)
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -341,26 +385,45 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             }
         }
 
-        Commands::Status => match config::load_auth() {
+        Commands::Status { json } => match config::load_auth() {
             Ok(cfg) => {
                 // Check the session against the server, without renewing it.
                 let mut storage = None;
-                let session = match api::O2Client::new(&cfg.device_id) {
+                // The state for `--json`, and how to word it for people.
+                let (state, session) = match api::O2Client::new(&cfg.device_id) {
                     Ok(client) => match client.is_session_valid(&cfg).await {
                         Ok(true) => {
                             storage = client.storage_space(&cfg).await.ok();
-                            "active".to_string()
+                            ("active", "active".to_string())
                         }
-                        Ok(false) if cfg.sapi_auth_header().is_some() => {
-                            "expired (the next command renews it silently)".to_string()
-                        }
-                        Ok(false) => {
-                            "expired (the next command opens the login window)".to_string()
-                        }
-                        Err(e) => format!("unknown — couldn't reach O2 Cloud ({e})"),
+                        Ok(false) if cfg.sapi_auth_header().is_some() => (
+                            "expired",
+                            "expired (the next command renews it silently)".to_string(),
+                        ),
+                        Ok(false) => (
+                            "expired",
+                            "expired (the next command opens the login window)".to_string(),
+                        ),
+                        Err(e) => (
+                            "unknown",
+                            format!("unknown — couldn't reach O2 Cloud ({e})"),
+                        ),
                     },
-                    Err(e) => format!("unknown ({e})"),
+                    Err(e) => ("unknown", format!("unknown ({e})")),
                 };
+                if json {
+                    ops::print_json(&serde_json::json!({
+                        "logged_in": true,
+                        "phone": (!cfg.msisdn.is_empty()).then(|| format!("+34{}", cfg.msisdn)),
+                        "since": ops::format_date_iso(
+                            (cfg.logged_in_at > 0).then(|| cfg.logged_in_at * 1000)
+                        ),
+                        "session": state,
+                        "renews_silently": cfg.sapi_auth_header().is_some(),
+                        "storage": storage,
+                    }));
+                    return Ok(());
+                }
                 println!("✓ Logged in");
                 if !cfg.msisdn.is_empty() {
                     println!("  Phone: +34 {}", cfg.msisdn);
@@ -383,6 +446,9 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 if cfg.sapi_auth_header().is_none() {
                     println!("  Sessions last about 24 h and aren't renewed automatically.");
                 }
+            }
+            Err(_) if json => {
+                ops::print_json(&serde_json::json!({ "logged_in": false }));
             }
             Err(_) => {
                 println!("✗ Not logged in. Run `o2cloud login` to authenticate.");
@@ -419,22 +485,22 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::list_folder(&client, &auth, path, &opts).await?;
         }
 
-        Commands::UploadDir { path, folder } => {
+        Commands::UploadDir { path, folder, json } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
-            ops::upload_dir(&client, &auth, &local_path, folder).await?;
+            ops::upload_dir(&client, &auth, &local_path, folder, json).await?;
         }
 
-        Commands::UploadZip { path, folder } => {
+        Commands::UploadZip { path, folder, json } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
-            ops::upload_zip(&client, &auth, &local_path, folder).await?;
+            ops::upload_zip(&client, &auth, &local_path, folder, json).await?;
         }
 
         Commands::Rm {
@@ -446,28 +512,28 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::delete_target(&client, &auth, &target, recursive, yes).await?;
         }
 
-        Commands::Upload { path, folder } => {
+        Commands::Upload { path, folder, json } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.exists() {
                 return Err(O2Error::NotFound(format!("file not found: {}", path)));
             }
-            ops::upload_file(&client, &auth, &local_path, folder).await?;
+            ops::upload_file(&client, &auth, &local_path, folder, json).await?;
         }
 
-        Commands::Find { query } => {
+        Commands::Find { query, json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::find(&client, &auth, &query).await?;
+            ops::find(&client, &auth, &query, json).await?;
         }
 
-        Commands::Share { target } => {
+        Commands::Share { target, json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::share(&client, &auth, &target).await?;
+            ops::share(&client, &auth, &target, json).await?;
         }
 
-        Commands::Shares => {
+        Commands::Shares { json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::list_shares(&client, &auth).await?;
+            ops::list_shares(&client, &auth, json).await?;
         }
 
         Commands::Unshare { target } => {
@@ -492,25 +558,34 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             source,
             destination,
             name,
+            json,
         } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::copy_item(&client, &auth, &source, &destination, name.as_deref()).await?;
+            ops::copy_item(&client, &auth, &source, &destination, name.as_deref(), json).await?;
         }
 
-        Commands::Mkdir { path, parents } => {
+        Commands::Mkdir {
+            path,
+            parents,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::make_folder(&client, &auth, &path, parents).await?;
+            ops::make_folder(&client, &auth, &path, parents, json).await?;
         }
 
-        Commands::Quota => {
+        Commands::Quota { json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::show_quota(&client, &auth).await?;
+            ops::show_quota(&client, &auth, json).await?;
         }
 
-        Commands::Download { target, output } => {
+        Commands::Download {
+            target,
+            output,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             let output_path = output.map(PathBuf::from);
-            ops::download_file(&client, &auth, &target, output_path).await?;
+            ops::download_file(&client, &auth, &target, output_path, json).await?;
         }
     }
     Ok(())

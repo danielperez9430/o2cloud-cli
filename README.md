@@ -110,6 +110,28 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 
 Run `o2cloud <command> --help` for all the options.
 
+### 🧩 JSON output
+
+`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr, and errors are `Error: …` on stderr with exit code 1.
+
+```console
+$ o2cloud upload ./movie.mkv --json 2>/dev/null
+{ "id": 1234567890, "name": "movie.mkv", "folderid": 12345678, "size": 1048576 }
+$ o2cloud mkdir -p /Backups --json 2>/dev/null
+{ "id": 12345679, "path": "/Backups", "created": false }
+```
+
+- `find`: `folders` (`id`, `name`, `path`) and `files` (`id`, `name`, `size`, `date`, `path`), as in `ls --json`.
+- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size`. Use the `id` right away: a new upload can take a minute to show up in `ls`.
+- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, and `id`, or `error` if that file failed.
+- `download`: `id`, `name`, `path` (where it was saved, absolute) and `size`.
+- `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
+- `cp`: `id` of the copy, `name`, `folderid`, `path`, and `source` (the original's ID).
+- `share`: `id` and `url` of the link, `path`, and `folder` (`true` for a folder; its `id` is what `unshare` takes).
+- `shares`: an array of links: `id`, `url`, `uses`, `folderid`, `path` and `foldername`.
+- `quota`: `quota`, `used`, `free`, `softdeleted` (in the trash), in bytes, and `nolimit`.
+- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` or `unknown`), `renews_silently`, and `storage` (as in `quota`, or `null`).
+
 ### 🎯 Naming files and folders
 
 Wherever a command takes a file or folder, you can use any of these:

@@ -1506,7 +1506,7 @@ pub struct FolderEntry {
 }
 
 /// Storage figures from `get-storage-space`, in bytes.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StorageSpace {
     pub quota: u64,
     pub used: u64,

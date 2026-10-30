@@ -2,13 +2,20 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] — 2026-10-30
+
+### Added
+- `--json` for `find`, `upload`, `upload-dir`, `upload-zip`, `download`,
+  `mkdir`, `cp`, `share`, `shares`, `status` and `quota`: one JSON value
+  on stdout (search results, new IDs, links, where a download was saved,
+  storage figures, the session state), so scripts and other apps don't
+  have to parse the messages. Progress stays on stderr. (#9)
 
 ### Fixed
 - `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and
   `unshare` no longer fail on accounts with a file that has a negative
   creation date (some old phone videos). That date is treated as unknown,
-  so the upload date is shown instead.
+  so the upload date is shown instead. (#7)
 
 ## [0.7.0] — 2026-10-24
 
