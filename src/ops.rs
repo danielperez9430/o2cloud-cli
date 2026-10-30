@@ -146,7 +146,7 @@ fn format_date(ms: Option<u64>) -> String {
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for JSON output.
-fn format_date_iso(ms: Option<u64>) -> serde_json::Value {
+pub fn format_date_iso(ms: Option<u64>) -> serde_json::Value {
     match ms {
         Some(ms) => {
             let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
@@ -279,7 +279,8 @@ fn file_json(item: &crate::api::MediaItem, path: Option<String>) -> serde_json::
     v
 }
 
-fn print_json(v: &serde_json::Value) {
+/// Print one JSON value to stdout, for `--json`.
+pub fn print_json(v: &serde_json::Value) {
     println!(
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".into())
@@ -711,6 +712,7 @@ pub async fn upload_file(
     auth: &AuthConfig,
     local_path: &Path,
     folder_id: Option<u64>,
+    json: bool,
 ) -> Result<(), O2Error> {
     // Read file metadata
     let metadata = tokio::fs::metadata(local_path).await.map_err(|e| {
@@ -750,7 +752,7 @@ pub async fn upload_file(
         creationdate: date_str.clone(),
         folderid: folder_id,
         modificationdate: date_str,
-        name,
+        name: name.clone(),
         size,
     };
 
@@ -763,6 +765,14 @@ pub async fn upload_file(
     let id = client.upload_file(&meta, local_path, auth).await?;
 
     eprintln!("✓ Uploaded successfully (id: {})", id);
+    if json {
+        print_json(&serde_json::json!({
+            "id": id,
+            "name": name,
+            "folderid": folder_id,
+            "size": size,
+        }));
+    }
     Ok(())
 }
 
@@ -778,6 +788,7 @@ pub async fn upload_dir(
     auth: &AuthConfig,
     local_dir: &Path,
     parent_folder_id: Option<u64>,
+    json: bool,
 ) -> Result<(), O2Error> {
     // Resolve target parent folder
     let root_parent = match parent_folder_id {
@@ -851,6 +862,8 @@ pub async fn upload_dir(
     let mut attempted = 0usize;
     let mut succeeded = 0usize;
     let mut failed = 0usize;
+    // One entry per file for `--json`, failed uploads included.
+    let mut results = Vec::new();
     for (file_path, is_dir) in &entries {
         if *is_dir {
             continue;
@@ -889,13 +902,33 @@ pub async fn upload_dir(
             size,
         };
 
-        if let Err(e) = client.upload_file(&meta, file_path, auth).await {
-            eprintln!("  ⚠ Upload failed for {}: {}", name, e);
-            failed += 1;
-            continue;
-        }
+        // Path inside the uploaded directory, with `/` on every platform.
+        let local = file_path
+            .strip_prefix(local_dir)
+            .unwrap_or(file_path)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut result = serde_json::json!({
+            "local": local,
+            "name": name,
+            "folderid": parent_o2,
+            "size": size,
+        });
 
-        succeeded += 1;
+        match client.upload_file(&meta, file_path, auth).await {
+            Ok(id) => {
+                result["id"] = id.into();
+                succeeded += 1;
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Upload failed for {}: {}", name, e);
+                result["error"] = e.to_string().into();
+                failed += 1;
+            }
+        }
+        results.push(result);
     }
 
     if skipped_hidden > 0 {
@@ -908,6 +941,9 @@ pub async fn upload_dir(
         eprintln!("⚠ {} file(s) failed to upload", failed);
     }
     eprintln!("✓ Uploaded {} files to {}", succeeded, local_dir.display());
+    if json {
+        print_json(&serde_json::Value::Array(results));
+    }
 
     if failed > 0 {
         return Err(O2Error::Api(format!(
@@ -1035,6 +1071,7 @@ pub async fn upload_zip(
     auth: &AuthConfig,
     local_dir: &Path,
     folder_id: Option<u64>,
+    json: bool,
 ) -> Result<(), O2Error> {
     if !local_dir.is_dir() {
         return Err(O2Error::Invalid(format!(
@@ -1057,7 +1094,7 @@ pub async fn upload_zip(
     // removed afterwards whether or not the upload succeeds.
     let tmp_dir = create_private_temp_dir()?;
     let tmp_zip = tmp_dir.join(&zip_name);
-    let result = zip_and_upload(client, auth, local_dir, &tmp_zip, folder_id).await;
+    let result = zip_and_upload(client, auth, local_dir, &tmp_zip, folder_id, json).await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     result
 }
@@ -1108,6 +1145,7 @@ async fn zip_and_upload(
     local_dir: &Path,
     tmp_zip: &Path,
     folder_id: Option<u64>,
+    json: bool,
 ) -> Result<(), O2Error> {
     eprintln!("→ Zipping {}...", local_dir.display());
     let (dir, zip_path) = (local_dir.to_path_buf(), tmp_zip.to_path_buf());
@@ -1118,7 +1156,7 @@ async fn zip_and_upload(
         format_size(total_size)
     );
 
-    upload_file(client, auth, tmp_zip, folder_id).await
+    upload_file(client, auth, tmp_zip, folder_id, json).await
 }
 
 /// Write a complete zip archive of `local_dir` to `zip_path`, returning
@@ -1727,6 +1765,7 @@ pub async fn copy_item(
     source: &str,
     destination: &str,
     new_name: Option<&str>,
+    json: bool,
 ) -> Result<(), O2Error> {
     let new_name = new_name.map(validate_name).transpose()?;
 
@@ -1761,6 +1800,15 @@ pub async fn copy_item(
         format!("{}/{}", dest_path, name)
     };
     eprintln!("✓ Copied {} → {} (id:{})", from, to, id);
+    if json {
+        print_json(&serde_json::json!({
+            "id": id,
+            "name": name,
+            "folderid": dest_id,
+            "path": to,
+            "source": item.id,
+        }));
+    }
     Ok(())
 }
 
@@ -1772,6 +1820,7 @@ pub async fn make_folder(
     auth: &AuthConfig,
     path: &str,
     parents: bool,
+    json: bool,
 ) -> Result<(), O2Error> {
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.is_empty() {
@@ -1820,15 +1869,27 @@ pub async fn make_folder(
             }
         }
     }
-    if parents && folders.iter().any(|f| f.id == current) {
+    let created = !folders.iter().any(|f| f.id == current);
+    if !created {
         eprintln!("{}/ already exists (id:{})", shown, current);
+    }
+    if json {
+        print_json(&serde_json::json!({
+            "id": current,
+            "path": shown,
+            "created": created,
+        }));
     }
     Ok(())
 }
 
 /// Print the storage quota and usage.
-pub async fn show_quota(client: &O2Client, auth: &AuthConfig) -> Result<(), O2Error> {
+pub async fn show_quota(client: &O2Client, auth: &AuthConfig, json: bool) -> Result<(), O2Error> {
     let space = client.storage_space(auth).await?;
+    if json {
+        print_json(&serde_json::json!(space));
+        return Ok(());
+    }
     if space.nolimit {
         println!("Used:   {} (no storage limit)", format_size(space.used));
     } else {

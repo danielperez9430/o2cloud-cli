@@ -110,6 +110,24 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 
 Run `o2cloud <command> --help` for all the options.
 
+### 🧩 JSON output
+
+`ls`, `upload`, `upload-dir`, `upload-zip`, `mkdir`, `cp`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr, and errors are `Error: …` on stderr with exit code 1.
+
+```console
+$ o2cloud upload ./movie.mkv --json 2>/dev/null
+{ "id": 1234567890, "name": "movie.mkv", "folderid": 12345678, "size": 1048576 }
+$ o2cloud mkdir -p /Backups --json 2>/dev/null
+{ "id": 12345679, "path": "/Backups", "created": false }
+```
+
+- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size`. Use the `id` right away: a new upload can take a minute to show up in `ls`.
+- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, and `id`, or `error` if that file failed.
+- `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
+- `cp`: `id` of the copy, `name`, `folderid`, `path`, and `source` (the original's ID).
+- `quota`: `quota`, `used`, `free`, `softdeleted` (in the trash), in bytes, and `nolimit`.
+- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` or `unknown`), `renews_silently`, and `storage` (as in `quota`, or `null`).
+
 ### 🎯 Naming files and folders
 
 Wherever a command takes a file or folder, you can use any of these:

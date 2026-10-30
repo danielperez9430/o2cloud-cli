@@ -4,6 +4,12 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `--json` for `upload`, `upload-dir`, `upload-zip`, `mkdir`, `cp`,
+  `status` and `quota`: one JSON value on stdout (the new IDs, the
+  storage figures, the session state), so scripts and other apps don't
+  have to parse the messages. Progress stays on stderr. (#9)
+
 ### Fixed
 - `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and
   `unshare` no longer fail on accounts with a file that has a negative
