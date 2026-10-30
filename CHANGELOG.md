@@ -5,8 +5,9 @@ All notable changes to o2cloud-cli will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- `--json` for `upload`, `upload-dir`, `upload-zip`, `mkdir`, `cp`,
-  `status` and `quota`: one JSON value on stdout (the new IDs, the
+- `--json` for `find`, `upload`, `upload-dir`, `upload-zip`, `download`,
+  `mkdir`, `cp`, `share`, `shares`, `status` and `quota`: one JSON value
+  on stdout (search results, new IDs, links, where a download was saved,
   storage figures, the session state), so scripts and other apps don't
   have to parse the messages. Progress stays on stderr. (#9)
 

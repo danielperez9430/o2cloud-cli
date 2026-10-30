@@ -185,16 +185,28 @@ enum Commands {
     Find {
         /// Search query (case-insensitive substring match)
         query: String,
+
+        /// Print JSON instead of a list
+        #[arg(long)]
+        json: bool,
     },
 
     /// Create a public link to a file or folder and print its URL
     Share {
         /// File/folder ID, path (e.g. /docs or /docs/a.txt), or unique file name
         target: String,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 
     /// List shared folders (public links)
-    Shares,
+    Shares {
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Remove the public link of a folder
     Unshare {
@@ -267,6 +279,10 @@ enum Commands {
         /// Output file path (defaults to current directory)
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -505,19 +521,19 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::upload_file(&client, &auth, &local_path, folder, json).await?;
         }
 
-        Commands::Find { query } => {
+        Commands::Find { query, json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::find(&client, &auth, &query).await?;
+            ops::find(&client, &auth, &query, json).await?;
         }
 
-        Commands::Share { target } => {
+        Commands::Share { target, json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::share(&client, &auth, &target).await?;
+            ops::share(&client, &auth, &target, json).await?;
         }
 
-        Commands::Shares => {
+        Commands::Shares { json } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::list_shares(&client, &auth).await?;
+            ops::list_shares(&client, &auth, json).await?;
         }
 
         Commands::Unshare { target } => {
@@ -562,10 +578,14 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::show_quota(&client, &auth, json).await?;
         }
 
-        Commands::Download { target, output } => {
+        Commands::Download {
+            target,
+            output,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             let output_path = output.map(PathBuf::from);
-            ops::download_file(&client, &auth, &target, output_path).await?;
+            ops::download_file(&client, &auth, &target, output_path, json).await?;
         }
     }
     Ok(())

@@ -1264,6 +1264,7 @@ pub async fn download_file(
     auth: &AuthConfig,
     target: &str,
     output: Option<PathBuf>,
+    json: bool,
 ) -> Result<(), O2Error> {
     // Fetch the signed download URL (and real name) from the media listing
     let media = client.get_all_media(auth).await?;
@@ -1310,6 +1311,15 @@ pub async fn download_file(
         format_size(bytes_written),
         output_path.display()
     );
+    if json {
+        let path = output_path.canonicalize().unwrap_or(output_path);
+        print_json(&serde_json::json!({
+            "id": media_id,
+            "name": item.name,
+            "path": path.display().to_string(),
+            "size": bytes_written,
+        }));
+    }
     Ok(())
 }
 
@@ -1318,7 +1328,12 @@ pub async fn download_file(
 // ------------------------------------------------------------------
 
 /// Search files and folders by name (case-insensitive substring).
-pub async fn find(client: &O2Client, auth: &AuthConfig, query: &str) -> Result<(), O2Error> {
+pub async fn find(
+    client: &O2Client,
+    auth: &AuthConfig,
+    query: &str,
+    json: bool,
+) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let media = client.get_all_media(auth).await?;
 
@@ -1327,12 +1342,18 @@ pub async fn find(client: &O2Client, auth: &AuthConfig, query: &str) -> Result<(
 
     let q = query.to_lowercase();
     let mut found = 0u32;
+    let mut folders_json = Vec::new();
+    let mut files_json = Vec::new();
 
     // Folders
     for f in &folders {
         if f.name.to_lowercase().contains(&q) {
             let path = resolve_path(f.id, &folder_name, &folders);
-            println!("📁 {:<12}  {}/", f.id, path);
+            if json {
+                folders_json.push(serde_json::json!({ "id": f.id, "name": f.name, "path": path }));
+            } else {
+                println!("📁 {:<12}  {}/", f.id, path);
+            }
             found += 1;
         }
     }
@@ -1350,13 +1371,19 @@ pub async fn find(client: &O2Client, auth: &AuthConfig, query: &str) -> Result<(
             } else {
                 format!("{}/{}", folder_path, name)
             };
-            let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
-            println!("📄 {:<12} {:>8}  {}", item.id, size, full);
+            if json {
+                files_json.push(file_json(item, Some(full)));
+            } else {
+                let size = item.size.map(format_size).unwrap_or_else(|| "-".into());
+                println!("📄 {:<12} {:>8}  {}", item.id, size, full);
+            }
             found += 1;
         }
     }
 
-    if found == 0 {
+    if json {
+        print_json(&serde_json::json!({ "folders": folders_json, "files": files_json }));
+    } else if found == 0 {
         println!("No results for '{}'", query);
     } else {
         println!("──\n{} results for '{}'", found, query);
@@ -1464,7 +1491,12 @@ fn folder_unsupported(what: &str) -> O2Error {
 
 /// Create a public link to a file or folder and print its URL (to stdout,
 /// alone, so it can be captured by scripts).
-pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result<(), O2Error> {
+pub async fn share(
+    client: &O2Client,
+    auth: &AuthConfig,
+    target: &str,
+    json: bool,
+) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
     let media = client.get_all_media(auth).await?;
     let folder_name: HashMap<u64, String> =
@@ -1477,7 +1509,7 @@ pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result
                     "refusing to share the root folder (it would publish the whole account)".into(),
                 ));
             }
-            let path = format!("{}/", resolve_path(id, &folder_name, &folders));
+            let path = resolve_path(id, &folder_name, &folders);
             (client.share_folder(id, auth).await?, path, true)
         }
         Item::File(item) => (
@@ -1488,10 +1520,20 @@ pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result
     };
 
     eprintln!(
-        "✓ Public link created for {} — anyone with it can access it:",
-        what
+        "✓ Public link created for {}{} — anyone with it can access it:",
+        what,
+        if is_folder { "/" } else { "" }
     );
-    println!("{}", link.url);
+    if json {
+        print_json(&serde_json::json!({
+            "id": link.id,
+            "url": link.url,
+            "path": what,
+            "folder": is_folder,
+        }));
+    } else {
+        println!("{}", link.url);
+    }
     if is_folder {
         eprintln!(
             "  (link {}; remove it with `o2cloud unshare {}`)",
@@ -1502,8 +1544,12 @@ pub async fn share(client: &O2Client, auth: &AuthConfig, target: &str) -> Result
 }
 
 /// List public folder links.
-pub async fn list_shares(client: &O2Client, auth: &AuthConfig) -> Result<(), O2Error> {
+pub async fn list_shares(client: &O2Client, auth: &AuthConfig, json: bool) -> Result<(), O2Error> {
     let links = client.list_links(auth).await?;
+    if links.is_empty() && json {
+        print_json(&serde_json::json!([]));
+        return Ok(());
+    }
     if links.is_empty() {
         println!("No shared folders.");
         return Ok(());
@@ -1512,14 +1558,37 @@ pub async fn list_shares(client: &O2Client, auth: &AuthConfig) -> Result<(), O2E
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
+    let folder_of = |link: &crate::api::PublicLink| match link.folderid {
+        Some(fid) if folder_name.contains_key(&fid) => {
+            Some(resolve_path(fid, &folder_name, &folders))
+        }
+        _ => None,
+    };
+
+    if json {
+        let links_json: Vec<_> = links
+            .iter()
+            .map(|link| {
+                serde_json::json!({
+                    "id": link.id,
+                    "url": link.url,
+                    "uses": link.usages,
+                    "folderid": link.folderid,
+                    "path": folder_of(link),
+                    "foldername": link.foldername,
+                })
+            })
+            .collect();
+        print_json(&serde_json::Value::Array(links_json));
+        return Ok(());
+    }
+
     // The folder goes last: its length varies, the URLs' doesn't.
     println!("{:<10} {:>5}  {:<88}  FOLDER", "LINK ID", "USES", "URL");
     for link in &links {
-        let folder = match link.folderid {
-            Some(fid) if folder_name.contains_key(&fid) => {
-                format!("{}/", resolve_path(fid, &folder_name, &folders))
-            }
-            _ => link.foldername.clone().unwrap_or_else(|| "?".into()),
+        let folder = match folder_of(link) {
+            Some(path) => format!("{}/", path),
+            None => link.foldername.clone().unwrap_or_else(|| "?".into()),
         };
         let uses = link
             .usages
