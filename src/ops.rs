@@ -706,12 +706,171 @@ fn resolve_path(
 // Upload
 // ------------------------------------------------------------------
 
+/// Largest file O2 Cloud takes in one upload: the server announces it as
+/// `sapi.upload.max-size-in-mb` (4096) in `/sapi/system/information`.
+pub const MAX_UPLOAD_SIZE: u64 = 4096 * 1024 * 1024;
+
+/// Options shared by `upload`, `upload-dir` and `upload-zip`.
+pub struct UploadOptions {
+    /// Don't upload a file (or part) the target folder already has with
+    /// the same name and size, so an interrupted upload can be resumed.
+    pub skip_existing: bool,
+    /// How many files `upload-dir` sends at the same time.
+    pub jobs: usize,
+    /// Files larger than this go up in parts of this size, named
+    /// `name.001`, `name.002`, … (the 7-Zip / HJSplit convention, so
+    /// `cat name.0* > name` joins them too); `download name` joins them.
+    pub part_size: u64,
+}
+
+/// Files already in the cloud, by (folder ID, name): their sizes and IDs.
+type ExistingFiles = HashMap<(u64, String), Vec<(u64, u64)>>;
+
+fn existing_files(media: &[crate::api::MediaItem]) -> ExistingFiles {
+    let mut existing: ExistingFiles = HashMap::new();
+    for m in media {
+        if let (Some(folder), Some(name)) = (m.folderid, m.name.clone()) {
+            existing
+                .entry((folder, name))
+                .or_default()
+                .push((m.size.unwrap_or(0), m.id));
+        }
+    }
+    existing
+}
+
+/// The pieces a file of `size` bytes is uploaded as: `(name, offset,
+/// length)`. One piece under the file's own name if it fits in
+/// `part_size`, else `name.001`, `name.002`, …
+fn upload_pieces(name: &str, size: u64, part_size: u64) -> Vec<(String, u64, u64)> {
+    if size <= part_size {
+        return vec![(name.to_string(), 0, size)];
+    }
+    let count = size.div_ceil(part_size);
+    (0..count)
+        .map(|i| {
+            let offset = i * part_size;
+            let len = part_size.min(size - offset);
+            (part_name(name, i as usize + 1), offset, len)
+        })
+        .collect()
+}
+
+/// Name of part `n` (1-based) of a split file.
+fn part_name(name: &str, n: usize) -> String {
+    format!("{}.{:03}", name, n)
+}
+
+/// The result of uploading one local file.
+struct Uploaded {
+    /// The media ID of each piece (one, or one per part), including
+    /// pieces skipped because they were already there.
+    ids: Vec<u64>,
+    /// How many pieces went up in parts (0 if the file wasn't split).
+    parts: usize,
+    /// How many pieces were skipped (already in the folder).
+    skipped: usize,
+}
+
+/// Upload the local file `path` (`size` bytes) to `folder_id` as `name`,
+/// in parts if it is larger than `opts.part_size`. With
+/// `opts.skip_existing`, pieces `existing` already has are skipped.
+#[allow(clippy::too_many_arguments)]
+async fn upload_local_file(
+    client: &O2Client,
+    auth: &AuthConfig,
+    path: &Path,
+    name: &str,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    folder_id: u64,
+    existing: &ExistingFiles,
+    opts: &UploadOptions,
+) -> Result<Uploaded, O2Error> {
+    let pieces = upload_pieces(name, size, opts.part_size);
+    if pieces.len() > 999 {
+        return Err(O2Error::Invalid(format!(
+            "{} would need {} parts; the most is 999",
+            name,
+            pieces.len()
+        )));
+    }
+    let split = pieces.len() > 1;
+    if split {
+        eprintln!(
+            "  {} is larger than {}: uploading it in {} parts ({}.001 …)",
+            name,
+            format_size(opts.part_size),
+            pieces.len(),
+            name
+        );
+    }
+
+    let date_str = system_time_to_compact_iso(modified.unwrap_or_else(std::time::SystemTime::now));
+    let mut uploaded = Uploaded {
+        ids: Vec::new(),
+        parts: if split { pieces.len() } else { 0 },
+        skipped: 0,
+    };
+    for (i, (piece_name, offset, len)) in pieces.iter().enumerate() {
+        let already = opts
+            .skip_existing
+            .then(|| existing.get(&(folder_id, piece_name.clone())))
+            .flatten()
+            .and_then(|found| found.iter().find(|(s, _)| s == len));
+        if let Some((_, id)) = already {
+            eprintln!("  = {} is already there (id: {}), skipped", piece_name, id);
+            uploaded.ids.push(*id);
+            uploaded.skipped += 1;
+            continue;
+        }
+        if split {
+            eprintln!(
+                "  → part {}/{}: {} ({})",
+                i + 1,
+                pieces.len(),
+                piece_name,
+                format_size(*len)
+            );
+        }
+        let meta = UploadMeta {
+            // A part on its own isn't a valid file of the original type.
+            contenttype: if split {
+                "application/octet-stream".to_string()
+            } else {
+                mime_type_from_name(name)
+            },
+            creationdate: date_str.clone(),
+            folderid: folder_id,
+            modificationdate: date_str.clone(),
+            name: piece_name.clone(),
+            size: *len,
+        };
+        // Metadata and contents in one request, streamed from disk
+        uploaded
+            .ids
+            .push(client.upload_file(&meta, path, *offset, auth).await?);
+    }
+    Ok(uploaded)
+}
+
+/// The root folder's ID.
+async fn root_folder_id(client: &O2Client, auth: &AuthConfig) -> Result<u64, O2Error> {
+    let folders = client.get_all_folders(auth).await?;
+    folders
+        .iter()
+        .find(|f| f.name == "/")
+        .map(|f| f.id)
+        .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))
+}
+
 /// Upload a local file to O2 Cloud.
 pub async fn upload_file(
     client: &O2Client,
     auth: &AuthConfig,
     local_path: &Path,
     folder_id: Option<u64>,
+    opts: &UploadOptions,
     json: bool,
 ) -> Result<(), O2Error> {
     // Read file metadata
@@ -728,32 +887,14 @@ pub async fn upload_file(
         .ok_or_else(|| O2Error::Invalid("Invalid file name".into()))?
         .to_string();
 
-    let modified = metadata.modified().ok();
-    let now = std::time::SystemTime::now();
-    let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
-
-    let contenttype = mime_type_from_name(&name);
-
-    // Resolve folder ID
     let folder_id = match folder_id {
         Some(id) => id,
-        None => {
-            let folders = client.get_all_folders(auth).await?;
-            folders
-                .iter()
-                .find(|f| f.name == "/")
-                .map(|f| f.id)
-                .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))?
-        }
+        None => root_folder_id(client, auth).await?,
     };
-
-    let meta = UploadMeta {
-        contenttype,
-        creationdate: date_str.clone(),
-        folderid: folder_id,
-        modificationdate: date_str,
-        name: name.clone(),
-        size,
+    let existing = if opts.skip_existing {
+        existing_files(&client.get_all_media(auth).await?)
+    } else {
+        ExistingFiles::new()
     };
 
     eprintln!(
@@ -761,17 +902,50 @@ pub async fn upload_file(
         local_path.display(),
         format_size(size)
     );
-    // Metadata and contents in one request, streamed from disk
-    let id = client.upload_file(&meta, local_path, auth).await?;
+    let uploaded = upload_local_file(
+        client,
+        auth,
+        local_path,
+        &name,
+        size,
+        metadata.modified().ok(),
+        folder_id,
+        &existing,
+        opts,
+    )
+    .await?;
 
-    eprintln!("✓ Uploaded successfully (id: {})", id);
+    let all_skipped = uploaded.skipped == uploaded.ids.len();
+    let done = if all_skipped {
+        "Already uploaded"
+    } else {
+        "Uploaded successfully"
+    };
+    match uploaded.ids.as_slice() {
+        [id] => eprintln!("✓ {} (id: {})", done, id),
+        ids => {
+            let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+            eprintln!(
+                "✓ {} in {} parts (ids: {})",
+                done,
+                ids.len(),
+                ids.join(", ")
+            );
+        }
+    }
     if json {
-        print_json(&serde_json::json!({
-            "id": id,
+        let mut out = serde_json::json!({
             "name": name,
             "folderid": folder_id,
             "size": size,
-        }));
+            "skipped": all_skipped,
+        });
+        if uploaded.parts > 0 {
+            out["parts"] = uploaded.ids.clone().into();
+        } else {
+            out["id"] = uploaded.ids[0].into();
+        }
+        print_json(&out);
     }
     Ok(())
 }
@@ -782,39 +956,41 @@ pub async fn upload_file(
 
 /// Upload a local directory recursively.  The directory is recreated as a
 /// folder of the same name inside the target (reusing it if it exists),
-/// with matching subfolders, then all files are uploaded.
+/// with matching subfolders, then all files are uploaded, `opts.jobs` at
+/// a time.
 pub async fn upload_dir(
     client: &O2Client,
     auth: &AuthConfig,
     local_dir: &Path,
     parent_folder_id: Option<u64>,
+    opts: &UploadOptions,
     json: bool,
 ) -> Result<(), O2Error> {
+    use futures_util::StreamExt;
+
     // Resolve target parent folder
     let root_parent = match parent_folder_id {
         Some(id) => id,
-        None => {
-            let folders = client.get_all_folders(auth).await?;
-            folders
-                .iter()
-                .find(|f| f.name == "/")
-                .map(|f| f.id)
-                .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))?
-        }
+        None => root_folder_id(client, auth).await?,
     };
 
     // Fetch all existing folders to check for duplicates
     let existing_folders = client.get_all_folders(auth).await?;
+    let existing = if opts.skip_existing {
+        existing_files(&client.get_all_media(auth).await?)
+    } else {
+        ExistingFiles::new()
+    };
 
-    // Collect all files and directories to upload, skipping hidden entries
-    // (dotfiles/dotdirs like .git, .DS_Store) which O2 Cloud rejects.
+    // Collect all files and directories to upload, skipping hidden and
+    // system entries (see `is_skipped_name`).
     // The walk is synchronous filesystem work, so keep it off the runtime.
     let dir = local_dir.to_path_buf();
-    let (entries, skipped_hidden, total_size) = spawn_blocking_io(move || {
+    let (entries, skipped_entries, total_size) = spawn_blocking_io(move || {
         let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
-        let mut skipped_hidden = 0u32;
-        walk_dir(&dir, &mut entries, &mut skipped_hidden)?;
-        Ok((entries, skipped_hidden, dir_size(&dir)))
+        let mut skipped_entries = 0u32;
+        walk_dir(&dir, &mut entries, &mut skipped_entries)?;
+        Ok((entries, skipped_entries, dir_size(&dir)))
     })
     .await?;
 
@@ -858,84 +1034,102 @@ pub async fn upload_dir(
         folder_map.insert(dir_path.clone(), folder_id);
     }
 
-    // Upload files
-    let mut attempted = 0usize;
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    // Upload files, `opts.jobs` at a time.
+    let files: Vec<(usize, &PathBuf, u64)> = entries
+        .iter()
+        .filter(|(_, is_dir)| !is_dir)
+        .enumerate()
+        .map(|(i, (file_path, _))| {
+            let parent_local = file_path.parent().unwrap();
+            let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(top_id);
+            (i, file_path, parent_o2)
+        })
+        .collect();
+    let existing = &existing;
+    let mut results: Vec<(usize, serde_json::Value, Result<Uploaded, O2Error>)> =
+        futures_util::stream::iter(files)
+            .map(|(i, file_path, parent_o2)| async move {
+                let name = file_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let file_meta = tokio::fs::metadata(file_path).await.ok();
+                let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = file_meta.and_then(|m| m.modified().ok());
+
+                eprintln!(
+                    "  [{}/{}] 📄 {} ({})",
+                    i + 1,
+                    file_count,
+                    name,
+                    format_size(size)
+                );
+
+                // Path inside the uploaded directory, with `/` on every platform.
+                let local = file_path
+                    .strip_prefix(local_dir)
+                    .unwrap_or(file_path)
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let result = serde_json::json!({
+                    "local": local,
+                    "name": name,
+                    "folderid": parent_o2,
+                    "size": size,
+                });
+                let uploaded = upload_local_file(
+                    client, auth, file_path, &name, size, modified, parent_o2, existing, opts,
+                )
+                .await;
+                if let Err(e) = &uploaded {
+                    eprintln!("  ⚠ Upload failed for {}: {}", name, e);
+                }
+                (i, result, uploaded)
+            })
+            .buffer_unordered(opts.jobs.max(1))
+            .collect()
+            .await;
+    results.sort_by_key(|(i, _, _)| *i);
+
     // One entry per file for `--json`, failed uploads included.
-    let mut results = Vec::new();
-    for (file_path, is_dir) in &entries {
-        if *is_dir {
-            continue;
-        }
-        let parent_local = file_path.parent().unwrap();
-        let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(top_id);
-        let name = file_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+    let (mut succeeded, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(_, mut result, uploaded)| {
+            match uploaded {
+                Ok(up) => {
+                    if up.skipped == up.ids.len() {
+                        skipped += 1;
+                    } else {
+                        succeeded += 1;
+                    }
+                    result["skipped"] = (up.skipped == up.ids.len()).into();
+                    if up.parts > 0 {
+                        result["parts"] = up.ids.into();
+                    } else {
+                        result["id"] = up.ids[0].into();
+                    }
+                }
+                Err(e) => {
+                    result["error"] = e.to_string().into();
+                    failed += 1;
+                }
+            }
+            result
+        })
+        .collect();
 
-        attempted += 1;
-        let file_meta = tokio::fs::metadata(file_path).await.ok();
-        let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-
+    if skipped_entries > 0 {
         eprintln!(
-            "  [{}/{}] 📄 {} ({})",
-            attempted,
-            file_count,
-            name,
-            format_size(size)
+            "  (skipped {} hidden or system files/dirs: .git, .DS_Store, Thumbs.db, etc.)",
+            skipped_entries
         );
-
-        let modified = file_meta.and_then(|m| m.modified().ok());
-        let now = std::time::SystemTime::now();
-        let date_str = system_time_to_compact_iso(modified.unwrap_or(now));
-        let contenttype = mime_type_from_name(&name);
-
-        let meta = UploadMeta {
-            contenttype: contenttype.clone(),
-            creationdate: date_str.clone(),
-            folderid: parent_o2,
-            modificationdate: date_str,
-            name: name.clone(),
-            size,
-        };
-
-        // Path inside the uploaded directory, with `/` on every platform.
-        let local = file_path
-            .strip_prefix(local_dir)
-            .unwrap_or(file_path)
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        let mut result = serde_json::json!({
-            "local": local,
-            "name": name,
-            "folderid": parent_o2,
-            "size": size,
-        });
-
-        match client.upload_file(&meta, file_path, auth).await {
-            Ok(id) => {
-                result["id"] = id.into();
-                succeeded += 1;
-            }
-            Err(e) => {
-                eprintln!("  ⚠ Upload failed for {}: {}", name, e);
-                result["error"] = e.to_string().into();
-                failed += 1;
-            }
-        }
-        results.push(result);
     }
-
-    if skipped_hidden > 0 {
-        eprintln!(
-            "  (skipped {} hidden files/dirs: .git, .DS_Store, etc.)",
-            skipped_hidden
-        );
+    if skipped > 0 {
+        eprintln!("  ({} file(s) were already uploaded)", skipped);
     }
     if failed > 0 {
         eprintln!("⚠ {} file(s) failed to upload", failed);
@@ -993,14 +1187,31 @@ fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {
     }
 }
 
-/// Recursively collect files and directories under `dir`, skipping any
-/// entry (file or directory) whose name starts with `.` — O2 Cloud
-/// rejects dotfiles, and dotdirs like `.git` should never be uploaded.
+/// Files and folders the OS creates for its own use, which shouldn't
+/// clutter the cloud. Compared in lowercase.
+const SYSTEM_NAMES: &[&str] = &[
+    "thumbs.db",
+    "ehthumbs.db",
+    "desktop.ini",
+    "$recycle.bin",
+    "system volume information",
+    "icon\r", // macOS custom folder icon
+];
+
+/// Whether a walk skips the entry `name`: hidden entries (starting with
+/// `.`: O2 Cloud rejects dotfiles, and dotdirs like `.git` should never
+/// be uploaded) and the OS files in `SYSTEM_NAMES`.
+fn is_skipped_name(name: &str) -> bool {
+    name.starts_with('.') || SYSTEM_NAMES.contains(&name.to_lowercase().as_str())
+}
+
+/// Recursively collect files and directories under `dir`, skipping the
+/// entries `is_skipped_name` rejects.
 /// Symlinked files are followed; symlinked directories are skipped.
 fn walk_dir(
     dir: &Path,
     entries: &mut Vec<(PathBuf, bool)>,
-    skipped_hidden: &mut u32,
+    skipped: &mut u32,
 ) -> Result<(), O2Error> {
     entries.push((dir.to_path_buf(), true));
     for entry in std::fs::read_dir(dir).map_err(|e| {
@@ -1016,16 +1227,15 @@ fn walk_dir(
             ))
         })?;
         let path = entry.path();
-        let is_hidden = path
+        let skip = path
             .file_name()
-            .map(|n| n.to_string_lossy().starts_with('.'))
-            .unwrap_or(false);
-        if is_hidden {
-            *skipped_hidden += 1;
+            .is_some_and(|n| is_skipped_name(&n.to_string_lossy()));
+        if skip {
+            *skipped += 1;
             continue;
         }
         match entry_kind(&entry) {
-            EntryKind::Dir => walk_dir(&path, entries, skipped_hidden)?,
+            EntryKind::Dir => walk_dir(&path, entries, skipped)?,
             EntryKind::File => entries.push((path, false)),
             EntryKind::SymlinkedDir => {
                 eprintln!("  ⚠ Skipping symlinked directory {}", path.display())
@@ -1040,11 +1250,10 @@ fn dir_size(dir: &Path) -> u64 {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_hidden = path
+            let skip = path
                 .file_name()
-                .map(|n| n.to_string_lossy().starts_with('.'))
-                .unwrap_or(false);
-            if is_hidden {
+                .is_some_and(|n| is_skipped_name(&n.to_string_lossy()));
+            if skip {
                 continue;
             }
             match entry_kind(&entry) {
@@ -1071,6 +1280,7 @@ pub async fn upload_zip(
     auth: &AuthConfig,
     local_dir: &Path,
     folder_id: Option<u64>,
+    opts: &UploadOptions,
     json: bool,
 ) -> Result<(), O2Error> {
     if !local_dir.is_dir() {
@@ -1094,7 +1304,7 @@ pub async fn upload_zip(
     // removed afterwards whether or not the upload succeeds.
     let tmp_dir = create_private_temp_dir()?;
     let tmp_zip = tmp_dir.join(&zip_name);
-    let result = zip_and_upload(client, auth, local_dir, &tmp_zip, folder_id, json).await;
+    let result = zip_and_upload(client, auth, local_dir, &tmp_zip, folder_id, opts, json).await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     result
 }
@@ -1145,6 +1355,7 @@ async fn zip_and_upload(
     local_dir: &Path,
     tmp_zip: &Path,
     folder_id: Option<u64>,
+    opts: &UploadOptions,
     json: bool,
 ) -> Result<(), O2Error> {
     eprintln!("→ Zipping {}...", local_dir.display());
@@ -1156,7 +1367,7 @@ async fn zip_and_upload(
         format_size(total_size)
     );
 
-    upload_file(client, auth, tmp_zip, folder_id, json).await
+    upload_file(client, auth, tmp_zip, folder_id, opts, json).await
 }
 
 /// Write a complete zip archive of `local_dir` to `zip_path`, returning
@@ -1272,29 +1483,49 @@ pub async fn download_file(
         .parse::<u64>()
         .ok()
         .and_then(|id| media.iter().find(|m| m.id == id));
-    let item = match by_id {
-        Some(item) => item,
+    // The file's name and the media items that hold it: one, or the
+    // parts of a file uploaded in parts.
+    let (name, pieces) = match by_id {
+        Some(item) => (item.name.clone(), vec![item]),
         // Not a known ID: resolve as a file path or unique file name.
         None => {
             let folders = client.get_all_folders(auth).await?;
             let folder_name: HashMap<u64, String> =
                 folders.iter().map(|f| (f.id, f.name.clone())).collect();
-            find_file(target, &folders, &folder_name, &media)?
+            match find_file(target, &folders, &folder_name, &media) {
+                Ok(item) => (item.name.clone(), vec![item]),
+                // No such file, but maybe it went up in parts.
+                Err(O2Error::NotFound(msg)) => {
+                    let Ok(first) =
+                        find_file(&part_name(target, 1), &folders, &folder_name, &media)
+                    else {
+                        return Err(O2Error::NotFound(msg));
+                    };
+                    let base = target.rsplit('/').next().unwrap_or(target);
+                    (Some(base.to_string()), file_parts(first, base, &media)?)
+                }
+                Err(e) => return Err(e),
+            }
         }
     };
-    let media_id = item.id;
-    // A file uploaded a moment ago is listed without a URL until the
-    // server has processed it; ask for it by ID then.
-    let download_url = match item.url.clone() {
-        Some(url) => url,
-        None => client.media_download_url(media_id, auth).await?,
-    };
+    let ids: Vec<u64> = pieces.iter().map(|m| m.id).collect();
+    // Every part but the last is full size, so a full last part may mean
+    // the listing doesn't show the rest yet.
+    if let [first, .., last] = pieces.as_slice() {
+        if last.size == first.size {
+            eprintln!(
+                "⚠ The last part found ({}) is as large as the others: if parts \
+                 were uploaded a moment ago, some may not be listed yet",
+                last.name.as_deref().unwrap_or("?")
+            );
+        }
+    }
 
     let output_path = match output {
         Some(p) => p,
-        None => match item.name.as_deref().and_then(safe_local_file_name) {
+        None => match name.as_deref().and_then(safe_local_file_name) {
             Some(name) => PathBuf::from(name),
-            None => PathBuf::from(format!("{}.bin", media_id)),
+            None => PathBuf::from(format!("{}.bin", ids[0])),
         },
     };
 
@@ -1305,10 +1536,29 @@ pub async fn download_file(
         )));
     }
 
-    eprintln!("→ Downloading media {}...", media_id);
-    let bytes_written = client
-        .download_to_path(&download_url, &output_path, item.size)
-        .await?;
+    let mut file = crate::api::create_new_file(&output_path).await?;
+    let mut bytes_written = 0;
+    for (i, item) in pieces.iter().enumerate() {
+        if pieces.len() > 1 {
+            eprintln!(
+                "→ Downloading part {}/{} (media {})...",
+                i + 1,
+                pieces.len(),
+                item.id
+            );
+        } else {
+            eprintln!("→ Downloading media {}...", item.id);
+        }
+        let result = download_piece(client, auth, item, &mut file, &output_path).await;
+        match result {
+            Ok(n) => bytes_written += n,
+            Err(e) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&output_path).await;
+                return Err(e);
+            }
+        }
+    }
 
     eprintln!(
         "✓ Downloaded {} to {}",
@@ -1317,14 +1567,81 @@ pub async fn download_file(
     );
     if json {
         let path = output_path.canonicalize().unwrap_or(output_path);
-        print_json(&serde_json::json!({
-            "id": media_id,
-            "name": item.name,
+        let mut out = serde_json::json!({
+            "name": name,
             "path": path.display().to_string(),
             "size": bytes_written,
-        }));
+        });
+        if ids.len() > 1 {
+            out["parts"] = ids.into();
+        } else {
+            out["id"] = ids[0].into();
+        }
+        print_json(&out);
     }
     Ok(())
+}
+
+/// Download one media item and append it to `file`.
+async fn download_piece(
+    client: &O2Client,
+    auth: &AuthConfig,
+    item: &crate::api::MediaItem,
+    file: &mut tokio::fs::File,
+    path: &Path,
+) -> Result<u64, O2Error> {
+    // A file uploaded a moment ago is listed without a URL until the
+    // server has processed it; ask for it by ID then.
+    let download_url = match item.url.clone() {
+        Some(url) => url,
+        None => client.media_download_url(item.id, auth).await?,
+    };
+    client
+        .download_into(&download_url, file, path, item.size)
+        .await
+}
+
+/// The parts of the file `base` uploaded in parts, in order, starting
+/// with its first part `first`: every `base.NNN` in the same folder.
+/// Fails if a part between the first and the last is missing (the
+/// listing can lag a few seconds behind an upload), rather than
+/// silently joining an incomplete file.
+fn file_parts<'a>(
+    first: &'a crate::api::MediaItem,
+    base: &str,
+    media: &'a [crate::api::MediaItem],
+) -> Result<Vec<&'a crate::api::MediaItem>, O2Error> {
+    let prefix = format!("{}.", base);
+    let mut by_number: HashMap<usize, Vec<&crate::api::MediaItem>> = HashMap::new();
+    for m in media.iter().filter(|m| m.folderid == first.folderid) {
+        let number = m
+            .name
+            .as_deref()
+            .and_then(|n| n.strip_prefix(&prefix))
+            .filter(|n| n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|n| n.parse::<usize>().ok());
+        if let Some(n) = number.filter(|&n| n > 0) {
+            by_number.entry(n).or_default().push(m);
+        }
+    }
+    let last = by_number.keys().copied().max().unwrap_or(1);
+    (1..=last)
+        .map(|n| match by_number.get(&n).map(Vec::as_slice) {
+            Some([part]) => Ok(*part),
+            Some(found) => Err(O2Error::Ambiguous(format!(
+                "{} files are named '{}' in that folder; download the parts by ID",
+                found.len(),
+                part_name(base, n)
+            ))),
+            None => Err(O2Error::NotFound(format!(
+                "part '{}' of {} (found parts up to .{:03}); if it was just \
+                 uploaded, try again in a few seconds",
+                part_name(base, n),
+                base,
+                last
+            ))),
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------
@@ -2654,6 +2971,96 @@ mod tests {
         assert_eq!(skipped, 2); // .hidden/ dir and .dotfile
 
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_walk_dir_skips_system_files() {
+        let tmp = std::env::temp_dir().join(format!("o2cli_test_walk_sys_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("$RECYCLE.BIN")).unwrap();
+        std::fs::write(tmp.join("Thumbs.db"), b"x").unwrap();
+        std::fs::write(tmp.join("desktop.ini"), b"x").unwrap();
+        std::fs::write(tmp.join("photo.jpg"), b"x").unwrap();
+
+        let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+        let mut skipped = 0u32;
+        walk_dir(&tmp, &mut entries, &mut skipped).unwrap();
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|(_, is_dir)| !is_dir)
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, vec!["photo.jpg".to_string()]);
+        assert_eq!(skipped, 3);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_upload_pieces() {
+        assert_eq!(
+            upload_pieces("a.iso", 10, 10),
+            vec![("a.iso".into(), 0, 10)]
+        );
+        assert_eq!(upload_pieces("empty", 0, 10), vec![("empty".into(), 0, 0)]);
+        assert_eq!(
+            upload_pieces("a.iso", 25, 10),
+            vec![
+                ("a.iso.001".into(), 0, 10),
+                ("a.iso.002".into(), 10, 10),
+                ("a.iso.003".into(), 20, 5),
+            ]
+        );
+        assert_eq!(upload_pieces("a.iso", 20, 10).len(), 2);
+    }
+
+    #[test]
+    fn test_file_parts() {
+        let parse =
+            |json: &str| -> Vec<crate::api::MediaItem> { serde_json::from_str(json).unwrap() };
+        let ids = |media: &[crate::api::MediaItem]| -> Result<Vec<u64>, O2Error> {
+            let first = media
+                .iter()
+                .find(|m| m.name.as_deref() == Some("big.iso.001"))
+                .unwrap();
+            Ok(file_parts(first, "big.iso", media)?
+                .iter()
+                .map(|m| m.id)
+                .collect())
+        };
+
+        // In order, from this folder only, other names ignored.
+        let media = parse(
+            r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2},
+                {"id": 3, "name": "big.iso.003", "folderid": 2},
+                {"id": 2, "name": "big.iso.002", "folderid": 2},
+                {"id": 9, "name": "big.iso.004", "folderid": 5},
+                {"id": 7, "name": "big.iso.0001", "folderid": 2},
+                {"id": 8, "name": "big.iso.txt", "folderid": 2}
+            ]"#,
+        );
+        assert_eq!(ids(&media).unwrap(), vec![1, 2, 3]);
+
+        // A gap is an error, not a shorter file.
+        let media = parse(
+            r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2},
+                {"id": 3, "name": "big.iso.003", "folderid": 2}
+            ]"#,
+        );
+        let err = ids(&media).unwrap_err().to_string();
+        assert!(err.contains("'big.iso.002'"), "{err}");
+
+        // Two parts with the same number: refuse to guess.
+        let media = parse(
+            r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2},
+                {"id": 2, "name": "big.iso.002", "folderid": 2},
+                {"id": 4, "name": "big.iso.002", "folderid": 2}
+            ]"#,
+        );
+        assert!(matches!(ids(&media), Err(O2Error::Ambiguous(_))));
     }
 
     fn list_opts() -> ListOptions {

@@ -8,7 +8,7 @@ mod webview;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use error::O2Error;
 
@@ -21,6 +21,30 @@ use error::O2Error;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Options shared by the upload commands.
+#[derive(Args)]
+struct UploadFlags {
+    /// Skip files already in the target folder with the same name and
+    /// size (to resume an interrupted upload)
+    #[arg(long)]
+    skip_existing: bool,
+
+    /// Size in bytes above which a file is uploaded in parts (default:
+    /// the server's 4 GB limit). For testing.
+    #[arg(long, hide = true)]
+    part_size: Option<u64>,
+}
+
+impl UploadFlags {
+    fn options(&self, jobs: usize) -> ops::UploadOptions {
+        ops::UploadOptions {
+            skip_existing: self.skip_existing,
+            jobs,
+            part_size: self.part_size.unwrap_or(ops::MAX_UPLOAD_SIZE).max(1),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -125,7 +149,8 @@ enum Commands {
         json: bool,
     },
 
-    /// Upload a file to O2 Cloud
+    /// Upload a file to O2 Cloud (files over 4 GB go up in parts,
+    /// name.001, name.002, …, which `download name` joins again)
     Upload {
         /// Local file path
         path: String,
@@ -133,6 +158,9 @@ enum Commands {
         /// Target folder ID (omit for root)
         #[arg(short, long)]
         folder: Option<u64>,
+
+        #[command(flatten)]
+        upload: UploadFlags,
 
         /// Print JSON instead of messages
         #[arg(long)]
@@ -148,6 +176,13 @@ enum Commands {
         #[arg(short, long)]
         folder: Option<u64>,
 
+        #[command(flatten)]
+        upload: UploadFlags,
+
+        /// Files uploaded at the same time
+        #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=8))]
+        jobs: u16,
+
         /// Print JSON instead of messages
         #[arg(long)]
         json: bool,
@@ -161,6 +196,9 @@ enum Commands {
         /// Target folder ID (omit for root)
         #[arg(short, long)]
         folder: Option<u64>,
+
+        #[command(flatten)]
+        upload: UploadFlags,
 
         /// Print JSON instead of messages
         #[arg(long)]
@@ -485,22 +523,49 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::list_folder(&client, &auth, path, &opts).await?;
         }
 
-        Commands::UploadDir { path, folder, json } => {
+        Commands::UploadDir {
+            path,
+            folder,
+            upload,
+            jobs,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
-            ops::upload_dir(&client, &auth, &local_path, folder, json).await?;
+            ops::upload_dir(
+                &client,
+                &auth,
+                &local_path,
+                folder,
+                &upload.options(jobs.into()),
+                json,
+            )
+            .await?;
         }
 
-        Commands::UploadZip { path, folder, json } => {
+        Commands::UploadZip {
+            path,
+            folder,
+            upload,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
-            ops::upload_zip(&client, &auth, &local_path, folder, json).await?;
+            ops::upload_zip(
+                &client,
+                &auth,
+                &local_path,
+                folder,
+                &upload.options(1),
+                json,
+            )
+            .await?;
         }
 
         Commands::Rm {
@@ -512,13 +577,26 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             ops::delete_target(&client, &auth, &target, recursive, yes).await?;
         }
 
-        Commands::Upload { path, folder, json } => {
+        Commands::Upload {
+            path,
+            folder,
+            upload,
+            json,
+        } => {
             let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.exists() {
                 return Err(O2Error::NotFound(format!("file not found: {}", path)));
             }
-            ops::upload_file(&client, &auth, &local_path, folder, json).await?;
+            ops::upload_file(
+                &client,
+                &auth,
+                &local_path,
+                folder,
+                &upload.options(1),
+                json,
+            )
+            .await?;
         }
 
         Commands::Find { query, json } => {

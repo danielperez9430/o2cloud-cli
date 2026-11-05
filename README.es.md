@@ -23,6 +23,7 @@
 - 📂 **Navega** por las carpetas en lista o en árbol, y **busca** por nombre
 - ⬆️ **Sube** archivos sueltos, carpetas enteras o una carpeta como `.zip`
 - ⬇️ **Descarga** por ID, ruta o nombre de archivo
+- 🧩 Los archivos de **más de 4 GB** se suben en partes y se vuelven a unir al descargarlos, y las subidas interrumpidas se pueden **reanudar**
 - 🔗 **Comparte** archivos y carpetas con un enlace público, y quítalo cuando quieras
 - 🗂️ **Crea**, **mueve** y **renombra** carpetas; **mueve**, **renombra** y **copia** archivos (las copias se hacen en el servidor, no se descarga nada)
 - 📊 Consulta tu **almacenamiento**: usado, libre y en la papelera
@@ -94,8 +95,8 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 🚪 `logout` | Borra la sesión guardada |
 | 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--json`) |
 | 🔍 `find <texto>` | Busca archivos y carpetas por nombre |
-| ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde) |
-| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido |
+| ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde, `--skip-existing` para reanudar) |
+| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto) |
 | 🗜️ `upload-zip <dir>` | Comprime una carpeta y sube el `.zip` |
 | ⬇️ `download <archivo>` | Descarga un archivo (`-o` para elegir la ruta local) |
 | 🗑️ `rm <archivo o carpeta>` | Lo manda a la papelera (`-r` para carpetas, `-y` para no pedir confirmación) |
@@ -122,9 +123,9 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 ```
 
 - `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
-- `upload` y `upload-zip`: `id`, `name`, `folderid`, `size`. Usa el `id` directamente: una subida nueva puede tardar un minuto en aparecer en `ls`.
-- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, y `id`, o `error` si ese archivo falló.
-- `download`: `id`, `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
+- `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs directamente: una subida nueva puede tardar un minuto en aparecer en `ls`.
+- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló.
+- `download`: `id` (o `parts`, para un archivo subido en partes), `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
 - `cp`: `id` de la copia, `name`, `folderid`, `path` y `source` (el ID del original).
 - `share`: `id` y `url` del enlace, `path` y `folder` (`true` para una carpeta; su `id` es el que acepta `unshare`).
@@ -181,9 +182,12 @@ o2cloud upload ./informe.pdf                      # a la carpeta raíz
 o2cloud upload ./informe.pdf --folder 12345679    # a una carpeta (por ID)
 o2cloud upload-dir ./vacaciones                   # crea vacaciones/ y sube dentro
 o2cloud upload-zip ./proyecto                     # sube proyecto.zip
+o2cloud upload-dir ./vacaciones --skip-existing   # reanudar: salta lo que ya está
+o2cloud upload ./disco.iso                        # más de 4 GB: disco.iso.001, disco.iso.002, …
 
 o2cloud download /Documentos/informe.pdf          # se guarda como ./informe.pdf
 o2cloud download 1234567890 -o ~/Desktop/copia.pdf
+o2cloud download /disco.iso                       # une disco.iso.001, .002, … en disco.iso
 ```
 
 </details>
@@ -239,7 +243,9 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 
 - **Lo borrado va a la papelera**, así que se puede restaurar desde la web de O2 Cloud.
 - **`download` nunca sobrescribe** un archivo local que ya exista. Sin `-o`, solo usa el nombre del archivo, nunca una carpeta enviada por el servidor.
-- **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza. `upload-zip` sí los incluye dentro del zip.
+- **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza, y los que el sistema guarda para sí mismo (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` sí los incluye dentro del zip.
+- **Archivos de más de 4 GB** (lo máximo que O2 Cloud acepta en una subida): se suben en partes llamadas `nombre.001`, `nombre.002`, … `download nombre` las une, igual que `cat nombre.0* > nombre` (o 7-Zip) si descargas las partes de otra forma. `download` se niega a unirlas si falta alguna parte.
+- **`--skip-existing`** salta un archivo (o parte) que la carpeta de destino ya tiene con el mismo nombre y tamaño. Las subidas nuevas tardan hasta un minuto en aparecer en los listados, así que justo después de subir puede no verlas todavía.
 - **Enlaces simbólicos:** los enlaces a archivos se siguen; los enlaces a carpetas se omiten con un aviso, para que un enlace a una carpeta superior no provoque un bucle infinito.
 - **No se sobrescribe nada:** `mkdir`, `mv`, `cp` y `rename` se niegan a crear un segundo archivo o carpeta con el mismo nombre en el mismo sitio.
 - **Aún no soportado:** dejar de compartir un archivo, y copiar carpetas. De momento hazlo desde la web.
