@@ -2,6 +2,28 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `mv` and `rename` work on photos, music and videos: the server wants
+  a different request for each kind of file and refused the generic
+  one (`MED-1005`).
+- `rename` refuses to change a file's extension instead of saying it
+  renamed the file: the server accepts the request but keeps the old
+  extension (renaming `notes.pdf` to `notes.txt` leaves `notes.pdf`).
+- `rm`, `mv`, `rename` and `cp` wait and retry while the server is
+  still processing a file uploaded a moment ago (`MED-1017`) instead of
+  failing.
+- `download` of a file uploaded a moment ago no longer fails with
+  "has no download URL": the URL is asked for by ID.
+- `download` checks it received the whole file, and no longer saves
+  the server's JSON error as the downloaded file; either way the
+  partial file is removed.
+- `rm` of a folder reports the server's refusal instead of success.
+- Calls the server answers with 429 (too many requests) or 503 are
+  retried up to three times with a growing wait, so large
+  `upload-dir` runs and scripts don't stop on a busy server.
+
 ## [0.8.0] — 2026-10-30
 
 ### Added
