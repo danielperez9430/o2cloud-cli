@@ -21,7 +21,7 @@
 
 - 🔐 **Login** with your phone number and SMS code, in the same login window the O2 Cloud website uses
 - 📂 **Browse** folders as a list or a tree, and **search** by name
-- ⬆️ **Upload** single files, whole folders, or a folder as a `.zip`
+- ⬆️ **Upload** single files, whole folders, or a folder as a `.zip`; files over 4 GB go up in parts and are joined again on download, and interrupted uploads can be resumed
 - ⬇️ **Download** by ID, path or file name
 - 🔗 **Share** files and folders with a public link, and remove the link again
 - 🗂️ **Create**, **move** and **rename** folders; **move**, **rename** and **copy** files (copies are made on the server, nothing is downloaded)
@@ -94,8 +94,8 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 🚪 `logout` | Remove the stored session |
 | 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
-| ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where) |
-| 📁 `upload-dir <dir>` | Upload a folder and everything in it |
+| ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where, `--skip-existing` to resume) |
+| 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2) |
 | 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
 | ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
 | 🗑️ `rm <file or folder>` | Move to the trash (`-r` for folders, `-y` to skip confirmation) |
@@ -122,9 +122,9 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 ```
 
 - `find`: `folders` (`id`, `name`, `path`) and `files` (`id`, `name`, `size`, `date`, `path`), as in `ls --json`.
-- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size`. Use the `id` right away: a new upload can take a minute to show up in `ls`.
-- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, and `id`, or `error` if that file failed.
-- `download`: `id`, `name`, `path` (where it was saved, absolute) and `size`.
+- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs right away: a new upload can take a minute to show up in `ls`.
+- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed.
+- `download`: `id` (or `parts`, for a file uploaded in parts), `name`, `path` (where it was saved, absolute) and `size`.
 - `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
 - `cp`: `id` of the copy, `name`, `folderid`, `path`, and `source` (the original's ID).
 - `share`: `id` and `url` of the link, `path`, and `folder` (`true` for a folder; its `id` is what `unshare` takes).
@@ -181,9 +181,12 @@ o2cloud upload ./report.pdf                      # to the root folder
 o2cloud upload ./report.pdf --folder 12345679    # to a folder (by ID)
 o2cloud upload-dir ./holidays                    # creates holidays/ and uploads into it
 o2cloud upload-zip ./project                     # uploads project.zip
+o2cloud upload-dir ./holidays --skip-existing    # resume: skip what's already there
+o2cloud upload ./disk.iso                        # over 4 GB: disk.iso.001, disk.iso.002, …
 
 o2cloud download /Documents/report.pdf           # saved as ./report.pdf
 o2cloud download 1234567890 -o ~/Desktop/copy.pdf
+o2cloud download /disk.iso                       # joins disk.iso.001, .002, … into disk.iso
 ```
 
 </details>
@@ -239,7 +242,9 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 
 - **Deletes go to the trash**, so they can be restored from the O2 Cloud website.
 - **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
-- **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them. `upload-zip` includes them inside the zip.
+- **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them, and the files the OS keeps for itself (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` includes them inside the zip.
+- **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing.
+- **`--skip-existing`** skips a file (or part) the target folder already has with the same name and size. New uploads take up to a minute to show up in listings, so right after an upload it may not see them yet.
 - **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
 - **Nothing is overwritten:** `mkdir`, `mv`, `cp` and `rename` refuse to create a second file or folder with the same name in the same place.
 - **Not supported yet:** unsharing a file, and copying folders. Use the website for those for now.

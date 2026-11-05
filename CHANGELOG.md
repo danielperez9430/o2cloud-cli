@@ -4,6 +4,26 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Files over 4 GB, the most O2 Cloud takes in one upload, go up in
+  parts named `name.001`, `name.002`, … (`upload`, `upload-dir` and
+  `upload-zip`). `download name` joins them again, and refuses to if a
+  part is missing; `cat name.0* > name` or 7-Zip join them too.
+- `--skip-existing` for `upload`, `upload-dir` and `upload-zip`: files
+  (and parts) already in the target folder with the same name and size
+  are skipped, so an interrupted upload can be resumed without making
+  `name (1)` copies.
+- `upload-dir -j <n>` uploads several files at a time (default 2, as
+  the website does; up to 8).
+
+### Changed
+- `upload-dir` also skips the files the OS keeps for itself:
+  `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`,
+  `System Volume Information` and macOS's `Icon\r`.
+- `--json` of the upload commands adds `skipped`, and `parts` instead
+  of `id` for a file uploaded in parts; `download --json` gives
+  `parts` for a joined file.
+
 ### Fixed
 - `mv` and `rename` work on photos, music and videos: the server wants
   a different request for each kind of file and refused the generic
