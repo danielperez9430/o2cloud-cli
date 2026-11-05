@@ -82,6 +82,78 @@ fn sapi_error(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// Retries for a call SAPI answers with 429 (Too Many Requests) or 503
+/// (Service Unavailable), waiting 1 s, 2 s and 4 s (plus jitter) unless
+/// the server sends `Retry-After`.
+const BUSY_RETRIES: u32 = 3;
+/// Longest `Retry-After` honoured, so a bad header can't stall the CLI.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Retries for a call on a file SAPI is still validating, which it does
+/// for a few seconds (~4–10 s) after an upload and reports as `MED-1017`.
+const VALIDATION_RETRIES: u32 = 8;
+const VALIDATION_RETRY_DELAY: Duration = Duration::from_millis(1500);
+
+/// Whether `err` is SAPI's "media not validated yet" (`MED-1017`).
+fn is_validating(err: &O2Error) -> bool {
+    matches!(err, O2Error::Api(msg) if msg.contains("MED-1017"))
+}
+
+/// Run `call`, retrying while SAPI is still validating a just-uploaded
+/// file (`MED-1017`), so `rm`, `mv` or `cp` right after an upload work.
+async fn retry_while_validating<T, F, Fut>(mut call: F) -> Result<T, O2Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, O2Error>>,
+{
+    let mut attempt = 0;
+    loop {
+        match call().await {
+            Err(e) if is_validating(&e) && attempt < VALIDATION_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(VALIDATION_RETRY_DELAY).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Wait before busy retry number `retry` (0-based): the server's
+/// `Retry-After` in seconds if it sent one, else exponential backoff.
+fn busy_wait(resp: &reqwest::Response, retry: u32) -> Duration {
+    let retry_after = resp
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|s| Duration::from_secs(s).min(MAX_RETRY_AFTER));
+    retry_after.unwrap_or_else(|| {
+        let jitter = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() % 400)
+            .unwrap_or(0);
+        Duration::from_secs(1 << retry) + Duration::from_millis(100 + jitter as u64)
+    })
+}
+
+/// The `upload/<kind>` route SAPI wants for a file's metadata changes:
+/// photos, music and videos each have their own, and the generic `file`
+/// one is refused for them. Checked against real uploads; extensions
+/// not listed here are generic for SAPI (`update_file` falls back to
+/// `file` anyway if a guess is wrong).
+fn media_kind(name: &str) -> &'static str {
+    let ext = match name.rsplit_once('.') {
+        Some((_, ext)) => ext.to_ascii_lowercase(),
+        None => return "file",
+    };
+    match ext.as_str() {
+        "mp3" | "m4a" | "wav" => "audio",
+        "mp4" => "video",
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" => "picture",
+        _ => "file",
+    }
+}
+
 /// Generate a random device ID in the format used by the web client:
 /// `web-` followed by 32 hex characters.
 pub fn generate_device_id() -> String {
@@ -291,7 +363,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let status = resp.status();
         let _ = resp.text().await?;
         Ok(status != reqwest::StatusCode::UNAUTHORIZED)
@@ -384,6 +456,33 @@ impl O2Client {
                 .header(header::USER_AGENT, APP_USER_AGENT)
                 .header("authorization", h),
             None => builder.header(header::ORIGIN, WEB_ORIGIN),
+        }
+    }
+
+    /// Send a SAPI request with `with_sapi_headers`, retrying it while
+    /// the server answers 429 or 503. A streamed body (an upload) can't
+    /// be replayed, so such a request is sent only once.
+    async fn send_sapi(
+        &self,
+        builder: reqwest::RequestBuilder,
+        auth: &AuthConfig,
+    ) -> Result<reqwest::Response, O2Error> {
+        let builder = self.with_sapi_headers(builder, auth);
+        let mut retry = 0;
+        loop {
+            let Some(attempt) = builder.try_clone() else {
+                return Ok(builder.send().await?);
+            };
+            let resp = attempt.send().await?;
+            let status = resp.status();
+            let busy = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+            if !busy || retry >= BUSY_RETRIES {
+                return Ok(resp);
+            }
+            let wait = busy_wait(&resp, retry);
+            retry += 1;
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -705,7 +804,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let raw_body = resp.text().await?;
         let value: serde_json::Value = serde_json::from_str(&raw_body)
             .map_err(|e| O2Error::Parse(format!("Failed to parse profile: {}", e)))?;
@@ -732,7 +831,7 @@ impl O2Client {
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
 
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -805,7 +904,7 @@ impl O2Client {
                 .header("content-type", "application/json")
                 .json(&payload);
 
-            let resp = self.with_sapi_headers(req, auth).send().await?;
+            let resp = self.send_sapi(req, auth).await?;
 
             let status = resp.status();
             let raw_body = resp.text().await?;
@@ -835,6 +934,79 @@ impl O2Client {
         }
 
         Ok(all)
+    }
+
+    /// The download URL of one file, asked for by ID. A file uploaded a
+    /// moment ago can be listed without a `url` until SAPI has validated
+    /// it; this asks again (retrying on `MED-1017`) until it has one.
+    ///
+    /// `POST /sapi/media?action=get&origin=omh,dropbox` with
+    /// `{"data":{"ids":[<id>],"fields":[...]}}`
+    pub async fn media_download_url(
+        &self,
+        media_id: u64,
+        auth: &AuthConfig,
+    ) -> Result<String, O2Error> {
+        #[derive(Deserialize)]
+        struct MediaData {
+            #[serde(default)]
+            media: Vec<MediaItem>,
+        }
+        let body = serde_json::json!({
+            "data": { "ids": [media_id], "fields": ["name", "size", "url"] }
+        });
+        let mut attempt = 0;
+        loop {
+            let raw = retry_while_validating(|| async {
+                let url = format!("{}/sapi/media", BASE_URL);
+                let req = self
+                    .client
+                    .post(&url)
+                    .timeout(REQUEST_TIMEOUT)
+                    .query(&[
+                        ("action", "get"),
+                        ("origin", "omh,dropbox"),
+                        ("validationkey", &auth.validationkey),
+                    ])
+                    .json(&body);
+                let resp = self.send_sapi(req, auth).await?;
+                let status = resp.status();
+                let raw = resp.text().await?;
+                if !status.is_success() {
+                    return Err(O2Error::Api(format!(
+                        "Get media failed (status {}): {}",
+                        status,
+                        truncate_utf8(&raw, 300)
+                    )));
+                }
+                if let Some(err) = sapi_error(&raw) {
+                    return Err(O2Error::Api(format!("Get media failed: {}", err)));
+                }
+                Ok(raw)
+            })
+            .await?;
+            let data: RawResponse<MediaData> = parse_json(&raw, "media")?;
+            let url = data
+                .data
+                .media
+                .into_iter()
+                .find(|m| m.id == media_id)
+                .and_then(|m| m.url);
+            match url {
+                Some(url) => return Ok(url),
+                None if attempt < VALIDATION_RETRIES => {
+                    attempt += 1;
+                    tokio::time::sleep(VALIDATION_RETRY_DELAY).await;
+                }
+                None => {
+                    return Err(O2Error::NotFound(format!(
+                        "Media {} has no download URL yet (the server may still be \
+                         processing it; try again in a moment)",
+                        media_id
+                    )))
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -883,7 +1055,7 @@ impl O2Client {
             .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
             .json(&payload);
 
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -986,7 +1158,7 @@ impl O2Client {
             ("softdeleted", "true"),
             ("validationkey", &auth.validationkey),
         ]);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let status = resp.status();
         let raw_body = resp.text().await?;
         if !status.is_success() {
@@ -1013,21 +1185,29 @@ impl O2Client {
     ///
     /// `POST /sapi/media/folder?action=softdelete&id=<id>`
     pub async fn delete_folder(&self, folder_id: u64, auth: &AuthConfig) -> Result<(), O2Error> {
+        retry_while_validating(|| self.delete_folder_once(folder_id, auth)).await
+    }
+
+    async fn delete_folder_once(&self, folder_id: u64, auth: &AuthConfig) -> Result<(), O2Error> {
         let url = format!("{}/sapi/media/folder", BASE_URL);
         let req = self.client.post(&url).timeout(REQUEST_TIMEOUT).query(&[
             ("action", "softdelete"),
             ("id", &folder_id.to_string()),
             ("validationkey", &auth.validationkey),
         ]);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(O2Error::Api(format!(
                 "Delete folder failed ({}): {}",
                 status,
                 truncate_utf8(&body, 200)
             )));
+        }
+        // The server can refuse with a 200 and an error envelope.
+        if let Some(err) = sapi_error(&body) {
+            return Err(O2Error::Api(format!("Delete folder failed: {}", err)));
         }
         Ok(())
     }
@@ -1038,6 +1218,10 @@ impl O2Client {
     /// `POST /sapi/media/file?action=delete&softdelete=true`
     /// with body `{"data":{"files":[<id>, ...]}}`
     pub async fn delete_files(&self, media_ids: &[u64], auth: &AuthConfig) -> Result<(), O2Error> {
+        retry_while_validating(|| self.delete_files_once(media_ids, auth)).await
+    }
+
+    async fn delete_files_once(&self, media_ids: &[u64], auth: &AuthConfig) -> Result<(), O2Error> {
         let url = format!("{}/sapi/media/file", BASE_URL);
         let payload = serde_json::json!({ "data": { "files": media_ids } });
 
@@ -1052,7 +1236,7 @@ impl O2Client {
             ])
             .json(&payload);
 
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -1114,7 +1298,7 @@ impl O2Client {
             .header("referer", "https://cloud.o2online.es/")
             .multipart(form);
 
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -1156,6 +1340,17 @@ impl O2Client {
         auth: &AuthConfig,
         what: &str,
     ) -> Result<String, O2Error> {
+        retry_while_validating(|| self.sapi_post_json_once(path, action, body, auth, what)).await
+    }
+
+    async fn sapi_post_json_once(
+        &self,
+        path: &str,
+        action: &str,
+        body: &serde_json::Value,
+        auth: &AuthConfig,
+        what: &str,
+    ) -> Result<String, O2Error> {
         let url = format!("{}{}", BASE_URL, path);
         let req = self
             .client
@@ -1163,7 +1358,7 @@ impl O2Client {
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", action), ("validationkey", &auth.validationkey)])
             .json(body);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let status = resp.status();
         let raw_body = resp.text().await?;
         if !status.is_success() {
@@ -1240,14 +1435,50 @@ impl O2Client {
     }
 
     /// Change a file's metadata — `{"name": ...}` to rename it or
-    /// `{"folderid": ...}` to move it.
+    /// `{"folderid": ...}` to move it. `current_name` is the file's name
+    /// on the server, which tells which route SAPI wants (see
+    /// `media_kind`); if that one refuses, the one for the new name and
+    /// then the generic one are tried.
     ///
-    /// `POST /sapi/upload/file?action=save-metadata`, form-encoded
+    /// `POST /sapi/upload/<kind>?action=save-metadata`, form-encoded
     /// `data={"data":{"id":<id>, ...changes}}`
     pub async fn update_file(
         &self,
         media_id: u64,
+        current_name: &str,
         changes: serde_json::Value,
+        auth: &AuthConfig,
+    ) -> Result<(), O2Error> {
+        let new_name = changes["name"].as_str().unwrap_or(current_name);
+        let mut kinds: Vec<&str> = Vec::new();
+        for kind in [media_kind(current_name), media_kind(new_name), "file"] {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+
+        let mut last_err = None;
+        for kind in kinds {
+            match retry_while_validating(|| self.update_file_once(kind, media_id, &changes, auth))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                // MED-1050 ("unsupported extension") is a final no; another
+                // route won't change it.
+                Err(e) if matches!(&e, O2Error::Api(msg) if msg.contains("MED-1050")) => {
+                    return Err(e)
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| O2Error::Api("Update file failed".into())))
+    }
+
+    async fn update_file_once(
+        &self,
+        kind: &str,
+        media_id: u64,
+        changes: &serde_json::Value,
         auth: &AuthConfig,
     ) -> Result<(), O2Error> {
         let mut data = serde_json::json!({ "id": media_id });
@@ -1256,7 +1487,7 @@ impl O2Client {
         }
         let form_value = serde_json::json!({ "data": data }).to_string();
 
-        let url = format!("{}/sapi/upload/file", BASE_URL);
+        let url = format!("{}/sapi/upload/{}", BASE_URL, kind);
         let req = self
             .client
             .post(&url)
@@ -1266,7 +1497,7 @@ impl O2Client {
                 ("validationkey", &auth.validationkey),
             ])
             .form(&[("data", form_value)]);
-        let resp = self.with_sapi_headers(req, auth).send().await?;
+        let resp = self.send_sapi(req, auth).await?;
         let status = resp.status();
         let raw_body = resp.text().await?;
         if !status.is_success() {
@@ -1289,12 +1520,15 @@ impl O2Client {
     /// Download a file from its signed URL (from the `url` field in the
     /// media listing response), streaming it directly to `path` instead
     /// of buffering the whole file in memory. Returns the byte count
-    /// written. Fails if `path` already exists. On any error after the
-    /// destination file is created, the partially-written file is removed.
+    /// written. Fails if `path` already exists, and if `expected_size`
+    /// is given and a different number of bytes arrives (a cut
+    /// download). On any error after the destination file is created,
+    /// the partially-written file is removed.
     pub async fn download_to_path(
         &self,
         download_url: &str,
         path: &std::path::Path,
+        expected_size: Option<u64>,
     ) -> Result<u64, O2Error> {
         let resp = self.client.get(download_url).send().await?;
 
@@ -1307,6 +1541,32 @@ impl O2Client {
                 truncate_utf8(&raw_body, 200)
             )));
         }
+
+        // SAPI can answer a download with a 200 and a JSON error instead
+        // of the file. A small JSON body is read first to tell that apart
+        // from a JSON file of the user's: an error envelope whose length
+        // isn't the file's size is an error.
+        let is_json = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("json") || ct.contains("javascript"));
+        let small = resp.content_length().is_some_and(|n| n <= 1 << 20);
+        enum Body {
+            Read(Vec<u8>),
+            Stream(reqwest::Response),
+        }
+        let body = if is_json && small {
+            let bytes = resp.bytes().await?.to_vec();
+            if expected_size != Some(bytes.len() as u64) {
+                if let Some(err) = std::str::from_utf8(&bytes).ok().and_then(sapi_error) {
+                    return Err(O2Error::Api(format!("Download failed: {}", err)));
+                }
+            }
+            Body::Read(bytes)
+        } else {
+            Body::Stream(resp)
+        };
 
         // `create_new` fails if the file already exists, so an existing
         // local file is never overwritten (nor removed by the cleanup below).
@@ -1322,11 +1582,43 @@ impl O2Client {
                 ))
             })?;
 
-        let result = Self::stream_response_to_file(resp, file, path).await;
+        let result = match body {
+            Body::Read(bytes) => Self::write_bytes_to_file(&bytes, file, path).await,
+            Body::Stream(resp) => Self::stream_response_to_file(resp, file, path).await,
+        };
+        let result = result.and_then(|total| match expected_size {
+            Some(size) if size != total => Err(O2Error::Api(format!(
+                "Download incomplete: got {} of {} bytes",
+                total, size
+            ))),
+            _ => Ok(total),
+        });
         if result.is_err() {
             let _ = tokio::fs::remove_file(path).await;
         }
         result
+    }
+
+    async fn write_bytes_to_file(
+        bytes: &[u8],
+        mut file: tokio::fs::File,
+        path: &std::path::Path,
+    ) -> Result<u64, O2Error> {
+        use tokio::io::AsyncWriteExt;
+
+        file.write_all(bytes).await.map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot write to {}: {}", path.display(), e),
+            ))
+        })?;
+        file.flush().await.map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot flush {}: {}", path.display(), e),
+            ))
+        })?;
+        Ok(bytes.len() as u64)
     }
 
     async fn stream_response_to_file(
@@ -1738,6 +2030,39 @@ mod tests {
         let item: MediaItem = serde_json::from_str(r#"{"id":1}"#).unwrap();
         assert_eq!(item.date, None);
         assert_eq!(item.creationdate, None);
+    }
+
+    #[test]
+    fn test_media_kind() {
+        assert_eq!(media_kind("song.MP3"), "audio");
+        assert_eq!(media_kind("clip.mp4"), "video");
+        assert_eq!(media_kind("IMG_0001.JPG"), "picture");
+        assert_eq!(media_kind("movie.mkv"), "file");
+        assert_eq!(media_kind("notes.pdf"), "file");
+        assert_eq!(media_kind("README"), "file");
+    }
+
+    #[test]
+    fn test_is_validating() {
+        let raw = r#"{"error":{"code":"MED-1017","message":"Media not validated"}}"#;
+        let err = O2Error::Api(format!("Delete failed: {}", sapi_error(raw).unwrap()));
+        assert!(is_validating(&err));
+        assert!(!is_validating(&O2Error::Api(
+            "Delete failed: (MED-1022)".into()
+        )));
+        assert!(!is_validating(&O2Error::NotFound("MED-1017".into())));
+    }
+
+    #[tokio::test]
+    async fn test_retry_while_validating_stops_on_other_errors() {
+        let mut calls = 0;
+        let result: Result<(), O2Error> = retry_while_validating(|| {
+            calls += 1;
+            async { Err(O2Error::Api("Update file failed: (MED-1005)".into())) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
     }
 
     #[test]

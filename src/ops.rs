@@ -1283,10 +1283,12 @@ pub async fn download_file(
         }
     };
     let media_id = item.id;
-    let download_url = item
-        .url
-        .as_deref()
-        .ok_or_else(|| O2Error::NotFound(format!("Media {} has no download URL", media_id)))?;
+    // A file uploaded a moment ago is listed without a URL until the
+    // server has processed it; ask for it by ID then.
+    let download_url = match item.url.clone() {
+        Some(url) => url,
+        None => client.media_download_url(media_id, auth).await?,
+    };
 
     let output_path = match output {
         Some(p) => p,
@@ -1304,7 +1306,9 @@ pub async fn download_file(
     }
 
     eprintln!("→ Downloading media {}...", media_id);
-    let bytes_written = client.download_to_path(download_url, &output_path).await?;
+    let bytes_written = client
+        .download_to_path(&download_url, &output_path, item.size)
+        .await?;
 
     eprintln!(
         "✓ Downloaded {} to {}",
@@ -1681,7 +1685,12 @@ pub async fn move_item(
     }
 
     client
-        .update_file(item.id, serde_json::json!({ "folderid": dest_id }), auth)
+        .update_file(
+            item.id,
+            item.name.as_deref().unwrap_or(""),
+            serde_json::json!({ "folderid": dest_id }),
+            auth,
+        )
         .await?;
     eprintln!("✓ Moved {} → {}", from, dest_path);
     Ok(())
@@ -1734,6 +1743,13 @@ async fn move_folder(
     Ok(())
 }
 
+/// The extension of a file name, lowercased (`None` if it has none).
+fn file_extension(name: &str) -> Option<String> {
+    Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+}
+
 /// Check a bare file or folder name given on the command line.
 fn validate_name(name: &str) -> Result<&str, O2Error> {
     let name = name.trim();
@@ -1767,6 +1783,16 @@ pub async fn rename_item(
         }
     };
     let from = file_path(item, &folders, &folder_name);
+    // The server keeps a file's extension: it accepts a rename to
+    // `notes.txt` for `notes.pdf` but stores `notes.pdf`.
+    let current_name = item.name.as_deref().unwrap_or("");
+    if file_extension(current_name) != file_extension(new_name) {
+        return Err(O2Error::Invalid(format!(
+            "O2 Cloud can't change a file's extension ('{}' → '{}'); \
+             download it and upload it under the new name instead",
+            current_name, new_name
+        )));
+    }
     if media.iter().any(|m| {
         m.id != item.id && m.folderid == item.folderid && m.name.as_deref() == Some(new_name)
     }) {
@@ -1777,7 +1803,12 @@ pub async fn rename_item(
     }
 
     client
-        .update_file(item.id, serde_json::json!({ "name": new_name }), auth)
+        .update_file(
+            item.id,
+            item.name.as_deref().unwrap_or(""),
+            serde_json::json!({ "name": new_name }),
+            auth,
+        )
         .await?;
     eprintln!("✓ Renamed {} → {}", from, new_name);
     Ok(())
