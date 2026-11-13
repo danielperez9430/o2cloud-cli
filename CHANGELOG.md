@@ -25,6 +25,10 @@ All notable changes to o2cloud-cli will be documented in this file.
   `parts` for a joined file.
 
 ### Fixed
+- `rm`, `mv`, `rename`, `cp`, `share` and `download` accept the ID of a
+  file uploaded a moment ago. The server lists a new upload only after
+  10–40 s, so they used to say "Not found"; now an ID newer than every
+  listed file is asked for directly, waiting up to a minute for it.
 - `mv` and `rename` work on photos, music and videos: the server wants
   a different request for each kind of file and refused the generic
   one (`MED-1005`).

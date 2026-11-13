@@ -936,61 +936,73 @@ impl O2Client {
         Ok(all)
     }
 
-    /// The download URL of one file, asked for by ID. A file uploaded a
-    /// moment ago can be listed without a `url` until SAPI has validated
-    /// it; this asks again (retrying on `MED-1017`) until it has one.
+    /// One file, asked for by ID, or `None` if there is no such file. It
+    /// sees a new upload a few seconds after it, sooner than the full
+    /// listing (`get_all_media`), which can take up to a minute.
     ///
     /// `POST /sapi/media?action=get&origin=omh,dropbox` with
     /// `{"data":{"ids":[<id>],"fields":[...]}}`
-    pub async fn media_download_url(
+    pub async fn get_media_by_id(
         &self,
         media_id: u64,
         auth: &AuthConfig,
-    ) -> Result<String, O2Error> {
+    ) -> Result<Option<MediaItem>, O2Error> {
         #[derive(Deserialize)]
         struct MediaData {
             #[serde(default)]
             media: Vec<MediaItem>,
         }
         let body = serde_json::json!({
-            "data": { "ids": [media_id], "fields": ["name", "size", "url"] }
+            "data": {
+                "ids": [media_id.to_string()],
+                "fields": ["name", "size", "etag", "folderid", "url", "creationdate"]
+            }
         });
+        let raw = retry_while_validating(|| async {
+            let url = format!("{}/sapi/media", BASE_URL);
+            let req = self
+                .client
+                .post(&url)
+                .timeout(REQUEST_TIMEOUT)
+                .query(&[
+                    ("action", "get"),
+                    ("origin", "omh,dropbox"),
+                    ("validationkey", &auth.validationkey),
+                ])
+                .json(&body);
+            let resp = self.send_sapi(req, auth).await?;
+            let status = resp.status();
+            let raw = resp.text().await?;
+            if !status.is_success() {
+                return Err(O2Error::Api(format!(
+                    "Get media failed (status {}): {}",
+                    status,
+                    truncate_utf8(&raw, 300)
+                )));
+            }
+            if let Some(err) = sapi_error(&raw) {
+                return Err(O2Error::Api(format!("Get media failed: {}", err)));
+            }
+            Ok(raw)
+        })
+        .await?;
+        let data: RawResponse<MediaData> = parse_json(&raw, "media")?;
+        Ok(data.data.media.into_iter().find(|m| m.id == media_id))
+    }
+
+    /// The download URL of one file, asked for by ID. A file uploaded a
+    /// moment ago can be listed without a `url` until SAPI has validated
+    /// it; this asks again until it has one.
+    pub async fn media_download_url(
+        &self,
+        media_id: u64,
+        auth: &AuthConfig,
+    ) -> Result<String, O2Error> {
         let mut attempt = 0;
         loop {
-            let raw = retry_while_validating(|| async {
-                let url = format!("{}/sapi/media", BASE_URL);
-                let req = self
-                    .client
-                    .post(&url)
-                    .timeout(REQUEST_TIMEOUT)
-                    .query(&[
-                        ("action", "get"),
-                        ("origin", "omh,dropbox"),
-                        ("validationkey", &auth.validationkey),
-                    ])
-                    .json(&body);
-                let resp = self.send_sapi(req, auth).await?;
-                let status = resp.status();
-                let raw = resp.text().await?;
-                if !status.is_success() {
-                    return Err(O2Error::Api(format!(
-                        "Get media failed (status {}): {}",
-                        status,
-                        truncate_utf8(&raw, 300)
-                    )));
-                }
-                if let Some(err) = sapi_error(&raw) {
-                    return Err(O2Error::Api(format!("Get media failed: {}", err)));
-                }
-                Ok(raw)
-            })
-            .await?;
-            let data: RawResponse<MediaData> = parse_json(&raw, "media")?;
-            let url = data
-                .data
-                .media
-                .into_iter()
-                .find(|m| m.id == media_id)
+            let url = self
+                .get_media_by_id(media_id, auth)
+                .await?
                 .and_then(|m| m.url);
             match url {
                 Some(url) => return Ok(url),
