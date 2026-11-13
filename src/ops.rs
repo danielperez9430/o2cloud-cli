@@ -1478,7 +1478,7 @@ pub async fn download_file(
     json: bool,
 ) -> Result<(), O2Error> {
     // Fetch the signed download URL (and real name) from the media listing
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, target, &[]).await?;
     let by_id = target
         .parse::<u64>()
         .ok()
@@ -1729,7 +1729,7 @@ pub async fn delete_target(
     assume_yes: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, target, &folders).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -1760,6 +1760,52 @@ enum Item<'a> {
 /// Resolve `target` to a folder or a file. Tried in order: a numeric
 /// folder ID, a numeric file ID, a folder path/name, then a file path or
 /// unique file name (see `find_file`).
+/// How long `media_for_target` waits for a new upload to show up, and
+/// how often it asks.
+const NEW_UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const NEW_UPLOAD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The account's files, for resolving `target`. The listing shows a new
+/// upload only after 10–40 s, so a numeric `target` that is neither a
+/// folder in `folders` nor a listed file, but is newer than every listed
+/// file (media IDs only grow), is asked for by ID until it shows up: `rm`,
+/// `mv` & co. then work on the ID `upload` just printed.
+async fn media_for_target(
+    client: &O2Client,
+    auth: &AuthConfig,
+    target: &str,
+    folders: &[crate::api::FolderEntry],
+) -> Result<Vec<crate::api::MediaItem>, O2Error> {
+    let mut media = client.get_all_media(auth).await?;
+    let Ok(id) = target.parse::<u64>() else {
+        return Ok(media);
+    };
+    let known = folders.iter().any(|f| f.id == id) || media.iter().any(|m| m.id == id);
+    let newest = media.iter().map(|m| m.id).max().unwrap_or(0);
+    if known || id <= newest {
+        return Ok(media);
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(item) = client.get_media_by_id(id, auth).await? {
+            media.push(item);
+            return Ok(media);
+        }
+        if start.elapsed() >= NEW_UPLOAD_WAIT {
+            return Ok(media);
+        }
+        if start.elapsed() < NEW_UPLOAD_POLL {
+            eprintln!(
+                "  {} isn't listed yet; waiting up to {} s in case it was just uploaded...",
+                id,
+                NEW_UPLOAD_WAIT.as_secs()
+            );
+        }
+        tokio::time::sleep(NEW_UPLOAD_POLL).await;
+    }
+}
+
 fn resolve_item<'a>(
     target: &str,
     folders: &[crate::api::FolderEntry],
@@ -1819,7 +1865,7 @@ pub async fn share(
     json: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, target, &folders).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -1972,7 +2018,7 @@ pub async fn move_item(
     destination: &str,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, source, &folders).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2089,7 +2135,7 @@ pub async fn rename_item(
     let new_name = validate_name(new_name)?;
 
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, target, &folders).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2187,7 +2233,7 @@ pub async fn copy_item(
     let new_name = new_name.map(validate_name).transpose()?;
 
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let media = media_for_target(client, auth, source, &folders).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 

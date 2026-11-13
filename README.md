@@ -122,7 +122,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 ```
 
 - `find`: `folders` (`id`, `name`, `path`) and `files` (`id`, `name`, `size`, `date`, `path`), as in `ls --json`.
-- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs right away: a new upload can take a minute to show up in `ls`.
+- `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs in scripts: a new upload takes up to a minute to show up in `ls`, `find` and paths, but `rm`, `mv`, `rename`, `cp`, `share` and `download` accept its ID right away (waiting a few seconds for the server if needed).
 - `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed.
 - `download`: `id` (or `parts`, for a file uploaded in parts), `name`, `path` (where it was saved, absolute) and `size`.
 - `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).

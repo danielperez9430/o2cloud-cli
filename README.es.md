@@ -123,7 +123,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 ```
 
 - `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
-- `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs directamente: una subida nueva puede tardar un minuto en aparecer en `ls`.
+- `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs en los scripts: una subida nueva tarda hasta un minuto en aparecer en `ls`, `find` y las rutas, pero `rm`, `mv`, `rename`, `cp`, `share` y `download` aceptan su ID al momento (esperando unos segundos al servidor si hace falta).
 - `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló.
 - `download`: `id` (o `parts`, para un archivo subido en partes), `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
