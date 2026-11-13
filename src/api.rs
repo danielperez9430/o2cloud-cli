@@ -1261,7 +1261,9 @@ impl O2Client {
 
     /// Upload a file in one request, as the web client does: a multipart
     /// body with the metadata JSON (`data`) and the file contents (`file`),
-    /// streamed from disk. Returns the new media ID.
+    /// streamed from disk. Sends the `meta.size` bytes of `path` that
+    /// start at `offset`, so a large file can go up in parts. Returns the
+    /// new media ID.
     ///
     /// `POST https://upload.cloud.o2online.es/sapi/upload?action=save`
     ///
@@ -1270,20 +1272,30 @@ impl O2Client {
         &self,
         meta: &UploadMeta,
         path: &std::path::Path,
+        offset: u64,
         auth: &AuthConfig,
     ) -> Result<u64, O2Error> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
         let url = format!("{}/sapi/upload", UPLOAD_URL);
 
         let metadata = serde_json::to_string(&RawRequest { data: meta })
             .map_err(|e| O2Error::Api(format!("Failed to serialize upload metadata: {}", e)))?;
 
-        let file = tokio::fs::File::open(path).await.map_err(|e| {
+        let open_err = |e: std::io::Error| {
             O2Error::Io(std::io::Error::new(
                 e.kind(),
                 format!("Cannot open {} for upload: {}", path.display(), e),
             ))
-        })?;
-        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+        };
+        let mut file = tokio::fs::File::open(path).await.map_err(open_err)?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(open_err)?;
+        }
+        let body =
+            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(meta.size)));
         let file_part = reqwest::multipart::Part::stream_with_length(body, meta.size)
             .file_name(meta.name.clone())
             .mime_str(&meta.contenttype)?;
@@ -1518,15 +1530,15 @@ impl O2Client {
     // ------------------------------------------------------------------
 
     /// Download a file from its signed URL (from the `url` field in the
-    /// media listing response), streaming it directly to `path` instead
-    /// of buffering the whole file in memory. Returns the byte count
-    /// written. Fails if `path` already exists, and if `expected_size`
+    /// media listing response) and append it to `file` (at `path`, named
+    /// in errors), streaming it instead of buffering the whole file in
+    /// memory. Returns the byte count written; fails if `expected_size`
     /// is given and a different number of bytes arrives (a cut
-    /// download). On any error after the destination file is created,
-    /// the partially-written file is removed.
-    pub async fn download_to_path(
+    /// download). Leaves removing the partial file to the caller.
+    pub async fn download_into(
         &self,
         download_url: &str,
+        file: &mut tokio::fs::File,
         path: &std::path::Path,
         expected_size: Option<u64>,
     ) -> Result<u64, O2Error> {
@@ -1552,56 +1564,29 @@ impl O2Client {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("json") || ct.contains("javascript"));
         let small = resp.content_length().is_some_and(|n| n <= 1 << 20);
-        enum Body {
-            Read(Vec<u8>),
-            Stream(reqwest::Response),
-        }
-        let body = if is_json && small {
+        let total = if is_json && small {
             let bytes = resp.bytes().await?.to_vec();
             if expected_size != Some(bytes.len() as u64) {
                 if let Some(err) = std::str::from_utf8(&bytes).ok().and_then(sapi_error) {
                     return Err(O2Error::Api(format!("Download failed: {}", err)));
                 }
             }
-            Body::Read(bytes)
+            Self::write_bytes_to_file(&bytes, file, path).await?
         } else {
-            Body::Stream(resp)
+            Self::stream_response_to_file(resp, file, path).await?
         };
-
-        // `create_new` fails if the file already exists, so an existing
-        // local file is never overwritten (nor removed by the cleanup below).
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .await
-            .map_err(|e| {
-                O2Error::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("Cannot create {}: {}", path.display(), e),
-                ))
-            })?;
-
-        let result = match body {
-            Body::Read(bytes) => Self::write_bytes_to_file(&bytes, file, path).await,
-            Body::Stream(resp) => Self::stream_response_to_file(resp, file, path).await,
-        };
-        let result = result.and_then(|total| match expected_size {
+        match expected_size {
             Some(size) if size != total => Err(O2Error::Api(format!(
                 "Download incomplete: got {} of {} bytes",
                 total, size
             ))),
             _ => Ok(total),
-        });
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(path).await;
         }
-        result
     }
 
     async fn write_bytes_to_file(
         bytes: &[u8],
-        mut file: tokio::fs::File,
+        file: &mut tokio::fs::File,
         path: &std::path::Path,
     ) -> Result<u64, O2Error> {
         use tokio::io::AsyncWriteExt;
@@ -1623,7 +1608,7 @@ impl O2Client {
 
     async fn stream_response_to_file(
         resp: reqwest::Response,
-        mut file: tokio::fs::File,
+        file: &mut tokio::fs::File,
         path: &std::path::Path,
     ) -> Result<u64, O2Error> {
         use futures_util::StreamExt;
@@ -1650,6 +1635,23 @@ impl O2Client {
 
         Ok(total)
     }
+}
+
+/// Create `path` for writing, failing if it already exists, so an
+/// existing local file is never overwritten (nor removed by the cleanup
+/// after a failed download).
+pub async fn create_new_file(path: &std::path::Path) -> Result<tokio::fs::File, O2Error> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|e| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot create {}: {}", path.display(), e),
+            ))
+        })
 }
 
 // ======================================================================
