@@ -6,13 +6,18 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ### Added
 - Files over 4 GB, the most O2 Cloud takes in one upload, go up in
-  parts named `name.001`, `name.002`, … (`upload`, `upload-dir` and
-  `upload-zip`). `download name` joins them again, and refuses to if a
-  part is missing; `cat name.0* > name` or 7-Zip join them too.
+  parts of just under 4 GB named `name.001`, `name.002`, … (`upload`,
+  `upload-dir` and `upload-zip`); the last part is always the smallest.
+  `download name` joins them again, and refuses to if any part is
+  missing (an upload cut short, or one not listed yet) or doesn't
+  belong with the others; `cat name.0* > name` or 7-Zip join them too.
+  Uploading a split file where parts of one with that name already are
+  is refused, unless `--skip-existing` resumes the same file. A split
+  upload that fails says which parts made it.
 - `--skip-existing` for `upload`, `upload-dir` and `upload-zip`: files
   (and parts) already in the target folder with the same name and size
   are skipped, so an interrupted upload can be resumed without making
-  `name (1)` copies.
+  `name (1)` copies. Only name and size are compared, not contents.
 - `upload-dir -j <n>` uploads several files at a time (default 2, as
   the website does; up to 8).
 
@@ -31,10 +36,11 @@ All notable changes to o2cloud-cli will be documented in this file.
   listed file is asked for directly, waiting up to a minute for it.
 - `mv` and `rename` work on photos, music and videos: the server wants
   a different request for each kind of file and refused the generic
-  one (`MED-1005`).
+  one (`MED-1005`). Other errors are shown as the server sent them.
 - `rename` refuses to change a file's extension instead of saying it
   renamed the file: the server accepts the request but keeps the old
-  extension (renaming `notes.pdf` to `notes.txt` leaves `notes.pdf`).
+  extension (renaming `notes.pdf` to `notes.txt` leaves `notes.pdf`,
+  and `a.JPG` to `a.jpg` leaves `a.JPG`).
 - `rm`, `mv`, `rename` and `cp` wait and retry while the server is
   still processing a file uploaded a moment ago (`MED-1017`) instead of
   failing.
@@ -45,8 +51,10 @@ All notable changes to o2cloud-cli will be documented in this file.
   partial file is removed.
 - `rm` of a folder reports the server's refusal instead of success.
 - Calls the server answers with 429 (too many requests) or 503 are
-  retried up to three times with a growing wait, so large
-  `upload-dir` runs and scripts don't stop on a busy server.
+  retried up to three times with a growing wait, uploads included, so
+  large `upload-dir` runs and scripts don't stop on a busy server.
+  Requests that create something (a folder, a copy, a link) aren't
+  retried on 503, which can come after the server acted.
 
 ## [0.8.0] — 2026-10-30
 
