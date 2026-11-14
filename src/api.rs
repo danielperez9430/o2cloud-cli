@@ -118,6 +118,24 @@ where
     }
 }
 
+/// Whether a request creates something on the server (a folder, a
+/// copy, a link…), which SAPI does with `action=save` or `action=copy`.
+/// A 503 can come from a gateway after the server acted, so such a
+/// request isn't retried on 503: it could make a duplicate.
+fn creates_something(req: &reqwest::Request) -> bool {
+    req.url()
+        .query_pairs()
+        .any(|(k, v)| k == "action" && (v == "save" || v == "copy"))
+}
+
+/// Whether `status` means "busy, try again": 429 (the request was
+/// refused, so retrying is always safe), or 503 unless the request
+/// `creates` something.
+fn is_busy(status: reqwest::StatusCode, creates: bool) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::SERVICE_UNAVAILABLE && !creates)
+}
+
 /// Wait before busy retry number `retry` (0-based): the server's
 /// `Retry-After` in seconds if it sent one, else exponential backoff.
 fn busy_wait(resp: &reqwest::Response, retry: u32) -> Duration {
@@ -460,24 +478,27 @@ impl O2Client {
     }
 
     /// Send a SAPI request with `with_sapi_headers`, retrying it while
-    /// the server answers 429 or 503. A streamed body (an upload) can't
-    /// be replayed, so such a request is sent only once.
+    /// the server answers 429, or 503 for a request that doesn't create
+    /// anything (see `creates_something`). A streamed body (an upload)
+    /// can't be replayed, so such a request is sent only once;
+    /// `upload_file` retries it itself.
     async fn send_sapi(
         &self,
         builder: reqwest::RequestBuilder,
         auth: &AuthConfig,
     ) -> Result<reqwest::Response, O2Error> {
         let builder = self.with_sapi_headers(builder, auth);
+        let creates = builder
+            .try_clone()
+            .and_then(|b| b.build().ok())
+            .is_some_and(|req| creates_something(&req));
         let mut retry = 0;
         loop {
             let Some(attempt) = builder.try_clone() else {
                 return Ok(builder.send().await?);
             };
             let resp = attempt.send().await?;
-            let status = resp.status();
-            let busy = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
-            if !busy || retry >= BUSY_RETRIES {
+            if !is_busy(resp.status(), creates) || retry >= BUSY_RETRIES {
                 return Ok(resp);
             }
             let wait = busy_wait(&resp, retry);
@@ -1287,42 +1308,26 @@ impl O2Client {
         offset: u64,
         auth: &AuthConfig,
     ) -> Result<u64, O2Error> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
         let url = format!("{}/sapi/upload", UPLOAD_URL);
 
         let metadata = serde_json::to_string(&RawRequest { data: meta })
             .map_err(|e| O2Error::Api(format!("Failed to serialize upload metadata: {}", e)))?;
 
-        let open_err = |e: std::io::Error| {
-            O2Error::Io(std::io::Error::new(
-                e.kind(),
-                format!("Cannot open {} for upload: {}", path.display(), e),
-            ))
+        // The streamed body can't be replayed, so a 429 or 503 is
+        // retried here by reading the file again. Either status means the
+        // upload was turned away, so a retry can't make a duplicate.
+        let mut retry = 0;
+        let resp = loop {
+            let resp = self
+                .send_upload(&url, meta, &metadata, path, offset, auth)
+                .await?;
+            if !is_busy(resp.status(), false) || retry >= BUSY_RETRIES {
+                break resp;
+            }
+            let wait = busy_wait(&resp, retry);
+            retry += 1;
+            tokio::time::sleep(wait).await;
         };
-        let mut file = tokio::fs::File::open(path).await.map_err(open_err)?;
-        if offset > 0 {
-            file.seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(open_err)?;
-        }
-        let body =
-            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(meta.size)));
-        let file_part = reqwest::multipart::Part::stream_with_length(body, meta.size)
-            .file_name(meta.name.clone())
-            .mime_str(&meta.contenttype)?;
-        let form = reqwest::multipart::Form::new()
-            .text("data", metadata)
-            .part("file", file_part);
-
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
-            .header("referer", "https://cloud.o2online.es/")
-            .multipart(form);
-
-        let resp = self.send_sapi(req, auth).await?;
 
         let status = resp.status();
         let raw_body = resp.text().await?;
@@ -1347,6 +1352,49 @@ impl O2Client {
         })?;
 
         Ok(resp_data.id)
+    }
+
+    /// Send one upload request: the metadata `metadata` and the
+    /// `meta.size` bytes of `path` from `offset`, streamed from disk.
+    async fn send_upload(
+        &self,
+        url: &str,
+        meta: &UploadMeta,
+        metadata: &str,
+        path: &std::path::Path,
+        offset: u64,
+        auth: &AuthConfig,
+    ) -> Result<reqwest::Response, O2Error> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let open_err = |e: std::io::Error| {
+            O2Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("Cannot open {} for upload: {}", path.display(), e),
+            ))
+        };
+        let mut file = tokio::fs::File::open(path).await.map_err(open_err)?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(open_err)?;
+        }
+        let body =
+            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(meta.size)));
+        let file_part = reqwest::multipart::Part::stream_with_length(body, meta.size)
+            .file_name(meta.name.clone())
+            .mime_str(&meta.contenttype)?;
+        let form = reqwest::multipart::Form::new()
+            .text("data", metadata.to_string())
+            .part("file", file_part);
+
+        let req = self
+            .client
+            .post(url)
+            .query(&[("action", "save"), ("validationkey", &auth.validationkey)])
+            .header("referer", "https://cloud.o2online.es/")
+            .multipart(form);
+        self.send_sapi(req, auth).await
     }
 
     // ------------------------------------------------------------------
@@ -1461,8 +1509,8 @@ impl O2Client {
     /// Change a file's metadata — `{"name": ...}` to rename it or
     /// `{"folderid": ...}` to move it. `current_name` is the file's name
     /// on the server, which tells which route SAPI wants (see
-    /// `media_kind`); if that one refuses, the one for the new name and
-    /// then the generic one are tried.
+    /// `media_kind`); if that route answers that it has no such file,
+    /// the others are tried.
     ///
     /// `POST /sapi/upload/<kind>?action=save-metadata`, form-encoded
     /// `data={"data":{"id":<id>, ...changes}}`
@@ -1474,8 +1522,17 @@ impl O2Client {
         auth: &AuthConfig,
     ) -> Result<(), O2Error> {
         let new_name = changes["name"].as_str().unwrap_or(current_name);
+        // The guesses from the names first, then every other route, in
+        // case the server classes an extension differently.
         let mut kinds: Vec<&str> = Vec::new();
-        for kind in [media_kind(current_name), media_kind(new_name), "file"] {
+        for kind in [
+            media_kind(current_name),
+            media_kind(new_name),
+            "file",
+            "picture",
+            "video",
+            "audio",
+        ] {
             if !kinds.contains(&kind) {
                 kinds.push(kind);
             }
@@ -1487,12 +1544,13 @@ impl O2Client {
                 .await
             {
                 Ok(()) => return Ok(()),
-                // MED-1050 ("unsupported extension") is a final no; another
-                // route won't change it.
-                Err(e) if matches!(&e, O2Error::Api(msg) if msg.contains("MED-1050")) => {
-                    return Err(e)
+                // MED-1005 ("Unable to retrieve media with given id") is
+                // the answer of a route for another kind of file: try the
+                // next. Any other error is the real one.
+                Err(e) if matches!(&e, O2Error::Api(msg) if msg.contains("MED-1005")) => {
+                    last_err = Some(e)
                 }
-                Err(e) => last_err = Some(e),
+                Err(e) => return Err(e),
             }
         }
         Err(last_err.unwrap_or_else(|| O2Error::Api("Update file failed".into())))
@@ -1575,7 +1633,11 @@ impl O2Client {
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("json") || ct.contains("javascript"));
-        let small = resp.content_length().is_some_and(|n| n <= 1 << 20);
+        // Without a Content-Length, go by the size the listing gave.
+        let small = resp
+            .content_length()
+            .or(expected_size)
+            .is_none_or(|n| n <= 1 << 20);
         let total = if is_json && small {
             let bytes = resp.bytes().await?.to_vec();
             if expected_size != Some(bytes.len() as u64) {
@@ -2054,6 +2116,31 @@ mod tests {
         assert_eq!(media_kind("movie.mkv"), "file");
         assert_eq!(media_kind("notes.pdf"), "file");
         assert_eq!(media_kind("README"), "file");
+    }
+
+    #[test]
+    fn test_busy_and_creates() {
+        let client = reqwest::Client::new();
+        let req = |action: &str| {
+            client
+                .post("https://example.com/sapi/x")
+                .query(&[("action", action)])
+                .build()
+                .unwrap()
+        };
+        assert!(creates_something(&req("save")));
+        assert!(creates_something(&req("copy")));
+        assert!(!creates_something(&req("get")));
+        assert!(!creates_something(&req("softdelete")));
+
+        let (busy, unavailable) = (
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        );
+        assert!(is_busy(busy, true));
+        assert!(is_busy(unavailable, false));
+        assert!(!is_busy(unavailable, true));
+        assert!(!is_busy(reqwest::StatusCode::OK, false));
     }
 
     #[test]

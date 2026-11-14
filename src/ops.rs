@@ -708,7 +708,13 @@ fn resolve_path(
 
 /// Largest file O2 Cloud takes in one upload: the server announces it as
 /// `sapi.upload.max-size-in-mb` (4096) in `/sapi/system/information`.
-pub const MAX_UPLOAD_SIZE: u64 = 4096 * 1024 * 1024;
+/// Larger files go up in parts of `DEFAULT_PART_SIZE`, which leaves a
+/// margin in case the limit counts the whole request, not just the file.
+const MAX_UPLOAD_MB: u64 = 4096;
+pub const DEFAULT_PART_SIZE: u64 = (MAX_UPLOAD_MB - 96) * 1024 * 1024;
+
+/// Most parts a file is split into (`name.001` … `name.999`).
+const MAX_PARTS: u64 = 999;
 
 /// Options shared by `upload`, `upload-dir` and `upload-zip`.
 pub struct UploadOptions {
@@ -717,9 +723,10 @@ pub struct UploadOptions {
     pub skip_existing: bool,
     /// How many files `upload-dir` sends at the same time.
     pub jobs: usize,
-    /// Files larger than this go up in parts of this size, named
-    /// `name.001`, `name.002`, … (the 7-Zip / HJSplit convention, so
-    /// `cat name.0* > name` joins them too); `download name` joins them.
+    /// Files larger than this go up in parts of (at most) this size,
+    /// named `name.001`, `name.002`, … (the 7-Zip / HJSplit convention,
+    /// so `cat name.0* > name` joins them too); `download name` joins
+    /// them. At least 2.
     pub part_size: u64,
 }
 
@@ -742,23 +749,99 @@ fn existing_files(media: &[crate::api::MediaItem]) -> ExistingFiles {
 /// The pieces a file of `size` bytes is uploaded as: `(name, offset,
 /// length)`. One piece under the file's own name if it fits in
 /// `part_size`, else `name.001`, `name.002`, …
-fn upload_pieces(name: &str, size: u64, part_size: u64) -> Vec<(String, u64, u64)> {
+///
+/// The last part is always smaller than the others: that is how
+/// `download` tells a complete set from one whose last parts are missing
+/// (an upload cut short, or parts not listed yet). For a size that is an
+/// exact multiple of `part_size`, the parts are made a little smaller.
+fn upload_pieces(
+    name: &str,
+    size: u64,
+    part_size: u64,
+) -> Result<Vec<(String, u64, u64)>, O2Error> {
     if size <= part_size {
-        return vec![(name.to_string(), 0, size)];
+        return Ok(vec![(name.to_string(), 0, size)]);
     }
-    let count = size.div_ceil(part_size);
-    (0..count)
+    let mut part = part_size;
+    while size.is_multiple_of(part) && part > 2 {
+        part -= 1;
+    }
+    let count = size.div_ceil(part);
+    if count > MAX_PARTS {
+        return Err(O2Error::Invalid(format!(
+            "{} would need {} parts; the most is {}",
+            name, count, MAX_PARTS
+        )));
+    }
+    Ok((0..count)
         .map(|i| {
-            let offset = i * part_size;
-            let len = part_size.min(size - offset);
+            let offset = i * part;
+            let len = part.min(size - offset);
             (part_name(name, i as usize + 1), offset, len)
         })
-        .collect()
+        .collect())
 }
 
 /// Name of part `n` (1-based) of a split file.
 fn part_name(name: &str, n: usize) -> String {
     format!("{}.{:03}", name, n)
+}
+
+/// The part number of `candidate` if it is a part of `base`
+/// (`base.001` … `base.999`).
+fn part_number(base: &str, candidate: &str) -> Option<usize> {
+    candidate
+        .strip_prefix(base)?
+        .strip_prefix('.')
+        .filter(|n| n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Check the parts of `name` already in `folder_id` before uploading
+/// `pieces` there. Without `skip_existing`, any part there is refused:
+/// mixing them with the new ones would join two different files. With
+/// it, the parts there must be ones this file would upload (same number
+/// and size), so the upload resumes.
+fn check_existing_parts(
+    name: &str,
+    pieces: &[(String, u64, u64)],
+    folder_id: u64,
+    existing: &ExistingFiles,
+    skip_existing: bool,
+) -> Result<(), O2Error> {
+    let mut there: Vec<(usize, &Vec<(u64, u64)>)> = existing
+        .iter()
+        .filter(|((folder, _), _)| *folder == folder_id)
+        .filter_map(|((_, n), found)| part_number(name, n).map(|n| (n, found)))
+        .collect();
+    if there.is_empty() {
+        return Ok(());
+    }
+    there.sort_by_key(|(n, _)| *n);
+    if !skip_existing {
+        return Err(O2Error::Invalid(format!(
+            "this folder already has parts of a file named {} ({}): delete them \
+             first, or add --skip-existing to resume uploading the same file",
+            name,
+            part_name(name, there[0].0)
+        )));
+    }
+    for (n, found) in there {
+        let fits = matches!(
+            (pieces.get(n - 1), found.as_slice()),
+            (Some((_, _, len)), [(size, _)]) if size == len
+        );
+        if !fits {
+            return Err(O2Error::Invalid(format!(
+                "the parts of {} already in this folder don't match this file \
+                 ({} differs); delete them first",
+                name,
+                part_name(name, n)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The result of uploading one local file.
@@ -773,8 +856,10 @@ struct Uploaded {
 }
 
 /// Upload the local file `path` (`size` bytes) to `folder_id` as `name`,
-/// in parts if it is larger than `opts.part_size`. With
-/// `opts.skip_existing`, pieces `existing` already has are skipped.
+/// in parts if it is larger than `opts.part_size`. `existing` must list
+/// the folder's files if `opts.skip_existing` is set or the file is split
+/// (see `needs_listing`): with `opts.skip_existing`, pieces already there
+/// are skipped.
 #[allow(clippy::too_many_arguments)]
 async fn upload_local_file(
     client: &O2Client,
@@ -787,16 +872,10 @@ async fn upload_local_file(
     existing: &ExistingFiles,
     opts: &UploadOptions,
 ) -> Result<Uploaded, O2Error> {
-    let pieces = upload_pieces(name, size, opts.part_size);
-    if pieces.len() > 999 {
-        return Err(O2Error::Invalid(format!(
-            "{} would need {} parts; the most is 999",
-            name,
-            pieces.len()
-        )));
-    }
+    let pieces = upload_pieces(name, size, opts.part_size)?;
     let split = pieces.len() > 1;
     if split {
+        check_existing_parts(name, &pieces, folder_id, existing, opts.skip_existing)?;
         eprintln!(
             "  {} is larger than {}: uploading it in {} parts ({}.001 …)",
             name,
@@ -847,11 +926,32 @@ async fn upload_local_file(
             size: *len,
         };
         // Metadata and contents in one request, streamed from disk
-        uploaded
-            .ids
-            .push(client.upload_file(&meta, path, *offset, auth).await?);
+        match client.upload_file(&meta, path, *offset, auth).await {
+            Ok(id) => uploaded.ids.push(id),
+            // Say what is already up, so the upload can be resumed.
+            Err(e) if split && !uploaded.ids.is_empty() => {
+                let ids: Vec<String> = uploaded.ids.iter().map(u64::to_string).collect();
+                return Err(O2Error::Api(format!(
+                    "{} — part {}/{} of {} failed; parts 1–{} are in the cloud \
+                     (ids: {}): run the same command with --skip-existing to resume",
+                    e,
+                    i + 1,
+                    pieces.len(),
+                    name,
+                    i,
+                    ids.join(", ")
+                )));
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(uploaded)
+}
+
+/// Whether uploading needs the cloud's file listing: to skip what is
+/// already there, or to check for old parts before a split upload.
+fn needs_listing(opts: &UploadOptions, largest_file: u64) -> bool {
+    opts.skip_existing || largest_file > opts.part_size
 }
 
 /// The root folder's ID.
@@ -891,7 +991,7 @@ pub async fn upload_file(
         Some(id) => id,
         None => root_folder_id(client, auth).await?,
     };
-    let existing = if opts.skip_existing {
+    let existing = if needs_listing(opts, size) {
         existing_files(&client.get_all_media(auth).await?)
     } else {
         ExistingFiles::new()
@@ -976,23 +1076,30 @@ pub async fn upload_dir(
 
     // Fetch all existing folders to check for duplicates
     let existing_folders = client.get_all_folders(auth).await?;
-    let existing = if opts.skip_existing {
-        existing_files(&client.get_all_media(auth).await?)
-    } else {
-        ExistingFiles::new()
-    };
 
     // Collect all files and directories to upload, skipping hidden and
     // system entries (see `is_skipped_name`).
     // The walk is synchronous filesystem work, so keep it off the runtime.
     let dir = local_dir.to_path_buf();
-    let (entries, skipped_entries, total_size) = spawn_blocking_io(move || {
+    let (entries, skipped_entries, total_size, largest_file) = spawn_blocking_io(move || {
         let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
         let mut skipped_entries = 0u32;
         walk_dir(&dir, &mut entries, &mut skipped_entries)?;
-        Ok((entries, skipped_entries, dir_size(&dir)))
+        let largest_file = entries
+            .iter()
+            .filter(|(_, is_dir)| !is_dir)
+            .filter_map(|(p, _)| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .max()
+            .unwrap_or(0);
+        Ok((entries, skipped_entries, dir_size(&dir), largest_file))
     })
     .await?;
+    let existing = if needs_listing(opts, largest_file) {
+        existing_files(&client.get_all_media(auth).await?)
+    } else {
+        ExistingFiles::new()
+    };
 
     // Count files for progress
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
@@ -1478,7 +1585,10 @@ pub async fn download_file(
     json: bool,
 ) -> Result<(), O2Error> {
     // Fetch the signed download URL (and real name) from the media listing
-    let media = media_for_target(client, auth, target, &[]).await?;
+    let folders = client.get_all_folders(auth).await?;
+    let media = media_for_target(client, auth, target, &folders).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
     let by_id = target
         .parse::<u64>()
         .ok()
@@ -1488,38 +1598,22 @@ pub async fn download_file(
     let (name, pieces) = match by_id {
         Some(item) => (item.name.clone(), vec![item]),
         // Not a known ID: resolve as a file path or unique file name.
-        None => {
-            let folders = client.get_all_folders(auth).await?;
-            let folder_name: HashMap<u64, String> =
-                folders.iter().map(|f| (f.id, f.name.clone())).collect();
-            match find_file(target, &folders, &folder_name, &media) {
-                Ok(item) => (item.name.clone(), vec![item]),
-                // No such file, but maybe it went up in parts.
-                Err(O2Error::NotFound(msg)) => {
-                    let Ok(first) =
-                        find_file(&part_name(target, 1), &folders, &folder_name, &media)
-                    else {
-                        return Err(O2Error::NotFound(msg));
-                    };
-                    let base = target.rsplit('/').next().unwrap_or(target);
-                    (Some(base.to_string()), file_parts(first, base, &media)?)
-                }
-                Err(e) => return Err(e),
+        None => match find_file(target, &folders, &folder_name, &media) {
+            Ok(item) => (item.name.clone(), vec![item]),
+            // No such file, but maybe it went up in parts.
+            Err(O2Error::NotFound(msg)) => {
+                let first = match find_file(&part_name(target, 1), &folders, &folder_name, &media) {
+                    Ok(first) => first,
+                    Err(O2Error::NotFound(_)) => return Err(O2Error::NotFound(msg)),
+                    Err(e) => return Err(e),
+                };
+                let base = target.rsplit('/').next().unwrap_or(target);
+                (Some(base.to_string()), file_parts(first, base, &media)?)
             }
-        }
+            Err(e) => return Err(e),
+        },
     };
     let ids: Vec<u64> = pieces.iter().map(|m| m.id).collect();
-    // Every part but the last is full size, so a full last part may mean
-    // the listing doesn't show the rest yet.
-    if let [first, .., last] = pieces.as_slice() {
-        if last.size == first.size {
-            eprintln!(
-                "⚠ The last part found ({}) is as large as the others: if parts \
-                 were uploaded a moment ago, some may not be listed yet",
-                last.name.as_deref().unwrap_or("?")
-            );
-        }
-    }
 
     let output_path = match output {
         Some(p) => p,
@@ -1549,7 +1643,10 @@ pub async fn download_file(
         } else {
             eprintln!("→ Downloading media {}...", item.id);
         }
-        let result = download_piece(client, auth, item, &mut file, &output_path).await;
+        // The listing's signed URLs may expire during a long join, so
+        // each part gets a fresh one.
+        let fresh_url = pieces.len() > 1;
+        let result = download_piece(client, auth, item, fresh_url, &mut file, &output_path).await;
         match result {
             Ok(n) => bytes_written += n,
             Err(e) => {
@@ -1582,19 +1679,21 @@ pub async fn download_file(
     Ok(())
 }
 
-/// Download one media item and append it to `file`.
+/// Download one media item and append it to `file`; with `fresh_url`, by
+/// a download URL asked for now rather than the listing's.
 async fn download_piece(
     client: &O2Client,
     auth: &AuthConfig,
     item: &crate::api::MediaItem,
+    fresh_url: bool,
     file: &mut tokio::fs::File,
     path: &Path,
 ) -> Result<u64, O2Error> {
     // A file uploaded a moment ago is listed without a URL until the
-    // server has processed it; ask for it by ID then.
+    // server has processed it; ask for it by ID then, or when `fresh_url`.
     let download_url = match item.url.clone() {
-        Some(url) => url,
-        None => client.media_download_url(item.id, auth).await?,
+        Some(url) if !fresh_url => url,
+        _ => client.media_download_url(item.id, auth).await?,
     };
     client
         .download_into(&download_url, file, path, item.size)
@@ -1603,29 +1702,31 @@ async fn download_piece(
 
 /// The parts of the file `base` uploaded in parts, in order, starting
 /// with its first part `first`: every `base.NNN` in the same folder.
-/// Fails if a part between the first and the last is missing (the
-/// listing can lag a few seconds behind an upload), rather than
-/// silently joining an incomplete file.
+/// Fails unless they make a complete file: no part missing between the
+/// first and the last, every part but the last the same size, and the
+/// last one smaller (`upload_pieces` makes sure of that, so a full-size
+/// last part means later ones are missing). Parts can be missing because
+/// an upload was cut short, or because the listing lags behind it.
 fn file_parts<'a>(
     first: &'a crate::api::MediaItem,
     base: &str,
     media: &'a [crate::api::MediaItem],
 ) -> Result<Vec<&'a crate::api::MediaItem>, O2Error> {
-    let prefix = format!("{}.", base);
     let mut by_number: HashMap<usize, Vec<&crate::api::MediaItem>> = HashMap::new();
     for m in media.iter().filter(|m| m.folderid == first.folderid) {
-        let number = m
-            .name
-            .as_deref()
-            .and_then(|n| n.strip_prefix(&prefix))
-            .filter(|n| n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
-            .and_then(|n| n.parse::<usize>().ok());
-        if let Some(n) = number.filter(|&n| n > 0) {
+        if let Some(n) = m.name.as_deref().and_then(|n| part_number(base, n)) {
             by_number.entry(n).or_default().push(m);
         }
     }
+    let incomplete = |why: String| {
+        O2Error::NotFound(format!(
+            "a complete set of parts of {}: {}. If they were uploaded a moment \
+             ago, try again in a minute; otherwise download the parts by ID",
+            base, why
+        ))
+    };
     let last = by_number.keys().copied().max().unwrap_or(1);
-    (1..=last)
+    let parts = (1..=last)
         .map(|n| match by_number.get(&n).map(Vec::as_slice) {
             Some([part]) => Ok(*part),
             Some(found) => Err(O2Error::Ambiguous(format!(
@@ -1633,15 +1734,26 @@ fn file_parts<'a>(
                 found.len(),
                 part_name(base, n)
             ))),
-            None => Err(O2Error::NotFound(format!(
-                "part '{}' of {} (found parts up to .{:03}); if it was just \
-                 uploaded, try again in a few seconds",
-                part_name(base, n),
-                base,
-                last
-            ))),
+            None => Err(incomplete(format!("{} is missing", part_name(base, n)))),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let full = parts[0].size;
+    if let Some(odd) = parts[..parts.len() - 1].iter().find(|p| p.size != full) {
+        return Err(incomplete(format!(
+            "{} isn't the same size as the other parts",
+            odd.name.as_deref().unwrap_or("?")
+        )));
+    }
+    let last_part = parts[parts.len() - 1];
+    let last_is_smaller = matches!((full, last_part.size), (Some(f), Some(l)) if l < f);
+    if !last_is_smaller {
+        return Err(incomplete(format!(
+            "the parts after {} are missing",
+            last_part.name.as_deref().unwrap_or("?")
+        )));
+    }
+    Ok(parts)
 }
 
 // ------------------------------------------------------------------
@@ -1767,9 +1879,9 @@ const NEW_UPLOAD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The account's files, for resolving `target`. The listing shows a new
 /// upload only after 10–40 s, so a numeric `target` that is neither a
-/// folder in `folders` nor a listed file, but is newer than every listed
-/// file (media IDs only grow), is asked for by ID until it shows up: `rm`,
-/// `mv` & co. then work on the ID `upload` just printed.
+/// folder in `folders`, a listed file nor the name of one, but is newer
+/// than every listed file (media IDs only grow), is asked for by ID until
+/// it shows up: `rm`, `mv` & co. then work on the ID `upload` just printed.
 async fn media_for_target(
     client: &O2Client,
     auth: &AuthConfig,
@@ -1785,12 +1897,29 @@ async fn media_for_target(
     if known || id <= newest {
         return Ok(media);
     }
+    // A folder or file *named* like the number (e.g. `2024`) wins, as in
+    // `resolve_item`, without waiting.
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    let is_name = resolve_target(Some(target.to_string()), folders, &folder_name).is_ok()
+        || !matches!(
+            find_file(target, folders, &folder_name, &media),
+            Err(O2Error::NotFound(_))
+        );
+    if is_name {
+        return Ok(media);
+    }
 
     let start = std::time::Instant::now();
     loop {
-        if let Some(item) = client.get_media_by_id(id, auth).await? {
-            media.push(item);
-            return Ok(media);
+        match client.get_media_by_id(id, auth).await {
+            Ok(Some(item)) => {
+                media.push(item);
+                return Ok(media);
+            }
+            Ok(None) => {}
+            // Leave it to the usual lookup to say it wasn't found.
+            Err(_) => return Ok(media),
         }
         if start.elapsed() >= NEW_UPLOAD_WAIT {
             return Ok(media);
@@ -2106,11 +2235,10 @@ async fn move_folder(
     Ok(())
 }
 
-/// The extension of a file name, lowercased (`None` if it has none).
-fn file_extension(name: &str) -> Option<String> {
-    Path::new(name)
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
+/// The extension of a file name (`None` if it has none). Case matters:
+/// the server keeps `.JPG` when asked to rename to `.jpg`.
+fn file_extension(name: &str) -> Option<&std::ffi::OsStr> {
+    Path::new(name).extension()
 }
 
 /// Check a bare file or folder name given on the command line.
@@ -3044,20 +3172,66 @@ mod tests {
 
     #[test]
     fn test_upload_pieces() {
+        let pieces = |name: &str, size, part| upload_pieces(name, size, part).unwrap();
+        assert_eq!(pieces("a.iso", 10, 10), vec![("a.iso".into(), 0, 10)]);
+        assert_eq!(pieces("empty", 0, 10), vec![("empty".into(), 0, 0)]);
         assert_eq!(
-            upload_pieces("a.iso", 10, 10),
-            vec![("a.iso".into(), 0, 10)]
-        );
-        assert_eq!(upload_pieces("empty", 0, 10), vec![("empty".into(), 0, 0)]);
-        assert_eq!(
-            upload_pieces("a.iso", 25, 10),
+            pieces("a.iso", 25, 10),
             vec![
                 ("a.iso.001".into(), 0, 10),
                 ("a.iso.002".into(), 10, 10),
                 ("a.iso.003".into(), 20, 5),
             ]
         );
-        assert_eq!(upload_pieces("a.iso", 20, 10).len(), 2);
+        // An exact multiple gets smaller parts, so the last one is
+        // still smaller than the others.
+        assert_eq!(
+            pieces("a.iso", 20, 10),
+            vec![
+                ("a.iso.001".into(), 0, 9),
+                ("a.iso.002".into(), 9, 9),
+                ("a.iso.003".into(), 18, 2),
+            ]
+        );
+        for size in 11..400u64 {
+            let p = pieces("f", size, 10);
+            let (last, rest) = p.split_last().unwrap();
+            assert!(rest.iter().all(|x| x.2 == p[0].2 && last.2 < x.2), "{size}");
+            assert_eq!(p.iter().map(|x| x.2).sum::<u64>(), size);
+        }
+        // Too many parts is refused before building them.
+        assert!(upload_pieces("huge", u64::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn test_part_number() {
+        assert_eq!(part_number("big.iso", "big.iso.001"), Some(1));
+        assert_eq!(part_number("big.iso", "big.iso.120"), Some(120));
+        assert_eq!(part_number("big.iso", "big.iso.000"), None);
+        assert_eq!(part_number("big.iso", "big.iso.0001"), None);
+        assert_eq!(part_number("big.iso", "big.iso.txt"), None);
+        assert_eq!(part_number("big.iso", "big.isox001"), None);
+        assert_eq!(part_number("big.iso", "other.iso.001"), None);
+    }
+
+    #[test]
+    fn test_check_existing_parts() {
+        let pieces = upload_pieces("f", 25, 10).unwrap(); // 10, 10, 5
+        let mut existing = ExistingFiles::new();
+        // Nothing there: fine either way.
+        assert!(check_existing_parts("f", &pieces, 1, &existing, false).is_ok());
+        existing.insert((1, "f.001".into()), vec![(10, 100)]);
+        existing.insert((2, "f.002".into()), vec![(10, 200)]); // other folder
+                                                               // A part there without --skip-existing: refused.
+        assert!(check_existing_parts("f", &pieces, 1, &existing, false).is_err());
+        // Resuming the same file: fine.
+        assert!(check_existing_parts("f", &pieces, 1, &existing, true).is_ok());
+        // A part this file wouldn't upload, or of another size: refused.
+        existing.insert((1, "f.004".into()), vec![(1, 400)]);
+        assert!(check_existing_parts("f", &pieces, 1, &existing, true).is_err());
+        existing.remove(&(1, "f.004".into()));
+        existing.insert((1, "f.003".into()), vec![(7, 300)]);
+        assert!(check_existing_parts("f", &pieces, 1, &existing, true).is_err());
     }
 
     #[test]
@@ -3078,32 +3252,49 @@ mod tests {
         // In order, from this folder only, other names ignored.
         let media = parse(
             r#"[
-                {"id": 1, "name": "big.iso.001", "folderid": 2},
-                {"id": 3, "name": "big.iso.003", "folderid": 2},
-                {"id": 2, "name": "big.iso.002", "folderid": 2},
-                {"id": 9, "name": "big.iso.004", "folderid": 5},
-                {"id": 7, "name": "big.iso.0001", "folderid": 2},
-                {"id": 8, "name": "big.iso.txt", "folderid": 2}
+                {"id": 1, "name": "big.iso.001", "folderid": 2, "size": 10},
+                {"id": 3, "name": "big.iso.003", "folderid": 2, "size": 5},
+                {"id": 2, "name": "big.iso.002", "folderid": 2, "size": 10},
+                {"id": 9, "name": "big.iso.004", "folderid": 5, "size": 10},
+                {"id": 7, "name": "big.iso.0001", "folderid": 2, "size": 10},
+                {"id": 8, "name": "big.iso.txt", "folderid": 2, "size": 10}
             ]"#,
         );
         assert_eq!(ids(&media).unwrap(), vec![1, 2, 3]);
 
-        // A gap is an error, not a shorter file.
-        let media = parse(
-            r#"[
+        let err = |json: &str| ids(&parse(json)).unwrap_err().to_string();
+        // A gap.
+        let e = err(r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2, "size": 10},
+                {"id": 3, "name": "big.iso.003", "folderid": 2, "size": 5}
+            ]"#);
+        assert!(e.contains("big.iso.002 is missing"), "{e}");
+        // The last parts missing: the last one found is full size.
+        let e = err(r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2, "size": 10},
+                {"id": 2, "name": "big.iso.002", "folderid": 2, "size": 10}
+            ]"#);
+        assert!(e.contains("after big.iso.002 are missing"), "{e}");
+        // A part from another upload.
+        let e = err(r#"[
+                {"id": 1, "name": "big.iso.001", "folderid": 2, "size": 10},
+                {"id": 2, "name": "big.iso.002", "folderid": 2, "size": 8},
+                {"id": 3, "name": "big.iso.003", "folderid": 2, "size": 5}
+            ]"#);
+        assert!(e.contains("big.iso.002 isn't the same size"), "{e}");
+        // Sizes unknown: can't tell it is complete.
+        let e = err(r#"[
                 {"id": 1, "name": "big.iso.001", "folderid": 2},
-                {"id": 3, "name": "big.iso.003", "folderid": 2}
-            ]"#,
-        );
-        let err = ids(&media).unwrap_err().to_string();
-        assert!(err.contains("'big.iso.002'"), "{err}");
+                {"id": 2, "name": "big.iso.002", "folderid": 2}
+            ]"#);
+        assert!(e.contains("are missing"), "{e}");
 
         // Two parts with the same number: refuse to guess.
         let media = parse(
             r#"[
-                {"id": 1, "name": "big.iso.001", "folderid": 2},
-                {"id": 2, "name": "big.iso.002", "folderid": 2},
-                {"id": 4, "name": "big.iso.002", "folderid": 2}
+                {"id": 1, "name": "big.iso.001", "folderid": 2, "size": 10},
+                {"id": 2, "name": "big.iso.002", "folderid": 2, "size": 5},
+                {"id": 4, "name": "big.iso.002", "folderid": 2, "size": 5}
             ]"#,
         );
         assert!(matches!(ids(&media), Err(O2Error::Ambiguous(_))));

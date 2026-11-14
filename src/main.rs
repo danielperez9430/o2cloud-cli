@@ -32,7 +32,7 @@ struct UploadFlags {
     skip_existing: bool,
 
     /// Size in bytes above which a file is uploaded in parts (default:
-    /// the server's 4 GB limit). For testing.
+    /// just under the server's 4 GB limit). For testing.
     #[arg(long, hide = true)]
     part_size: Option<u64>,
 }
@@ -42,7 +42,7 @@ impl UploadFlags {
         ops::UploadOptions {
             skip_existing: self.skip_existing,
             jobs,
-            part_size: self.part_size.unwrap_or(ops::MAX_UPLOAD_SIZE).max(1),
+            part_size: self.part_size.unwrap_or(ops::DEFAULT_PART_SIZE).max(2),
         }
     }
 }

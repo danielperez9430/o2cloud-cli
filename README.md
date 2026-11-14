@@ -243,8 +243,8 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **Deletes go to the trash**, so they can be restored from the O2 Cloud website.
 - **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
 - **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them, and the files the OS keeps for itself (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` includes them inside the zip.
-- **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing.
-- **`--skip-existing`** skips a file (or part) the target folder already has with the same name and size. New uploads take up to a minute to show up in listings, so right after an upload it may not see them yet.
+- **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing or doesn't belong with the others. Uploading a file in parts where parts of one with the same name already are is refused, unless `--skip-existing` resumes the same file.
+- **`--skip-existing`** skips a file (or part) the target folder already has with the same name and size (the contents aren't compared). New uploads take up to a minute to show up in listings, so right after an upload it may not see them yet.
 - **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
 - **Nothing is overwritten:** `mkdir`, `mv`, `cp` and `rename` refuse to create a second file or folder with the same name in the same place.
 - **Not supported yet:** unsharing a file, and copying folders. Use the website for those for now.
