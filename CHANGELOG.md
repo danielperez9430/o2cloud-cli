@@ -2,7 +2,7 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.9.0] — 2026-11-14
 
 ### Added
 - Files over 4 GB, the most O2 Cloud takes in one upload, go up in
