@@ -1,8 +1,4 @@
-# o2cloud-cli
-
-<p align="center">
-  <img src="assets/logo.svg" alt="o2cloud-cli" width="600">
-</p>
+<p align="center"><img src="docs/banner.png" alt="o2cloud-cli" width="720"></p>
 
 <p align="center">
   <a href="https://crates.io/crates/o2cloud-cli"><img src="https://img.shields.io/crates/v/o2cloud-cli" alt="Crates.io"></a>
