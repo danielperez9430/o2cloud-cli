@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="o2cloud-cli">
+  <style>.ink{stroke:#1c1b1b}@media (prefers-color-scheme:dark){.ink{stroke:#fcf9f8}}</style>
+  <path class="ink" d="M76 184 A34 34 0 0 1 76.2 116.0 A52 52 0 0 1 179.8 116.0 A34 34 0 0 1 180 184 Z" fill="none" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M106 122 L124 136 L106 150 M134 150 H152" fill="none" stroke="#ff3e3e" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
