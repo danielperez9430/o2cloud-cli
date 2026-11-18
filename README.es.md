@@ -310,6 +310,8 @@ La sesión se guarda en:
 
 En macOS y Linux el archivo solo lo puede leer tu usuario (`0600`). `o2cloud logout` lo borra.
 
+**Velocidad en cuentas grandes:** listar todos los archivos cuesta una petición por cada 1.000, así que los comandos lo evitan cuando pueden. Un archivo o carpeta indicado por ID o por ruta (`/docs/a.txt`) se busca por separado, y solo un nombre suelto (`a.txt`), `ls`, `upload-dir --skip-existing` y `rm` de una carpeta listan toda la cuenta. Con `O2CLOUD_TRACE=1` se ve cada petición que envía un comando (método, ruta, estado y tiempo; nunca las claves de sesión) y cuántas han sido.
+
 ## 📄 Licencia
 
 [MIT](./LICENSE)

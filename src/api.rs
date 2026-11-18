@@ -172,6 +172,97 @@ fn media_kind(name: &str) -> &'static str {
     }
 }
 
+/// The folder list from a `/sapi/media/folder?action=get` response.
+fn parse_folders(status: reqwest::StatusCode, raw_body: &str) -> Result<Vec<FolderEntry>, O2Error> {
+    if !status.is_success() {
+        return Err(O2Error::Api(format!(
+            "Get folders failed (status {}): {}",
+            status,
+            truncate_utf8(raw_body, 300)
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct FolderData {
+        folders: Vec<FolderEntry>,
+    }
+
+    let body: RawResponse<FolderData> = serde_json::from_str(raw_body).map_err(|e| {
+        O2Error::Parse(format!(
+            "Failed to parse folder list: {} — body: {}",
+            e,
+            truncate_utf8(raw_body, 300)
+        ))
+    })?;
+    Ok(body.data.folders)
+}
+
+/// Requests sent so far, counted for `O2CLOUD_TRACE`.
+static REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether `O2CLOUD_TRACE` is set: each request is then logged to stderr
+/// (method, host, path, SAPI `action`, status, time), and `main` prints
+/// how many there were. Query strings, headers and bodies are left out:
+/// they hold the session keys.
+pub fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("O2CLOUD_TRACE").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// How many requests this run has sent.
+pub fn requests_sent() -> usize {
+    REQUESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `send`, logged when `tracing()`.
+trait SendTraced {
+    async fn send_traced(self) -> Result<reqwest::Response, reqwest::Error>;
+}
+
+impl SendTraced for reqwest::RequestBuilder {
+    async fn send_traced(self) -> Result<reqwest::Response, reqwest::Error> {
+        let n = REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if !tracing() {
+            return self.send().await;
+        }
+        let (client, req) = self.build_split();
+        let req = req?;
+        let url = req.url();
+        let action = url
+            .query_pairs()
+            .find(|(k, _)| k == "action")
+            .map(|(_, v)| format!("?action={}", v))
+            .unwrap_or_default();
+        // Signed download URLs carry a token in the path too.
+        let path = if url.path().starts_with("/sapi/") {
+            url.path().to_string()
+        } else {
+            "/…".to_string()
+        };
+        let label = format!(
+            "{} {}{}{}",
+            req.method(),
+            url.host_str().unwrap_or("?"),
+            path,
+            action
+        );
+        let start = std::time::Instant::now();
+        let resp = client.execute(req).await;
+        let ms = start.elapsed().as_millis();
+        match &resp {
+            Ok(r) => eprintln!(
+                "[trace #{}] {} → {} in {} ms",
+                n,
+                label,
+                r.status().as_u16(),
+                ms
+            ),
+            Err(e) => eprintln!("[trace #{}] {} → error after {} ms: {}", n, label, ms, e),
+        }
+        resp
+    }
+}
+
 /// Generate a random device ID in the format used by the web client:
 /// `web-` followed by 32 hex characters.
 pub fn generate_device_id() -> String {
@@ -281,6 +372,9 @@ pub struct O2Client {
     /// the 302 responses themselves.
     no_redirect: Client,
     device_id: String,
+    /// The folder list `check_session` fetched, handed to the next
+    /// `get_all_folders` call instead of asking for it again.
+    prefetched_folders: std::sync::Mutex<Option<Vec<FolderEntry>>>,
 }
 
 impl O2Client {
@@ -331,6 +425,7 @@ impl O2Client {
             client,
             no_redirect,
             device_id,
+            prefetched_folders: std::sync::Mutex::new(None),
         })
     }
 
@@ -358,7 +453,7 @@ impl O2Client {
             .header("sec-fetch-site", "same-origin")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-dest", "empty")
-            .send()
+            .send_traced()
             .await?;
 
         // Extract the new JSESSIONID from Set-Cookie
@@ -495,9 +590,9 @@ impl O2Client {
         let mut retry = 0;
         loop {
             let Some(attempt) = builder.try_clone() else {
-                return Ok(builder.send().await?);
+                return Ok(builder.send_traced().await?);
             };
-            let resp = attempt.send().await?;
+            let resp = attempt.send_traced().await?;
             if !is_busy(resp.status(), creates) || retry >= BUSY_RETRIES {
                 return Ok(resp);
             }
@@ -521,7 +616,7 @@ impl O2Client {
 
         let resp = self
             .with_device_headers(req, "/sapi/system/information")
-            .send()
+            .send_traced()
             .await?;
 
         let body: RawResponse<SystemInfo> = resp.json().await?;
@@ -549,7 +644,7 @@ impl O2Client {
             .query(&[("platform", "web"), ("deviceid", &self.device_id)])
             .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", "https://cloud.o2online.es/")
-            .send()
+            .send_traced()
             .await?;
 
         let status = resp.status();
@@ -593,7 +688,7 @@ impl O2Client {
             .query(&[("code", code), ("state", state)])
             .header(header::ORIGIN, WEB_ORIGIN)
             .header("referer", "https://t3.o2online.es/")
-            .send()
+            .send_traced()
             .await?;
 
         let status = resp.status();
@@ -670,7 +765,7 @@ impl O2Client {
                 ("client_secret", client_secret),
                 ("code_verifier", code_verifier),
             ])
-            .send()
+            .send_traced()
             .await?;
         let status = token_resp.status();
         let raw = token_resp.text().await.unwrap_or_default();
@@ -751,7 +846,7 @@ impl O2Client {
         if let Some((jsessionid, _)) = existing {
             builder = builder.header("cookie", format!("JSESSIONID={}", jsessionid));
         }
-        let resp = builder.send().await?;
+        let resp = builder.send_traced().await?;
 
         let status = resp.status();
         let content_type = resp
@@ -844,41 +939,49 @@ impl O2Client {
     ///
     /// `POST /sapi/media/folder?action=get`
     pub async fn get_all_folders(&self, auth: &AuthConfig) -> Result<Vec<FolderEntry>, O2Error> {
-        let url = format!("{}/sapi/media/folder", BASE_URL);
+        let prefetched = self
+            .prefetched_folders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(folders) = prefetched {
+            return Ok(folders);
+        }
+        let (status, raw) = self.request_folders(auth).await?;
+        parse_folders(status, &raw)
+    }
 
+    /// Check the stored session like `is_session_valid`, by asking for the
+    /// folder list, which nearly every command asks for anyway: the next
+    /// `get_all_folders` call gets it without a request of its own.
+    pub async fn check_session(&self, auth: &AuthConfig) -> Result<bool, O2Error> {
+        let (status, raw) = self.request_folders(auth).await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(false);
+        }
+        if let Ok(folders) = parse_folders(status, &raw) {
+            *self
+                .prefetched_folders
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(folders);
+        }
+        Ok(true)
+    }
+
+    /// `POST /sapi/media/folder?action=get`: status and body.
+    async fn request_folders(
+        &self,
+        auth: &AuthConfig,
+    ) -> Result<(reqwest::StatusCode, String), O2Error> {
+        let url = format!("{}/sapi/media/folder", BASE_URL);
         let req = self
             .client
             .post(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-
         let resp = self.send_sapi(req, auth).await?;
-
         let status = resp.status();
-        let raw_body = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(O2Error::Api(format!(
-                "Get folders failed (status {}): {}",
-                status,
-                truncate_utf8(&raw_body, 300)
-            )));
-        }
-
-        #[derive(Deserialize)]
-        struct FolderData {
-            folders: Vec<FolderEntry>,
-        }
-
-        let body: RawResponse<FolderData> = serde_json::from_str(&raw_body).map_err(|e| {
-            O2Error::Parse(format!(
-                "Failed to parse folder list: {} — body: {}",
-                e,
-                truncate_utf8(&raw_body, 300)
-            ))
-        })?;
-
-        Ok(body.data.folders)
+        Ok((status, resp.text().await?))
     }
 
     /// Get all media items with requested fields.  Pages through results
@@ -886,6 +989,30 @@ impl O2Client {
     ///
     /// `POST /sapi/media?action=get` with JSON body specifying fields.
     pub async fn get_all_media(&self, auth: &AuthConfig) -> Result<Vec<MediaItem>, O2Error> {
+        self.list_media(None, auth).await
+    }
+
+    /// The files directly in folder `folder_id` (not in its subfolders),
+    /// without listing the whole account. Photos and videos the phone app
+    /// uploads have no folder (`ls` shows them in the root) and are never
+    /// returned here, not even for the root folder.
+    ///
+    /// `POST /sapi/media?action=get&folderid=<id>`
+    pub async fn get_folder_media(
+        &self,
+        folder_id: u64,
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
+        self.list_media(Some(folder_id), auth).await
+    }
+
+    /// Every file, or with `folder` the files in that folder, a page of
+    /// 1000 at a time.
+    async fn list_media(
+        &self,
+        folder: Option<u64>,
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
         let url = format!("{}/sapi/media", BASE_URL);
         let page_size = 1000u64;
         let mut all = Vec::new();
@@ -912,16 +1039,20 @@ impl O2Client {
                 },
             };
 
+            let mut query = vec![
+                ("action", "get".to_string()),
+                ("validationkey", auth.validationkey.clone()),
+                ("limit", page_size.to_string()),
+                ("offset", offset.to_string()),
+            ];
+            if let Some(id) = folder {
+                query.push(("folderid", id.to_string()));
+            }
             let req = self
                 .client
                 .post(&url)
                 .timeout(REQUEST_TIMEOUT)
-                .query(&[
-                    ("action", "get"),
-                    ("validationkey", &auth.validationkey),
-                    ("limit", &page_size.to_string()),
-                    ("offset", &offset.to_string()),
-                ])
+                .query(&query)
                 .header("content-type", "application/json")
                 .json(&payload);
 
@@ -1612,7 +1743,7 @@ impl O2Client {
         path: &std::path::Path,
         expected_size: Option<u64>,
     ) -> Result<u64, O2Error> {
-        let resp = self.client.get(download_url).send().await?;
+        let resp = self.client.get(download_url).send_traced().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -1888,7 +2019,7 @@ pub struct StorageSpace {
 }
 
 /// A media item returned by `POST /sapi/media?action=get`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MediaItem {
     #[serde(deserialize_with = "deserialize_id")]
     pub id: u64,
