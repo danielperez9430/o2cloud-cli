@@ -2,6 +2,26 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `ls --folder-only` lists only the files directly in a folder, without
+  listing the whole account: about a second instead of a minute or more
+  on a large one (#20). Subfolders then show no file count or size
+  (`null` in JSON), and the root leaves out the photos and videos the
+  phone app uploaded, which have no folder.
+- `ls --no-folder` lists only those photos and videos, which `ls` shows
+  in the root (it still lists the whole account: the API can't filter
+  them).
+
+### Changed
+- `ls`, `ls -t`, `ls -a` and `find` take time in proportion to the files
+  and folders in the account, not their product: a root `ls` on an
+  account with 46,000 files and a few hundred folders spent a minute of
+  CPU adding up each subfolder's files (#20). The output is unchanged.
+- The full file listing asks for four pages of 1,000 at a time after
+  the first, instead of one after another.
+
 ## [0.10.0] — 2026-11-18
 
 ### Added

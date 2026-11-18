@@ -88,7 +88,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 🔐 `login` | Log in (opens a login window) |
 | ℹ️ `status` | Show the account and whether the session is still active |
 | 🚪 `logout` | Remove the stored session |
-| 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--json`) |
+| 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
 | ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where, `--skip-existing` to resume) |
 | 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2) |
@@ -117,6 +117,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 { "id": 12345679, "path": "/Backups", "created": false }
 ```
 
+- `ls`: `path`, `folders` (`id`, `name`, and the `files` and `size` they hold, `null` with `--folder-only`) and `files` (`id`, `name`, `size`, `date`). `ls -a --json` is a list of files with their `path`.
 - `find`: `folders` (`id`, `name`, `path`) and `files` (`id`, `name`, `size`, `date`, `path`), as in `ls --json`.
 - `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs in scripts: a new upload takes up to a minute to show up in `ls`, `find` and paths, but `rm`, `mv`, `rename`, `cp`, `share` and `download` accept its ID right away (waiting a few seconds for the server if needed).
 - `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed.
@@ -164,6 +165,8 @@ o2cloud ls -l -s date -r       # with dates, newest first
 o2cloud ls -s size -r --limit 10   # the 10 biggest files
 o2cloud ls -n '*.heic'         # only names matching a pattern
 o2cloud ls --json | jq '.files[].id'   # JSON for scripts
+o2cloud ls /Photos --folder-only      # fast on a large account (no subfolder totals)
+o2cloud ls --no-folder                # only the photos and videos the phone app uploaded
 o2cloud find invoice           # case-insensitive search
 ```
 
@@ -305,7 +308,7 @@ The session is stored in:
 
 On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
 
-**Speed on large accounts:** listing every file takes one request per 1,000 files, so commands avoid it where they can. A file or folder given by ID or path (`/docs/a.txt`) is looked up on its own, and only a bare file name (`a.txt`), `ls`, `upload-dir --skip-existing` and `rm` of a folder list the whole account. Set `O2CLOUD_TRACE=1` to see each request a command sends (method, path, status and time; never the session keys) and how many there were.
+**Speed on large accounts:** listing every file takes one request per 1,000 files, so commands avoid it where they can. A file or folder given by ID or path (`/docs/a.txt`) is looked up on its own, and only a bare file name (`a.txt`), `ls`, `upload-dir --skip-existing` and `rm` of a folder list the whole account. `ls --folder-only` lists just the folder, without its subfolders' totals; in the root it leaves out the photos and videos the phone app uploaded, which have no folder (`ls --no-folder` lists those). Set `O2CLOUD_TRACE=1` to see each request a command sends (method, path, status and time; never the session keys) and how many there were.
 
 ## 📄 License
 

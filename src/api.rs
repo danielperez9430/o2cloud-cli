@@ -85,6 +85,12 @@ fn sapi_error(raw: &str) -> Option<String> {
 /// Retries for a call SAPI answers with 429 (Too Many Requests) or 503
 /// (Service Unavailable), waiting 1 s, 2 s and 4 s (plus jitter) unless
 /// the server sends `Retry-After`.
+/// Files per page of the media listing (the most SAPI returns).
+const MEDIA_PAGE_SIZE: usize = 1000;
+/// Pages of the media listing asked for at once after the first. Up to
+/// `MEDIA_PAGES_AT_ONCE - 1` empty pages past the end are asked for too.
+const MEDIA_PAGES_AT_ONCE: usize = 4;
+
 const BUSY_RETRIES: u32 = 3;
 /// Longest `Retry-After` honoured, so a bad header can't stall the CLI.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -1013,79 +1019,84 @@ impl O2Client {
         folder: Option<u64>,
         auth: &AuthConfig,
     ) -> Result<Vec<MediaItem>, O2Error> {
-        let url = format!("{}/sapi/media", BASE_URL);
-        let page_size = 1000u64;
-        let mut all = Vec::new();
-        let mut offset = 0u64;
-
-        #[derive(Serialize)]
-        struct MediaRequest {
-            data: MediaRequestData,
+        // The first page alone (a folder's files usually fit in it), then
+        // `MEDIA_PAGES_AT_ONCE` pages at a time until one comes back short.
+        let mut all = self.media_page(folder, 0, auth).await?;
+        let mut full = all.len() == MEDIA_PAGE_SIZE;
+        let mut next = 1;
+        while full {
+            let pages = futures_util::future::try_join_all(
+                (next..next + MEDIA_PAGES_AT_ONCE)
+                    .map(|page| self.media_page(folder, page * MEDIA_PAGE_SIZE, auth)),
+            )
+            .await?;
+            next += MEDIA_PAGES_AT_ONCE;
+            for page in pages {
+                if !full {
+                    break;
+                }
+                full = page.len() == MEDIA_PAGE_SIZE;
+                all.extend(page);
+            }
         }
-        #[derive(Serialize)]
-        struct MediaRequestData {
-            fields: Vec<&'static str>,
-        }
+        Ok(all)
+    }
 
+    /// One page of `list_media`: up to `MEDIA_PAGE_SIZE` files from `offset`.
+    async fn media_page(
+        &self,
+        folder: Option<u64>,
+        offset: usize,
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
         #[derive(Deserialize)]
         struct MediaData {
             media: Vec<MediaItem>,
         }
 
-        loop {
-            let payload = MediaRequest {
-                data: MediaRequestData {
-                    fields: vec!["name", "size", "etag", "folderid", "url", "creationdate"],
-                },
-            };
-
-            let mut query = vec![
-                ("action", "get".to_string()),
-                ("validationkey", auth.validationkey.clone()),
-                ("limit", page_size.to_string()),
-                ("offset", offset.to_string()),
-            ];
-            if let Some(id) = folder {
-                query.push(("folderid", id.to_string()));
+        let url = format!("{}/sapi/media", BASE_URL);
+        let payload = serde_json::json!({
+            "data": {
+                "fields": ["name", "size", "etag", "folderid", "url", "creationdate"]
             }
-            let req = self
-                .client
-                .post(&url)
-                .timeout(REQUEST_TIMEOUT)
-                .query(&query)
-                .header("content-type", "application/json")
-                .json(&payload);
+        });
+        let mut query = vec![
+            ("action", "get".to_string()),
+            ("validationkey", auth.validationkey.clone()),
+            ("limit", MEDIA_PAGE_SIZE.to_string()),
+            ("offset", offset.to_string()),
+        ];
+        if let Some(id) = folder {
+            query.push(("folderid", id.to_string()));
+        }
+        let req = self
+            .client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .query(&query)
+            .header("content-type", "application/json")
+            .json(&payload);
 
-            let resp = self.send_sapi(req, auth).await?;
+        let resp = self.send_sapi(req, auth).await?;
+        let status = resp.status();
+        let raw_body = resp.text().await?;
 
-            let status = resp.status();
-            let raw_body = resp.text().await?;
-
-            if !status.is_success() {
-                return Err(O2Error::Api(format!(
-                    "Get media failed (status {}): {}",
-                    status,
-                    truncate_utf8(&raw_body, 300)
-                )));
-            }
-
-            let body: RawResponse<MediaData> = serde_json::from_str(&raw_body).map_err(|e| {
-                O2Error::Parse(format!(
-                    "Failed to parse media list: {} — body: {}",
-                    e,
-                    truncate_utf8(&raw_body, 300)
-                ))
-            })?;
-
-            let count = body.data.media.len();
-            all.extend(body.data.media);
-            if count < page_size as usize {
-                break;
-            }
-            offset += page_size;
+        if !status.is_success() {
+            return Err(O2Error::Api(format!(
+                "Get media failed (status {}): {}",
+                status,
+                truncate_utf8(&raw_body, 300)
+            )));
         }
 
-        Ok(all)
+        let body: RawResponse<MediaData> = serde_json::from_str(&raw_body).map_err(|e| {
+            O2Error::Parse(format!(
+                "Failed to parse media list: {} — body: {}",
+                e,
+                truncate_utf8(&raw_body, 300)
+            ))
+        })?;
+        Ok(body.data.media)
     }
 
     /// One file, asked for by ID, or `None` if there is no such file. It

@@ -93,7 +93,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 🔐 `login` | Inicia sesión (abre una ventana de acceso) |
 | ℹ️ `status` | Muestra la cuenta y si la sesión sigue activa |
 | 🚪 `logout` | Borra la sesión guardada |
-| 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--json`) |
+| 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <texto>` | Busca archivos y carpetas por nombre |
 | ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde, `--skip-existing` para reanudar) |
 | 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto) |
@@ -122,6 +122,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 { "id": 12345679, "path": "/Copias", "created": false }
 ```
 
+- `ls`: `path`, `folders` (`id`, `name`, y los `files` y el `size` que contienen, `null` con `--folder-only`) y `files` (`id`, `name`, `size`, `date`). `ls -a --json` es una lista de archivos con su `path`.
 - `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
 - `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs en los scripts: una subida nueva tarda hasta un minuto en aparecer en `ls`, `find` y las rutas, pero `rm`, `mv`, `rename`, `cp`, `share` y `download` aceptan su ID al momento (esperando unos segundos al servidor si hace falta).
 - `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló.
@@ -169,6 +170,8 @@ o2cloud ls -l -s date -r       # con fechas, los más recientes primero
 o2cloud ls -s size -r --limit 10   # los 10 archivos más grandes
 o2cloud ls -n '*.heic'         # solo los nombres que encajan con un patrón
 o2cloud ls --json | jq '.files[].id'   # JSON para scripts
+o2cloud ls /Fotos --folder-only       # rápido en una cuenta grande (sin totales de subcarpetas)
+o2cloud ls --no-folder                # solo las fotos y vídeos que subió la app del móvil
 o2cloud find factura           # búsqueda sin distinguir mayúsculas
 ```
 
@@ -310,7 +313,7 @@ La sesión se guarda en:
 
 En macOS y Linux el archivo solo lo puede leer tu usuario (`0600`). `o2cloud logout` lo borra.
 
-**Velocidad en cuentas grandes:** listar todos los archivos cuesta una petición por cada 1.000, así que los comandos lo evitan cuando pueden. Un archivo o carpeta indicado por ID o por ruta (`/docs/a.txt`) se busca por separado, y solo un nombre suelto (`a.txt`), `ls`, `upload-dir --skip-existing` y `rm` de una carpeta listan toda la cuenta. Con `O2CLOUD_TRACE=1` se ve cada petición que envía un comando (método, ruta, estado y tiempo; nunca las claves de sesión) y cuántas han sido.
+**Velocidad en cuentas grandes:** listar todos los archivos cuesta una petición por cada 1.000, así que los comandos lo evitan cuando pueden. Un archivo o carpeta indicado por ID o por ruta (`/docs/a.txt`) se busca por separado, y solo un nombre suelto (`a.txt`), `ls`, `upload-dir --skip-existing` y `rm` de una carpeta listan toda la cuenta. `ls --folder-only` lista solo la carpeta, sin los totales de sus subcarpetas; en la raíz deja fuera las fotos y vídeos que subió la app del móvil, que no tienen carpeta (`ls --no-folder` lista esas). Con `O2CLOUD_TRACE=1` se ve cada petición que envía un comando (método, ruta, estado y tiempo; nunca las claves de sesión) y cuántas han sido.
 
 ## 📄 Licencia
 
