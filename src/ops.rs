@@ -992,7 +992,7 @@ pub async fn upload_file(
         None => root_folder_id(client, auth).await?,
     };
     let existing = if needs_listing(opts, size) {
-        existing_files(&client.get_all_media(auth).await?)
+        existing_files(&client.get_folder_media(folder_id, auth).await?)
     } else {
         ExistingFiles::new()
     };
@@ -1586,7 +1586,8 @@ pub async fn download_file(
 ) -> Result<(), O2Error> {
     // Fetch the signed download URL (and real name) from the media listing
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, target, &folders).await?;
+    let Lookup { media, .. } =
+        media_for_target(client, auth, target, &folders, Needs::File).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
     let by_id = target
@@ -1841,7 +1842,8 @@ pub async fn delete_target(
     assume_yes: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, target, &folders).await?;
+    let Lookup { media, .. } =
+        media_for_target(client, auth, target, &folders, Needs::ItemAndFolderContents).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -1869,20 +1871,121 @@ enum Item<'a> {
     File(&'a crate::api::MediaItem),
 }
 
-/// Resolve `target` to a folder or a file. Tried in order: a numeric
-/// folder ID, a numeric file ID, a folder path/name, then a file path or
-/// unique file name (see `find_file`).
+/// What a command can be given, which decides how much of the account
+/// `media_for_target` lists.
+#[derive(Clone, Copy, PartialEq)]
+enum Needs {
+    /// Only a file (`download`); a folder ID or path is looked up as a
+    /// file name.
+    File,
+    /// A file, or a folder whose files the command doesn't use.
+    Item,
+    /// A file, or a folder whose files it does use (`rm` shows and
+    /// deletes them).
+    ItemAndFolderContents,
+}
+
+/// The files `media_for_target` found: the whole account, or with
+/// `complete` false only the target (or nothing, for a folder ID).
+struct Lookup {
+    media: Vec<crate::api::MediaItem>,
+    complete: bool,
+}
+
 /// How long `media_for_target` waits for a new upload to show up, and
 /// how often it asks.
 const NEW_UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const NEW_UPLOAD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The files in `folder` (`None`: the photos and videos with no folder),
+/// to check a name there: taken from `media` if it is `complete` (the
+/// whole account), otherwise asked for.
+async fn files_in(
+    client: &O2Client,
+    auth: &AuthConfig,
+    folder: Option<u64>,
+    media: &[crate::api::MediaItem],
+    complete: bool,
+) -> Result<Vec<crate::api::MediaItem>, O2Error> {
+    let listed;
+    let media = match (complete, folder) {
+        (true, _) => media,
+        (false, Some(id)) => return client.get_folder_media(id, auth).await,
+        (false, None) => {
+            listed = client.get_all_media(auth).await?;
+            &listed
+        }
+    };
+    Ok(media
+        .iter()
+        .filter(|m| m.folderid == folder)
+        .cloned()
+        .collect())
+}
+
+/// The files needed to resolve `target`. Listing every file takes seconds
+/// on a large account, so this lists as little as `resolve_item` (or, for
+/// `Needs::File`, `download_file`) needs to resolve `target` the same way:
+/// - a folder ID or path: nothing, unless the command uses its files;
+/// - a file ID: that one file, asked for by ID;
+/// - a file path (`/docs/a.txt`): the files in its folder.
+///
+/// A bare name, which may be any file in the account, lists everything
+/// (`listed_media`), as does anything the shortcuts don't find.
+async fn media_for_target(
+    client: &O2Client,
+    auth: &AuthConfig,
+    target: &str,
+    folders: &[crate::api::FolderEntry],
+    needs: Needs,
+) -> Result<Lookup, O2Error> {
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    // In `resolve_item`'s order: folder ID, file ID, folder path or name.
+    let numeric = target.parse::<u64>().ok();
+    let folder_id = numeric.filter(|id| folder_name.contains_key(id));
+    let by_id = match numeric {
+        // Not found (or an error): left to the listing, which also
+        // resolves numeric names and waits for new uploads.
+        Some(id) if folder_id.is_none() => client.get_media_by_id(id, auth).await.ok().flatten(),
+        _ => None,
+    };
+    let is_folder = needs != Needs::File
+        && by_id.is_none()
+        && (folder_id.is_some()
+            || resolve_target(Some(target.to_string()), folders, &folder_name).is_ok());
+    let shortcut = if let Some(item) = by_id {
+        Some(vec![item])
+    } else if is_folder {
+        (needs == Needs::Item).then(Vec::new)
+    } else if let Some((dir, _)) = target.rsplit_once('/') {
+        let dir = if dir.is_empty() { "/" } else { dir };
+        match resolve_target(Some(dir.to_string()), folders, &folder_name) {
+            Ok(folder_id) => Some(client.get_folder_media(folder_id, auth).await?),
+            // No such folder: `find_file` says so without a listing.
+            Err(_) => Some(Vec::new()),
+        }
+    } else {
+        None
+    };
+    Ok(match shortcut {
+        Some(media) => Lookup {
+            media,
+            complete: false,
+        },
+        None => Lookup {
+            media: listed_media(client, auth, target, folders).await?,
+            complete: true,
+        },
+    })
+}
 
 /// The account's files, for resolving `target`. The listing shows a new
 /// upload only after 10–40 s, so a numeric `target` that is neither a
 /// folder in `folders`, a listed file nor the name of one, but is newer
 /// than every listed file (media IDs only grow), is asked for by ID until
 /// it shows up: `rm`, `mv` & co. then work on the ID `upload` just printed.
-async fn media_for_target(
+async fn listed_media(
     client: &O2Client,
     auth: &AuthConfig,
     target: &str,
@@ -1935,6 +2038,9 @@ async fn media_for_target(
     }
 }
 
+/// Resolve `target` to a folder or a file. Tried in order: a numeric
+/// folder ID, a numeric file ID, a folder path/name, then a file path or
+/// unique file name (see `find_file`).
 fn resolve_item<'a>(
     target: &str,
     folders: &[crate::api::FolderEntry],
@@ -1994,7 +2100,8 @@ pub async fn share(
     json: bool,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, target, &folders).await?;
+    let Lookup { media, .. } =
+        media_for_target(client, auth, target, &folders, Needs::Item).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2110,7 +2217,8 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
     }
 
     let folders = client.get_all_folders(auth).await?;
-    let media = client.get_all_media(auth).await?;
+    let Lookup { media, .. } =
+        media_for_target(client, auth, target, &folders, Needs::Item).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2147,7 +2255,8 @@ pub async fn move_item(
     destination: &str,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, source, &folders).await?;
+    let Lookup { media, complete } =
+        media_for_target(client, auth, source, &folders, Needs::Item).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2165,9 +2274,10 @@ pub async fn move_item(
         eprintln!("{} is already in {}", from, dest_path);
         return Ok(());
     }
-    if media
+    if files_in(client, auth, Some(dest_id), &media, complete)
+        .await?
         .iter()
-        .any(|m| m.folderid == Some(dest_id) && m.name == item.name)
+        .any(|m| m.name == item.name)
     {
         return Err(O2Error::Invalid(format!(
             "{} already has a file named '{}'",
@@ -2263,7 +2373,8 @@ pub async fn rename_item(
     let new_name = validate_name(new_name)?;
 
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, target, &folders).await?;
+    let Lookup { media, complete } =
+        media_for_target(client, auth, target, &folders, Needs::Item).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2284,9 +2395,11 @@ pub async fn rename_item(
             current_name, new_name
         )));
     }
-    if media.iter().any(|m| {
-        m.id != item.id && m.folderid == item.folderid && m.name.as_deref() == Some(new_name)
-    }) {
+    if files_in(client, auth, item.folderid, &media, complete)
+        .await?
+        .iter()
+        .any(|m| m.id != item.id && m.name.as_deref() == Some(new_name))
+    {
         return Err(O2Error::Invalid(format!(
             "a file named '{}' already exists there",
             new_name
@@ -2361,7 +2474,8 @@ pub async fn copy_item(
     let new_name = new_name.map(validate_name).transpose()?;
 
     let folders = client.get_all_folders(auth).await?;
-    let media = media_for_target(client, auth, source, &folders).await?;
+    let Lookup { media, complete } =
+        media_for_target(client, auth, source, &folders, Needs::Item).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
@@ -2374,9 +2488,10 @@ pub async fn copy_item(
     let from = file_path(item, &folders, &folder_name);
     let name = new_name.or(item.name.as_deref()).unwrap_or("?");
 
-    if media
+    if files_in(client, auth, Some(dest_id), &media, complete)
+        .await?
         .iter()
-        .any(|m| m.folderid == Some(dest_id) && m.name.as_deref() == Some(name))
+        .any(|m| m.name.as_deref() == Some(name))
     {
         return Err(O2Error::Invalid(format!(
             "{} already has a file named '{}' (use --name to give the copy another name)",

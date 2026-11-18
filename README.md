@@ -309,6 +309,8 @@ The session is stored in:
 
 On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
 
+**Speed on large accounts:** listing every file takes one request per 1,000 files, so commands avoid it where they can. A file or folder given by ID or path (`/docs/a.txt`) is looked up on its own, and only a bare file name (`a.txt`), `ls`, `upload-dir --skip-existing` and `rm` of a folder list the whole account. Set `O2CLOUD_TRACE=1` to see each request a command sends (method, path, status and time; never the session keys) and how many there were.
+
 ## 📄 License
 
 [MIT](./LICENSE)

@@ -331,7 +331,7 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     let auth = config::load_auth()?;
     let client = api::O2Client::new(&auth.device_id)?;
 
-    if client.is_session_valid(&auth).await? {
+    if client.check_session(&auth).await? {
         return Ok((client, auth));
     }
 
@@ -678,7 +678,11 @@ async fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    if let Err(e) = run(Cli::parse()).await {
+    let result = run(Cli::parse()).await;
+    if api::tracing() {
+        eprintln!("[trace] {} requests", api::requests_sent());
+    }
+    if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

@@ -2,6 +2,35 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.10.0] — 2026-11-18
+
+### Added
+- `O2CLOUD_TRACE=1` logs each request a command sends to stderr
+  (method, host, path, SAPI action, status and time; never the query
+  string, headers or body, which hold the session keys) and how many
+  there were.
+
+### Changed
+- Commands list far less of a large account (#18). Listing every file
+  takes one request per 1,000 files, about 14 s on an account with
+  46,000 of them, and every command given a file or folder did it:
+  - A file ID is asked for on its own, and a file path (`/docs/a.txt`)
+    lists only its folder (`download`, `rm`, `mv`, `rename`, `cp`,
+    `share`).
+  - A folder ID or path lists no files (`mv`, `rename`, `share`,
+    `unshare`).
+  - `mv`, `rename` and `cp` of a file check for a file with the same
+    name by listing only the folder it goes to (O2 Cloud itself accepts
+    duplicate names on a move or rename).
+  - `upload --skip-existing`, and an upload in parts, list only the
+    target folder.
+
+  A bare file name, `ls`, `upload-dir --skip-existing`, `rm` of a folder
+  and renaming a photo or video the phone app uploaded (those have no
+  folder) still list the whole account.
+- The session is checked with the folder list the command needs anyway
+  instead of a request of its own, one request less per command.
+
 ## [0.9.0] — 2026-11-14
 
 ### Added
