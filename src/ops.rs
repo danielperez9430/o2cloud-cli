@@ -25,6 +25,11 @@ pub struct ListOptions {
     pub all: bool,
     /// Hierarchical tree view.
     pub tree: bool,
+    /// Only the files directly in the folder, without listing the whole
+    /// account (so no subfolder totals).
+    pub folder_only: bool,
+    /// Only the files with no (known) folder, shown in the root.
+    pub no_folder: bool,
     pub sort: SortKey,
     pub reverse: bool,
     /// Also show each file's date.
@@ -48,6 +53,14 @@ pub async fn list_folder(
     opts: &ListOptions,
 ) -> Result<(), O2Error> {
     let folders = client.get_all_folders(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    if opts.folder_only {
+        let target = resolve_target(path, &folders, &folder_name)?;
+        let media = client.get_folder_media(target, auth).await?;
+        print_folder_contents(&Tree::new(&folders, &folder_name, &media), target, opts);
+        return Ok(());
+    }
     let media = client.get_all_media(auth).await?;
 
     if media.is_empty() && folders.is_empty() {
@@ -59,19 +72,16 @@ pub async fn list_folder(
         return Ok(());
     }
 
-    // Build lookup tables
-    let folder_name: HashMap<u64, String> =
-        folders.iter().map(|f| (f.id, f.name.clone())).collect();
-
     // Resolve target folder
     let target = resolve_target(path, &folders, &folder_name)?;
 
+    let tree = Tree::new(&folders, &folder_name, &media);
     if opts.tree {
-        print_tree(&folders, &media, &folder_name, target, "", true, opts);
+        print_tree(&tree, target, "", true, opts);
     } else if opts.all {
-        print_flat_all(&media, &folder_name, &folders, target, opts);
+        print_flat_all(&tree, target, opts);
     } else {
-        print_folder_contents(&folders, &media, &folder_name, target, opts);
+        print_folder_contents(&tree, target, opts);
     }
 
     Ok(())
@@ -81,20 +91,108 @@ pub async fn list_folder(
 // Display helpers
 // ------------------------------------------------------------------
 
-/// Whether `item` is listed in folder `folder`. Files without a folder,
-/// or whose folder isn't in the folder list (the server can return a
-/// fresh upload like that while it's still processing it), are listed in
-/// the root, as `find` already shows them — otherwise they'd appear
-/// nowhere.
-fn shown_in_folder(
-    item: &crate::api::MediaItem,
-    folder: u64,
-    folders: &[crate::api::FolderEntry],
-    folder_name: &HashMap<u64, String>,
-) -> bool {
-    match item.folderid {
-        Some(fid) if folder_name.contains_key(&fid) => fid == folder,
-        _ => is_root_folder(folder, folders),
+/// The folder tree and the files shown in each folder, indexed once so
+/// `ls` takes time in proportion to the files and folders rather than to
+/// their product (minutes on an account with tens of thousands of files).
+///
+/// Files without a folder, or whose folder isn't in the folder list (the
+/// server can return a fresh upload like that while it's still processing
+/// it), are shown in the root, as `find` already shows them — otherwise
+/// they'd appear nowhere.
+struct Tree<'a> {
+    folders: &'a [crate::api::FolderEntry],
+    folder_name: &'a HashMap<u64, String>,
+    /// Each folder's subfolders, in the order of `folders`.
+    children: HashMap<u64, Vec<&'a crate::api::FolderEntry>>,
+    /// The folder each file is shown in, in the order of `media`.
+    shown_in: Vec<(u64, &'a crate::api::MediaItem)>,
+    /// The files shown in each folder, in the order of `media`.
+    files: HashMap<u64, Vec<&'a crate::api::MediaItem>>,
+    /// Paths of the folders asked for so far (see `path`).
+    paths: std::cell::RefCell<HashMap<u64, String>>,
+}
+
+impl<'a> Tree<'a> {
+    fn new(
+        folders: &'a [crate::api::FolderEntry],
+        folder_name: &'a HashMap<u64, String>,
+        media: &'a [crate::api::MediaItem],
+    ) -> Self {
+        let mut children: HashMap<u64, Vec<&crate::api::FolderEntry>> = HashMap::new();
+        for f in folders {
+            children.entry(f.parentid).or_default().push(f);
+        }
+        let root = folders.iter().find(|f| f.name == "/").map(|f| f.id);
+        let shown_in: Vec<_> = media
+            .iter()
+            .filter_map(|m| match m.folderid {
+                Some(fid) if folder_name.contains_key(&fid) => Some((fid, m)),
+                _ => root.map(|root| (root, m)),
+            })
+            .collect();
+        let mut files: HashMap<u64, Vec<&crate::api::MediaItem>> = HashMap::new();
+        for &(folder, m) in &shown_in {
+            files.entry(folder).or_default().push(m);
+        }
+        Tree {
+            folders,
+            folder_name,
+            children,
+            shown_in,
+            files,
+            paths: Default::default(),
+        }
+    }
+
+    /// The files shown in `folder` itself.
+    fn files_in(&self, folder: u64) -> impl Iterator<Item = &'a crate::api::MediaItem> + '_ {
+        self.files.get(&folder).into_iter().flatten().copied()
+    }
+
+    /// The subfolders of `folder`.
+    fn children(&self, folder: u64) -> impl Iterator<Item = &'a crate::api::FolderEntry> + '_ {
+        self.children.get(&folder).into_iter().flatten().copied()
+    }
+
+    /// `folder` and every folder below it.
+    fn subtree(&self, folder: u64) -> std::collections::HashSet<u64> {
+        let mut ids = std::collections::HashSet::from([folder]);
+        let mut stack = vec![folder];
+        while let Some(id) = stack.pop() {
+            for child in self.children(id) {
+                if ids.insert(child.id) {
+                    stack.push(child.id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// The files in `folder` and below, in the order of `media`.
+    fn files_under(&self, folder: u64) -> impl Iterator<Item = &'a crate::api::MediaItem> + '_ {
+        let ids = self.subtree(folder);
+        self.shown_in
+            .iter()
+            .filter(move |(f, _)| ids.contains(f))
+            .map(|&(_, m)| m)
+    }
+
+    /// Number of files and their total size in `folder` and below.
+    fn totals(&self, folder: u64) -> (usize, u64) {
+        self.subtree(folder)
+            .iter()
+            .flat_map(|&id| self.files_in(id))
+            .fold((0, 0), |(n, size), m| (n + 1, size + m.size.unwrap_or(0)))
+    }
+
+    /// `resolve_path`, remembered per folder.
+    fn path(&self, folder: u64) -> String {
+        if let Some(path) = self.paths.borrow().get(&folder) {
+            return path.clone();
+        }
+        let path = resolve_path(folder, self.folder_name, self.folders);
+        self.paths.borrow_mut().insert(folder, path.clone());
+        path
     }
 }
 
@@ -168,22 +266,16 @@ pub fn format_date_iso(ms: Option<u64>) -> serde_json::Value {
 
 /// Sort files by `opts.sort`, ties broken by name.
 fn sort_files(files: &mut [&crate::api::MediaItem], opts: &ListOptions) {
-    let by_name = |a: &&crate::api::MediaItem, b: &&crate::api::MediaItem| {
-        let (a, b) = (
-            a.name.as_deref().unwrap_or(""),
-            b.name.as_deref().unwrap_or(""),
-        );
-        a.to_lowercase()
-            .cmp(&b.to_lowercase())
-            .then_with(|| a.cmp(b))
-    };
-    files.sort_by(|a, b| {
+    // By the chosen key, then by name ignoring case, then exactly. The
+    // keys are worked out once per file, not once per comparison.
+    files.sort_by_cached_key(|m| {
         let primary = match opts.sort {
-            SortKey::Name => std::cmp::Ordering::Equal,
-            SortKey::Size => a.size.cmp(&b.size),
-            SortKey::Date => file_date(a).cmp(&file_date(b)),
+            SortKey::Name => None,
+            SortKey::Size => m.size,
+            SortKey::Date => file_date(m),
         };
-        primary.then_with(|| by_name(a, b))
+        let name = m.name.as_deref().unwrap_or("");
+        (primary, name.to_lowercase(), name.to_string())
     });
     if opts.reverse {
         files.reverse();
@@ -197,20 +289,6 @@ fn sort_folders(folders: &mut [&crate::api::FolderEntry]) {
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.name.cmp(&b.name))
     });
-}
-
-/// Number of files and their total size in `folder_id` and below.
-fn folder_totals(
-    folder_id: u64,
-    folders: &[crate::api::FolderEntry],
-    media: &[crate::api::MediaItem],
-    folder_name: &HashMap<u64, String>,
-) -> (usize, u64) {
-    let ids = subtree_ids(folder_id, folders);
-    media
-        .iter()
-        .filter(|m| in_subtree(m, &ids, folders, folder_name))
-        .fold((0, 0), |(n, size), m| (n + 1, size + m.size.unwrap_or(0)))
 }
 
 /// `folder_id` and every folder below it.
@@ -228,20 +306,6 @@ fn subtree_ids(
         }
     }
     ids
-}
-
-/// Whether `item` is in one of the folders `ids` (see `shown_in_folder`
-/// for files without a known folder).
-fn in_subtree(
-    item: &crate::api::MediaItem,
-    ids: &std::collections::HashSet<u64>,
-    folders: &[crate::api::FolderEntry],
-    folder_name: &HashMap<u64, String>,
-) -> bool {
-    match item.folderid {
-        Some(fid) if folder_name.contains_key(&fid) => ids.contains(&fid),
-        _ => ids.iter().any(|&id| is_root_folder(id, folders)),
-    }
 }
 
 /// Apply the name filter, sort, then the limit. Returns the files to
@@ -306,28 +370,27 @@ fn print_summary(folders: usize, shown: usize, total: usize, total_size: u64) {
     }
 }
 
-fn print_folder_contents(
-    folders: &[crate::api::FolderEntry],
-    media: &[crate::api::MediaItem],
-    folder_name: &HashMap<u64, String>,
-    target: u64,
-    opts: &ListOptions,
-) {
-    let path = resolve_path(target, folder_name, folders);
+fn print_folder_contents(tree: &Tree, target: u64, opts: &ListOptions) {
+    let path = tree.path(target);
 
-    let mut child_folders: Vec<_> = folders
-        .iter()
-        .filter(|f| f.parentid == target && f.name != "/" && name_matches(&f.name, opts))
+    let mut child_folders: Vec<_> = tree
+        .children(target)
+        .filter(|f| f.name != "/" && name_matches(&f.name, opts) && !opts.no_folder)
         .collect();
     sort_folders(&mut child_folders);
-    let folder_sizes: Vec<_> = child_folders
+    // Without the whole account (`folder_only`), what's in a subfolder
+    // isn't known.
+    let folder_sizes: Vec<Option<(usize, u64)>> = child_folders
         .iter()
-        .map(|f| folder_totals(f.id, folders, media, folder_name))
+        .map(|f| (!opts.folder_only).then(|| tree.totals(f.id)))
         .collect();
     let (files, total, total_size) = select_files(
-        media
-            .iter()
-            .filter(|m| shown_in_folder(m, target, folders, folder_name)),
+        tree.files_in(target).filter(|m| {
+            !opts.no_folder
+                || !m
+                    .folderid
+                    .is_some_and(|f| tree.folder_name.contains_key(&f))
+        }),
         opts,
     );
 
@@ -335,7 +398,8 @@ fn print_folder_contents(
         let folders_json: Vec<_> = child_folders
             .iter()
             .zip(&folder_sizes)
-            .map(|(f, (n, size))| {
+            .map(|(f, totals)| {
+                let (n, size) = totals.unzip();
                 serde_json::json!({ "id": f.id, "name": f.name, "files": n, "size": size })
             })
             .collect();
@@ -381,14 +445,17 @@ fn print_folder_contents(
         .map(|f| f.name.chars().count() + 1)
         .max()
         .unwrap_or(0);
-    for (f, &(n, size)) in child_folders.iter().zip(&folder_sizes) {
-        println!(
-            "  {:<id_width$}  📁 {:<name_width$}  {}, {}",
-            f.id,
-            format!("{}/", f.name),
-            plural(n, "file", "files"),
-            format_size(size),
-        );
+    for (f, totals) in child_folders.iter().zip(&folder_sizes) {
+        match totals {
+            Some((n, size)) => println!(
+                "  {:<id_width$}  📁 {:<name_width$}  {}, {}",
+                f.id,
+                format!("{}/", f.name),
+                plural(*n, "file", "files"),
+                format_size(*size),
+            ),
+            None => println!("  {:<id_width$}  📁 {}/", f.id, f.name),
+        }
     }
     if !child_folders.is_empty() && !files.is_empty() {
         println!();
@@ -406,36 +473,27 @@ fn print_folder_contents(
         }
     }
 
-    // The total size includes what's inside the subfolders
-    let folders_size: u64 = folder_sizes.iter().map(|&(_, size)| size).sum();
+    // The total size includes what's inside the subfolders, when known.
+    let folders_size: u64 = folder_sizes.iter().flatten().map(|&(_, size)| size).sum();
     print_summary(
         child_folders.len(),
         files.len(),
         total,
         total_size + folders_size,
     );
+    if opts.folder_only && !child_folders.is_empty() {
+        println!("  (not counting what's in the subfolders: --folder-only)");
+    }
 }
 
-fn print_flat_all(
-    media: &[crate::api::MediaItem],
-    folder_name: &HashMap<u64, String>,
-    folders: &[crate::api::FolderEntry],
-    target: u64,
-    opts: &ListOptions,
-) {
-    let ids = subtree_ids(target, folders);
-    let (files, total, total_size) = select_files(
-        media
-            .iter()
-            .filter(|m| in_subtree(m, &ids, folders, folder_name)),
-        opts,
-    );
+fn print_flat_all(tree: &Tree, target: u64, opts: &ListOptions) {
+    let (files, total, total_size) = select_files(tree.files_under(target), opts);
     let full_path = |item: &crate::api::MediaItem| {
         let name = item.name.as_deref().unwrap_or("?");
         let path = item
             .folderid
-            .filter(|fid| folder_name.contains_key(fid))
-            .map(|fid| resolve_path(fid, folder_name, folders))
+            .filter(|fid| tree.folder_name.contains_key(fid))
+            .map(|fid| tree.path(fid))
             .unwrap_or_else(|| "/".into());
         if path == "/" {
             format!("/{}", name)
@@ -489,16 +547,12 @@ fn print_flat_all(
     print_summary(0, files.len(), total, total_size);
 }
 
-fn print_tree(
-    folders: &[crate::api::FolderEntry],
-    media: &[crate::api::MediaItem],
-    folder_name: &HashMap<u64, String>,
-    current: u64,
-    prefix: &str,
-    is_last: bool,
-    opts: &ListOptions,
-) {
-    let name = folder_name.get(&current).map(|s| s.as_str()).unwrap_or("?");
+fn print_tree(tree: &Tree, current: u64, prefix: &str, is_last: bool, opts: &ListOptions) {
+    let name = tree
+        .folder_name
+        .get(&current)
+        .map(|s| s.as_str())
+        .unwrap_or("?");
 
     // Root: just print "/"
     if name == "/" && prefix.is_empty() {
@@ -517,17 +571,12 @@ fn print_tree(
     };
 
     // Files in this folder
-    let (here, _, _) = select_files(
-        media
-            .iter()
-            .filter(|m| shown_in_folder(m, current, folders, folder_name)),
-        opts,
-    );
+    let (here, _, _) = select_files(tree.files_in(current), opts);
 
     // Child folders (excluding root which has parentid=0)
-    let mut children: Vec<_> = folders
-        .iter()
-        .filter(|f| f.parentid == current && f.name != "/" && f.parentid != 0)
+    let mut children: Vec<_> = tree
+        .children(current)
+        .filter(|f| f.name != "/" && f.parentid != 0)
         .collect();
     sort_folders(&mut children);
 
@@ -551,15 +600,7 @@ fn print_tree(
     for child in children.iter() {
         idx += 1;
         let last = idx == total;
-        print_tree(
-            folders,
-            media,
-            folder_name,
-            child.id,
-            &new_prefix,
-            last,
-            opts,
-        );
+        print_tree(tree, child.id, &new_prefix, last, opts);
     }
 }
 
@@ -1792,13 +1833,14 @@ pub async fn find(
         }
     }
 
-    // Files
+    // Files (each folder's path worked out once, not once per file)
+    let tree = Tree::new(&folders, &folder_name, &[]);
     for item in &media {
         let name = item.name.as_deref().unwrap_or("");
         if name.to_lowercase().contains(&q) {
             let folder_path = item
                 .folderid
-                .map(|fid| resolve_path(fid, &folder_name, &folders))
+                .map(|fid| tree.path(fid))
                 .unwrap_or_else(|| "/".into());
             let full = if folder_path == "/" {
                 format!("/{}", name)
@@ -3128,13 +3170,8 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        let shown = |folder: u64| -> Vec<u64> {
-            media
-                .iter()
-                .filter(|m| shown_in_folder(m, folder, &folders, &folder_name))
-                .map(|m| m.id)
-                .collect()
-        };
+        let tree = Tree::new(&folders, &folder_name, &media);
+        let shown = |folder: u64| -> Vec<u64> { tree.files_in(folder).map(|m| m.id).collect() };
         assert_eq!(shown(2), vec![1]);
         assert_eq!(shown(1), vec![2, 3]);
         assert_eq!(shown(3), Vec::<u64>::new());
@@ -3419,6 +3456,8 @@ mod tests {
         ListOptions {
             all: false,
             tree: false,
+            folder_only: false,
+            no_folder: false,
             sort: SortKey::Name,
             reverse: false,
             long: false,
@@ -3502,10 +3541,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(folder_totals(2, &folders, &media, &folder_name), (2, 12));
-        assert_eq!(folder_totals(4, &folders, &media, &folder_name), (1, 7));
+        let tree = Tree::new(&folders, &folder_name, &media);
+        assert_eq!(tree.totals(2), (2, 12));
+        assert_eq!(tree.totals(4), (1, 7));
         // The root counts everything, including files whose folder is unknown
-        assert_eq!(folder_totals(1, &folders, &media, &folder_name), (4, 15));
+        assert_eq!(tree.totals(1), (4, 15));
+        let under = |folder: u64| -> Vec<u64> { tree.files_under(folder).map(|m| m.id).collect() };
+        assert_eq!(under(2), [100, 101]);
+        assert_eq!(under(1), [100, 101, 102, 103]);
+        assert_eq!(tree.path(4), "/docs/deep");
     }
 
     #[test]

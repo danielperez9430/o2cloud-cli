@@ -147,6 +147,18 @@ enum Commands {
         /// Print JSON instead of a table
         #[arg(long)]
         json: bool,
+
+        /// Only the files directly in the folder, without listing the
+        /// whole account: much faster on a large one, but subfolders show
+        /// no file count or size (null in JSON), and the root leaves out
+        /// the photos and videos the phone app uploaded (see --no-folder)
+        #[arg(long, conflicts_with_all = ["all", "tree"])]
+        folder_only: bool,
+
+        /// Only the files with no folder (photos and videos the phone app
+        /// uploaded), which `ls` shows in the root. Lists the whole account
+        #[arg(long, conflicts_with_all = ["path", "all", "tree", "folder_only"])]
+        no_folder: bool,
     },
 
     /// Upload a file to O2 Cloud (files over 4 GB go up in parts,
@@ -508,11 +520,15 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             pattern,
             limit,
             json,
+            folder_only,
+            no_folder,
         } => {
             let (client, auth) = require_client_and_auth().await?;
             let opts = ops::ListOptions {
                 all,
                 tree,
+                folder_only,
+                no_folder,
                 sort,
                 reverse,
                 long,
