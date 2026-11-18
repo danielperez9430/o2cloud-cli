@@ -2,7 +2,7 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.11.0] — 2026-11-18
 
 ### Added
 - `ls --folder-only` lists only the files directly in a folder, without
