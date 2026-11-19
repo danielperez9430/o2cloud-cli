@@ -303,17 +303,17 @@ $ o2cloud ls
 
 O2 Cloud funciona sobre **Synchronoss OneMediaHub**. `o2cloud` usa la misma API que la web de O2 Cloud, y por defecto hace el login de la misma forma: el login OAuth2 / OpenID Connect de Telefónica, con PKCE gestionado por el servidor de O2 Cloud, así que el login por defecto no necesita ningún secreto de cliente. El número de teléfono y el código SMS se escriben en la ventana de login, nunca en la terminal. (El modo opcional **Mantener la sesión sin SMS** de arriba usa en su lugar el cliente OAuth de la app móvil, que aportas tú, para mantener la sesión viva sin SMS.)
 
-La sesión se guarda en:
+La sesión se guarda en `auth.json`, y una caché de la lista de archivos de la cuenta (nombres, tamaños, fechas y carpetas; ver abajo) en `media-cache.json`:
 
-| Sistema | Ruta |
-|---|---|
-| macOS | `~/Library/Application Support/o2cli/auth.json` |
-| Linux | `~/.config/o2cli/auth.json` |
-| Windows | `%APPDATA%\o2cli\auth.json` |
+| Sistema | Sesión | Caché de archivos |
+|---|---|---|
+| macOS | `~/Library/Application Support/o2cli/auth.json` | `~/Library/Caches/o2cli/media-cache.json` |
+| Linux | `~/.config/o2cli/auth.json` | `~/.cache/o2cli/media-cache.json` |
+| Windows | `%APPDATA%\o2cli\auth.json` | `%LOCALAPPDATA%\o2cli\media-cache.json` |
 
-En macOS y Linux el archivo solo lo puede leer tu usuario (`0600`). `o2cloud logout` lo borra.
+En macOS y Linux los dos archivos solo los puede leer tu usuario (`0600`). `o2cloud logout` los borra.
 
-**Velocidad en cuentas grandes:** listar todos los archivos cuesta una petición por cada 1.000, así que los comandos lo evitan cuando pueden. Un archivo o carpeta indicado por ID o por ruta (`/docs/a.txt`) se busca por separado, y solo un nombre suelto (`a.txt`), `ls`, `upload-dir --skip-existing` y `rm` de una carpeta listan toda la cuenta. `ls --folder-only` lista solo la carpeta, sin los totales de sus subcarpetas; en la raíz deja fuera las fotos y vídeos que subió la app del móvil, que no tienen carpeta (`ls --no-folder` lista esas). Con `O2CLOUD_TRACE=1` se ve cada petición que envía un comando (método, ruta, estado y tiempo; nunca las claves de sesión) y cuántas han sido.
+**Velocidad en cuentas grandes:** listar todos los archivos cuesta una petición por cada 1.000, así que los comandos lo evitan cuando pueden. Un archivo o carpeta indicado por ID o por ruta (`/docs/a.txt`) se busca por separado, y solo un nombre suelto (`a.txt`), `ls`, `upload-dir --skip-existing` y `rm` de una carpeta listan toda la cuenta. `ls --folder-only` lista solo la carpeta, sin los totales de sus subcarpetas; en la raíz deja fuera las fotos y vídeos que subió la app del móvil, que no tienen carpeta (`ls --no-folder` lista esas). Esos guardan la lista de archivos en la caché de arriba y, a partir de la primera vez, solo preguntan al servidor qué ha cambiado desde entonces (dos peticiones en total para un `ls`); la cuenta entera se vuelve a listar una vez por semana, o cuando la caché no se puede poner al día. Con `O2CLOUD_CACHE=0` siempre se lista todo y no se toca la caché. Con `O2CLOUD_TRACE=1` se ve cada petición que envía un comando (método, ruta, estado y tiempo; nunca las claves de sesión) y cuántas han sido.
 
 ## 📄 Licencia
 

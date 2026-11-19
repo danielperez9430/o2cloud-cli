@@ -298,17 +298,17 @@ $ o2cloud ls
 
 O2 Cloud runs on **Synchronoss OneMediaHub**. `o2cloud` talks to the same API as the O2 Cloud website, and by default logs in the same way: Telefónica's OAuth2 / OpenID Connect login, with PKCE handled by the O2 Cloud server, so the default login needs no client secret. You type your phone number and SMS code in the login window, never in the terminal. (The optional **Staying logged in without SMS** mode above instead uses the mobile app's OAuth client, which you supply, to keep the session alive without SMS.)
 
-The session is stored in:
+The session is stored in `auth.json`, and a cache of the account's file list (names, sizes, dates and folders; see below) in `media-cache.json`:
 
-| OS | Path |
-|---|---|
-| macOS | `~/Library/Application Support/o2cli/auth.json` |
-| Linux | `~/.config/o2cli/auth.json` |
-| Windows | `%APPDATA%\o2cli\auth.json` |
+| OS | Session | File list cache |
+|---|---|---|
+| macOS | `~/Library/Application Support/o2cli/auth.json` | `~/Library/Caches/o2cli/media-cache.json` |
+| Linux | `~/.config/o2cli/auth.json` | `~/.cache/o2cli/media-cache.json` |
+| Windows | `%APPDATA%\o2cli\auth.json` | `%LOCALAPPDATA%\o2cli\media-cache.json` |
 
-On macOS and Linux the file is readable only by your user (`0600`). `o2cloud logout` deletes it.
+On macOS and Linux both files are readable only by your user (`0600`). `o2cloud logout` deletes them.
 
-**Speed on large accounts:** listing every file takes one request per 1,000 files, so commands avoid it where they can. A file or folder given by ID or path (`/docs/a.txt`) is looked up on its own, and only a bare file name (`a.txt`), `ls`, `upload-dir --skip-existing` and `rm` of a folder list the whole account. `ls --folder-only` lists just the folder, without its subfolders' totals; in the root it leaves out the photos and videos the phone app uploaded, which have no folder (`ls --no-folder` lists those). Set `O2CLOUD_TRACE=1` to see each request a command sends (method, path, status and time; never the session keys) and how many there were.
+**Speed on large accounts:** listing every file takes one request per 1,000 files, so commands avoid it where they can. A file or folder given by ID or path (`/docs/a.txt`) is looked up on its own, and only a bare file name (`a.txt`), `ls`, `upload-dir --skip-existing` and `rm` of a folder list the whole account. `ls --folder-only` lists just the folder, without its subfolders' totals; in the root it leaves out the photos and videos the phone app uploaded, which have no folder (`ls --no-folder` lists those). Those keep the file list in the cache above and, after the first time, only ask the server what changed since (two requests in all for a `ls`); the whole account is listed again once a week, or whenever the cache can't be brought up to date. Set `O2CLOUD_CACHE=0` to always list everything and not touch the cache. Set `O2CLOUD_TRACE=1` to see each request a command sends (method, path, status and time; never the session keys) and how many there were.
 
 ## 📄 License
 
