@@ -2,7 +2,7 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.12.0] — 2026-11-19
 
 ### Added
 - A cache of the account's file list (#20). Commands that need every
