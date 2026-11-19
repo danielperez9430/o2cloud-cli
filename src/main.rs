@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod cache;
 mod config;
 mod error;
 mod ops;
@@ -507,6 +508,10 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
 
         Commands::Logout => {
             config::clear_auth()?;
+            // The cache lists the account's file names.
+            if let Err(e) = cache::clear() {
+                eprintln!("Failed to remove the file cache: {}", e);
+            }
             println!("✓ Logged out — tokens removed");
         }
 

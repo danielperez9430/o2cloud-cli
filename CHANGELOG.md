@@ -2,6 +2,25 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- A cache of the account's file list (#20). Commands that need every
+  file (`ls`, `find`, a bare file name, `rm` of a folder,
+  `upload-dir --skip-existing`) list the whole account once, then only
+  ask the server's change log (`/sapi/profile/changes`) what was added,
+  changed, moved, renamed or deleted since, and fetch those files by ID:
+  two requests for a `ls` instead of one per 1,000 files. The whole
+  account is listed again once a week, or whenever the cache can't be
+  brought up to date (unreadable, another account, an unknown kind of
+  change, or a file the change log reported that the server never
+  returns). It is readable only by the user, `logout` deletes it, and
+  `O2CLOUD_CACHE=0` turns it off. Download URLs aren't cached.
+
+### Changed
+- Every file is listed in the same order (by name, ignoring case),
+  whether it comes from the cache or the server.
+
 ## [0.11.0] — 2026-11-18
 
 ### Added

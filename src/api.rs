@@ -87,6 +87,16 @@ fn sapi_error(raw: &str) -> Option<String> {
 /// the server sends `Retry-After`.
 /// Files per page of the media listing (the most SAPI returns).
 const MEDIA_PAGE_SIZE: usize = 1000;
+/// A `from` later than any server time: `changes_since` then reports
+/// nothing, only the server's current time.
+const FAR_FUTURE_MS: u64 = 1 << 52;
+/// How far back each change-log query reaches before the last one, so a
+/// change logged a little late isn't missed (they are applied twice).
+const CHANGES_OVERLAP_MS: u64 = 60_000;
+/// How long a file the change log reported is asked for again while the
+/// server doesn't return it, before the whole account is listed instead.
+const PENDING_FOR_SECS: u64 = 600;
+
 /// Pages of the media listing asked for at once after the first. Up to
 /// `MEDIA_PAGES_AT_ONCE - 1` empty pages past the end are asked for too.
 const MEDIA_PAGES_AT_ONCE: usize = 4;
@@ -176,6 +186,87 @@ fn media_kind(name: &str) -> &'static str {
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" => "picture",
         _ => "file",
     }
+}
+
+/// `media` in one order whether it came from the cache or the server:
+/// by name ignoring case (about how the server lists them), then by exact
+/// name and ID. Output that keeps this order (`find`, files with the same
+/// name in `ls`) is then the same either way.
+fn in_listing_order(mut media: Vec<MediaItem>) -> Vec<MediaItem> {
+    media.sort_by_cached_key(|m| {
+        let name = m.name.clone().unwrap_or_default();
+        (name.to_lowercase(), name, m.id)
+    });
+    media
+}
+
+/// What `changes_since` found.
+#[derive(Debug, Default, PartialEq)]
+struct Changes {
+    /// Server time of the query: where the next one starts.
+    requesttime: u64,
+    /// Files added, changed, moved or renamed (`N` and `U`).
+    changed: Vec<u64>,
+    /// Files deleted (`D`).
+    deleted: Vec<u64>,
+    /// A kind of item it doesn't know, which might be a file.
+    unknown: Option<String>,
+}
+
+/// Kinds of item in the change log that are files.
+const FILE_KINDS: &[&str] = &["picture", "video", "audio", "file", "document"];
+/// Kinds of item in the change log that aren't (folders are listed afresh
+/// by every command; labels, tags and albums aren't used).
+const OTHER_KINDS: &[&str] = &["folder", "label", "tag", "mediaset", "album", "playlist"];
+
+/// Parse a `/sapi/profile/changes` response:
+/// `{"requesttime":…,"data":{"picture":{"U":[ids],"D":[ids]},"folder":{…},
+/// "changes":[{"type":"profile"},…]}}`.
+fn parse_changes(raw: &str) -> Result<Changes, O2Error> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        O2Error::Parse(format!(
+            "Failed to parse changes: {} — body: {}",
+            e,
+            truncate_utf8(raw, 300)
+        ))
+    })?;
+    let requesttime = v["requesttime"].as_u64().ok_or_else(|| {
+        O2Error::Parse(format!(
+            "changes without requesttime: {}",
+            truncate_utf8(raw, 300)
+        ))
+    })?;
+    let mut changes = Changes {
+        requesttime,
+        ..Default::default()
+    };
+    let Some(data) = v.get("data").and_then(|d| d.as_object()) else {
+        return Ok(changes);
+    };
+    for (kind, ops) in data {
+        // `changes` lists account settings that changed, not items.
+        let Some(ops) = ops.as_object() else { continue };
+        if OTHER_KINDS.contains(&kind.as_str()) {
+            continue;
+        }
+        if !FILE_KINDS.contains(&kind.as_str()) {
+            changes.unknown = Some(kind.clone());
+            continue;
+        }
+        for (op, ids) in ops {
+            let ids = ids
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_u64().or_else(|| id.as_str()?.parse().ok()));
+            match op.as_str() {
+                "N" | "U" => changes.changed.extend(ids),
+                "D" => changes.deleted.extend(ids),
+                _ => changes.unknown = Some(format!("{kind}:{op}")),
+            }
+        }
+    }
+    Ok(changes)
 }
 
 /// The folder list from a `/sapi/media/folder?action=get` response.
@@ -990,12 +1081,139 @@ impl O2Client {
         Ok((status, resp.text().await?))
     }
 
-    /// Get all media items with requested fields.  Pages through results
-    /// automatically (1000 items per request).
+    /// Every file in the account. Listing them all takes one request per
+    /// 1,000 files, so the list is kept in a local cache (see `cache`) and
+    /// only what changed since is asked for; the whole account is listed
+    /// when there is no usable cache, or anything about updating it goes
+    /// wrong. Download URLs aren't cached: files from the cache have none.
     ///
     /// `POST /sapi/media?action=get` with JSON body specifying fields.
     pub async fn get_all_media(&self, auth: &AuthConfig) -> Result<Vec<MediaItem>, O2Error> {
-        self.list_media(None, auth).await
+        // The cache is per account; without a phone number to tell
+        // accounts apart, don't use one.
+        let account = auth.msisdn.as_str();
+        if !crate::cache::enabled() || account.is_empty() {
+            return Ok(in_listing_order(self.list_media(None, auth).await?));
+        }
+        if let Some(cache) = crate::cache::load(account) {
+            match self.update_cache(cache, auth).await {
+                Ok(media) => return Ok(in_listing_order(media)),
+                Err(e) if tracing() => {
+                    eprintln!("[trace] cache not updated ({e}); listing everything")
+                }
+                Err(_) => {}
+            }
+        }
+        // The cursor is taken before listing, so changes made meanwhile
+        // are applied again next time rather than missed.
+        let cursor = self.changes_since(FAR_FUTURE_MS, auth).await.ok();
+        let media = self.list_media(None, auth).await?;
+        if let Some(changes) = cursor {
+            let cached = media.iter().map(MediaItem::to_cached).collect();
+            crate::cache::save(&crate::cache::MediaCache::new(
+                account,
+                changes.requesttime,
+                cached,
+            ));
+        }
+        Ok(in_listing_order(media))
+    }
+
+    /// Apply the change log since `cache.cursor` to the cache, save it and
+    /// return its files.
+    async fn update_cache(
+        &self,
+        mut cache: crate::cache::MediaCache,
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
+        let changes = self
+            .changes_since(cache.cursor.saturating_sub(CHANGES_OVERLAP_MS), auth)
+            .await?;
+        if let Some(kind) = changes.unknown {
+            return Err(O2Error::Api(format!("unknown kind of change '{kind}'")));
+        }
+        let now = crate::config::now_unix();
+        let deleted: std::collections::HashSet<u64> = changes.deleted.iter().copied().collect();
+        // Changed files, plus those still pending from last time.
+        let mut wanted: Vec<u64> = changes.changed.clone();
+        let mut since: std::collections::HashMap<u64, u64> = Default::default();
+        for &(id, first) in &cache.pending {
+            // Something the server never returns would stay out of the
+            // cache for good: list everything instead.
+            if now.saturating_sub(first) >= PENDING_FOR_SECS {
+                return Err(O2Error::Api(format!("file {id} still not returned")));
+            }
+            wanted.push(id);
+            since.insert(id, first);
+        }
+        wanted.retain(|id| !deleted.contains(id));
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        let mut fresh: std::collections::HashMap<u64, crate::cache::CachedItem> =
+            Default::default();
+        for batch in wanted.chunks(MEDIA_PAGE_SIZE) {
+            for item in self.get_media_by_ids(batch, auth).await? {
+                fresh.insert(item.id, item.to_cached());
+            }
+        }
+        // Drop deleted files and the old version of changed ones; those
+        // the server didn't return stay out until it does.
+        let wanted_set: std::collections::HashSet<u64> = wanted.iter().copied().collect();
+        cache
+            .media
+            .retain(|m| !deleted.contains(&m.id) && !wanted_set.contains(&m.id));
+        cache.pending = wanted
+            .iter()
+            .filter(|id| !fresh.contains_key(id))
+            .map(|&id| (id, since.get(&id).copied().unwrap_or(now)))
+            .collect();
+        for id in &wanted {
+            if let Some(item) = fresh.remove(id) {
+                cache.media.push(item);
+            }
+        }
+        cache.cursor = changes.requesttime;
+        crate::cache::save(&cache);
+        if tracing() {
+            eprintln!(
+                "[trace] cache: {} files, {} changed, {} deleted, {} pending",
+                cache.media.len(),
+                wanted.len(),
+                deleted.len(),
+                cache.pending.len()
+            );
+        }
+        Ok(cache.media.iter().map(MediaItem::from_cached).collect())
+    }
+
+    /// What changed in the account since `from` (Unix ms, server time):
+    /// the IDs of files added, changed, moved or renamed, and of files
+    /// deleted. Each file appears once, with its latest change.
+    ///
+    /// `GET /sapi/profile/changes?action=get&from=<ms>&origin=omh,dropbox`
+    async fn changes_since(&self, from: u64, auth: &AuthConfig) -> Result<Changes, O2Error> {
+        let url = format!("{}/sapi/profile/changes", BASE_URL);
+        let req = self.client.get(&url).timeout(REQUEST_TIMEOUT).query(&[
+            ("action", "get"),
+            ("from", &from.to_string()),
+            ("origin", "omh,dropbox"),
+            ("validationkey", &auth.validationkey),
+        ]);
+        let resp = self.send_sapi(req, auth).await?;
+        let status = resp.status();
+        let raw = resp.text().await?;
+        if !status.is_success() {
+            return Err(O2Error::Api(format!(
+                "Get changes failed (status {}): {}",
+                status,
+                truncate_utf8(&raw, 300)
+            )));
+        }
+        if let Some(err) = sapi_error(&raw) {
+            return Err(O2Error::Api(format!("Get changes failed: {}", err)));
+        }
+        parse_changes(&raw)
     }
 
     /// The files directly in folder `folder_id` (not in its subfolders),
@@ -1110,14 +1328,27 @@ impl O2Client {
         media_id: u64,
         auth: &AuthConfig,
     ) -> Result<Option<MediaItem>, O2Error> {
+        let media = self.get_media_by_ids(&[media_id], auth).await?;
+        Ok(media.into_iter().find(|m| m.id == media_id))
+    }
+
+    /// The files with these IDs that exist, in one request (the server
+    /// answers 2,000 at once in a fraction of a second; callers send at
+    /// most `MEDIA_PAGE_SIZE`). IDs that don't exist are left out.
+    async fn get_media_by_ids(
+        &self,
+        media_ids: &[u64],
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
         #[derive(Deserialize)]
         struct MediaData {
             #[serde(default)]
             media: Vec<MediaItem>,
         }
+        let ids: Vec<String> = media_ids.iter().map(|id| id.to_string()).collect();
         let body = serde_json::json!({
             "data": {
-                "ids": [media_id.to_string()],
+                "ids": ids,
                 "fields": ["name", "size", "etag", "folderid", "url", "creationdate"]
             }
         });
@@ -1150,7 +1381,7 @@ impl O2Client {
         })
         .await?;
         let data: RawResponse<MediaData> = parse_json(&raw, "media")?;
-        Ok(data.data.media.into_iter().find(|m| m.id == media_id))
+        Ok(data.data.media)
     }
 
     /// The download URL of one file, asked for by ID. A file uploaded a
@@ -2060,6 +2291,34 @@ pub struct MediaItem {
     _rest: serde_json::Value,
 }
 
+impl MediaItem {
+    fn to_cached(&self) -> crate::cache::CachedItem {
+        crate::cache::CachedItem {
+            id: self.id,
+            name: self.name.clone(),
+            folderid: self.folderid,
+            size: self.size,
+            date: self.date,
+            creationdate: self.creationdate,
+        }
+    }
+
+    /// A file from the cache. It has no download URL (they expire), so
+    /// downloads ask for one.
+    fn from_cached(item: &crate::cache::CachedItem) -> Self {
+        MediaItem {
+            id: item.id,
+            name: item.name.clone(),
+            folderid: item.folderid,
+            size: item.size,
+            url: None,
+            date: item.date,
+            creationdate: item.creationdate,
+            _rest: serde_json::Value::Null,
+        }
+    }
+}
+
 /// Unix-millisecond timestamp. O2 sends negative values for some old
 /// media; read those as unknown instead of failing the whole listing.
 fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -2248,6 +2507,59 @@ mod tests {
         let item: MediaItem = serde_json::from_str(r#"{"id":1}"#).unwrap();
         assert_eq!(item.date, None);
         assert_eq!(item.creationdate, None);
+    }
+
+    #[test]
+    fn test_parse_changes() {
+        // Shape of a real response (IDs shortened)
+        let raw = r#"{"requesttime":1795046518451,"responsetime":1795046518813,"data":{
+            "picture":{"U":[11,12],"D":[13]},"video":{"D":[14]},"file":{"N":[15],"U":["16"]},
+            "folder":{"N":[1],"D":[2,3]},"label":{"N":[4],"U":[5],"D":[6]},"tag":{"U":[7]},
+            "mediaset":{"U":[8]},"changes":[{"type":"profile"},{"type":"feature"}]}}"#;
+        let c = parse_changes(raw).unwrap();
+        assert_eq!(c.requesttime, 1795046518451);
+        let mut changed = c.changed.clone();
+        changed.sort_unstable();
+        assert_eq!(changed, [11, 12, 15, 16]);
+        let mut deleted = c.deleted.clone();
+        deleted.sort_unstable();
+        assert_eq!(deleted, [13, 14]);
+        assert_eq!(c.unknown, None);
+
+        // Nothing changed: no `data` at all
+        let c = parse_changes(r#"{"requesttime":5,"responsetime":6}"#).unwrap();
+        assert_eq!((c.requesttime, c.changed.len(), c.deleted.len()), (5, 0, 0));
+
+        // A kind or operation it doesn't know is reported, not ignored
+        let c = parse_changes(r#"{"requesttime":5,"data":{"ebook":{"U":[1]}}}"#).unwrap();
+        assert_eq!(c.unknown.as_deref(), Some("ebook"));
+        let c = parse_changes(r#"{"requesttime":5,"data":{"file":{"X":[1]}}}"#).unwrap();
+        assert_eq!(c.unknown.as_deref(), Some("file:X"));
+
+        assert!(parse_changes(r#"{"data":{}}"#).is_err());
+        assert!(parse_changes("<html>").is_err());
+    }
+
+    #[test]
+    fn test_media_item_cache_round_trip() {
+        let item: MediaItem = serde_json::from_str(
+            r#"{"id":"7","name":"a.jpg","folder":3,"size":10,"url":"https://x/y",
+                "date":1700000000000,"creationdate":1600000000000,"etag":"e"}"#,
+        )
+        .unwrap();
+        let cached = item.to_cached();
+        let json = serde_json::to_string(&cached).unwrap();
+        let back = MediaItem::from_cached(&serde_json::from_str(&json).unwrap());
+        assert_eq!(
+            (back.id, back.name.as_deref(), back.folderid, back.size),
+            (7, Some("a.jpg"), Some(3), Some(10))
+        );
+        assert_eq!(
+            (back.date, back.creationdate),
+            (item.date, item.creationdate)
+        );
+        // Download URLs expire, so they aren't cached
+        assert_eq!(back.url, None);
     }
 
     #[test]
