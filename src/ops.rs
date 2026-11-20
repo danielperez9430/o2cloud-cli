@@ -1935,9 +1935,17 @@ struct Lookup {
 }
 
 /// How long `media_for_target` waits for a new upload to show up, and
-/// how often it asks.
+/// how long it waits between asking: from the first delay, each 1.5
+/// times the last, up to the longest (about 11 requests in 60 s).
 const NEW_UPLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
-const NEW_UPLOAD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+const NEW_UPLOAD_FIRST_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+const NEW_UPLOAD_LONGEST_POLL: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How far back the change log is searched for a deletion of an unlisted
+/// ID: from a day before the latest upload listed, but no more than 30
+/// days back, to keep the answer small.
+const DELETED_LOOKBACK_MS: u64 = 24 * 3600 * 1000;
+const DELETED_MAX_LOOKBACK_MS: u64 = 30 * 24 * 3600 * 1000;
 
 /// The files in `folder` (`None`: the photos and videos with no folder),
 /// to check a name there: taken from `media` if it is `complete` (the
@@ -2054,8 +2062,22 @@ async fn listed_media(
     if is_name {
         return Ok(media);
     }
+    // A file deleted since is in the change log: no use waiting for it.
+    let now_ms = crate::config::now_unix() * 1000;
+    let latest_upload = media.iter().filter_map(|m| m.date).max().unwrap_or(0);
+    let from = latest_upload
+        .saturating_sub(DELETED_LOOKBACK_MS)
+        .max(now_ms.saturating_sub(DELETED_MAX_LOOKBACK_MS));
+    if client
+        .was_deleted_since(id, from, auth)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(media);
+    }
 
     let start = std::time::Instant::now();
+    let mut delay = NEW_UPLOAD_FIRST_POLL;
     loop {
         match client.get_media_by_id(id, auth).await {
             Ok(Some(item)) => {
@@ -2069,14 +2091,15 @@ async fn listed_media(
         if start.elapsed() >= NEW_UPLOAD_WAIT {
             return Ok(media);
         }
-        if start.elapsed() < NEW_UPLOAD_POLL {
+        if delay == NEW_UPLOAD_FIRST_POLL {
             eprintln!(
                 "  {} isn't listed yet; waiting up to {} s in case it was just uploaded...",
                 id,
                 NEW_UPLOAD_WAIT.as_secs()
             );
         }
-        tokio::time::sleep(NEW_UPLOAD_POLL).await;
+        tokio::time::sleep(delay).await;
+        delay = (delay * 3 / 2).min(NEW_UPLOAD_LONGEST_POLL);
     }
 }
 

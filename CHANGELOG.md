@@ -2,6 +2,19 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.12.1] — 2026-11-20
+
+### Changed
+- A numeric ID that isn't listed yet (a file uploaded a moment ago) is
+  asked for less often while waiting for it: after 1 s, then 1.5 times
+  longer each time up to 8 s, instead of every 2 s (#18). A file that is
+  never found takes 16 requests instead of about 33 to give up.
+
+### Fixed
+- A file ID deleted since the latest upload (for example a second `rm`
+  of the same ID) is reported as not found at once, from the server's
+  change log, instead of after waiting 60 s for it to appear.
+
 ## [0.12.0] — 2026-11-19
 
 ### Added
