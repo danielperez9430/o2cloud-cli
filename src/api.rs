@@ -1216,6 +1216,17 @@ impl O2Client {
         parse_changes(&raw)
     }
 
+    /// Whether the change log reports file `id` deleted since `from`
+    /// (Unix ms).
+    pub async fn was_deleted_since(
+        &self,
+        id: u64,
+        from: u64,
+        auth: &AuthConfig,
+    ) -> Result<bool, O2Error> {
+        Ok(self.changes_since(from, auth).await?.deleted.contains(&id))
+    }
+
     /// The files directly in folder `folder_id` (not in its subfolders),
     /// without listing the whole account. Photos and videos the phone app
     /// uploads have no folder (`ls` shows them in the root) and are never
