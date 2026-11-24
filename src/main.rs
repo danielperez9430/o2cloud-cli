@@ -198,7 +198,8 @@ enum Commands {
 
         /// Only upload files with these extensions (comma-separated or
         /// repeated, any case, with or without the dot), e.g.
-        /// --ext jpg,mp4. Folders left with no such file aren't created
+        /// --ext jpg,mp4 or --ext tar.gz. Subfolders with no such file
+        /// aren't created
         #[arg(long, value_delimiter = ',', value_name = "EXT")]
         ext: Vec<String>,
 

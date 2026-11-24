@@ -91,7 +91,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
 | ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where, `--skip-existing` to resume) |
-| 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2) |
+| 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2; `--ext jpg,mp4` for only those extensions) |
 | 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
 | ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
 | 🗑️ `rm <file or folder>` | Move to the trash (`-r` for folders, `-y` to skip confirmation) |

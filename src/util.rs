@@ -17,11 +17,16 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// Format a `SystemTime` as the compact ISO 8601 timestamp the SAPI
-/// expects: `YYYYMMDDTHHMMSS`. A time before 1970, which some files carry
-/// as an invalid modification date, is given as 1970-01-01 (#24).
+/// expects: `YYYYMMDDTHHMMSS`. Some files carry an invalid modification
+/// date: one before 1970 is given as 1970-01-01 (#24), one after 9999 as
+/// the end of 9999.
 pub fn system_time_to_compact_iso(t: std::time::SystemTime) -> String {
     use std::time::UNIX_EPOCH;
-    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    const END_OF_9999: u64 = 253_402_300_799;
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .min(END_OF_9999);
     let days_since_epoch = secs / 86400;
     // Approximate leap year handling — good enough for ~2000-2100
     let mut y = 1970;
@@ -155,5 +160,7 @@ mod tests {
         // Used to panic with `SystemTimeError(1s)` (#24).
         let t = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert_eq!(system_time_to_compact_iso(t), "19700101T000000");
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::MAX / 4);
+        assert_eq!(system_time_to_compact_iso(t), "99991231T235959");
     }
 }
