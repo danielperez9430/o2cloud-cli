@@ -1155,12 +1155,29 @@ pub async fn upload_dir(
 
     // Count files for progress
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
+    let only = extensions
+        .iter()
+        .map(|e| format!(".{}", e))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !extensions.is_empty() && file_count == 0 {
+        return Err(O2Error::NotFound(format!(
+            "no {} files in {}",
+            only,
+            local_dir.display()
+        )));
+    }
     eprintln!(
-        "→ Uploading {} ({}) — {} files, {} dirs...",
+        "→ Uploading {} ({}) — {} files, {} dirs{}...",
         local_dir.display(),
         format_size(total_size),
         file_count,
         entries.iter().filter(|(_, is_dir)| *is_dir).count() - 1, // -1 for root
+        if extensions.is_empty() {
+            String::new()
+        } else {
+            format!(" (only {})", only)
+        },
     );
 
     // Map: local dir path → o2 folder id. The uploaded directory itself
@@ -1364,12 +1381,17 @@ fn is_skipped_name(name: &str) -> bool {
     name.starts_with('.') || SYSTEM_NAMES.contains(&name.to_lowercase().as_str())
 }
 
-/// The extensions given to `--ext`, lowercase and without the dot
-/// (`.JPG` → `jpg`), leaving out empty ones.
+/// The extensions given to `--ext`, lowercase and without the leading
+/// `*` or dot (`*.JPG` → `jpg`), leaving out empty ones.
 pub fn normalize_extensions(extensions: &[String]) -> Vec<String> {
     extensions
         .iter()
-        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .map(|e| {
+            e.trim()
+                .trim_start_matches('*')
+                .trim_start_matches('.')
+                .to_lowercase()
+        })
         .filter(|e| !e.is_empty())
         .collect()
 }
@@ -1378,9 +1400,16 @@ pub fn normalize_extensions(extensions: &[String]) -> Vec<String> {
 /// with one of the `wanted` extensions (see `normalize_extensions`), the
 /// directories that hold one somewhere below, and `root` itself.
 fn keep_extensions(entries: &mut Vec<(PathBuf, bool)>, root: &Path, wanted: &[String]) {
+    // By the end of the name, so `tar.gz` works too.
     let is_wanted = |p: &Path| {
-        p.extension()
-            .is_some_and(|e| wanted.contains(&e.to_string_lossy().to_lowercase()))
+        p.file_name().is_some_and(|n| {
+            let name = n.to_string_lossy().to_lowercase();
+            wanted.iter().any(|e| {
+                name.len() > e.len() + 1
+                    && name.ends_with(e.as_str())
+                    && name[..name.len() - e.len()].ends_with('.')
+            })
+        })
     };
     entries.retain(|(p, is_dir)| *is_dir || is_wanted(p));
     let mut needed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -3647,8 +3676,9 @@ mod tests {
 
     #[test]
     fn test_keep_extensions() {
-        let wanted = normalize_extensions(&[".MP4".into(), " jpg ".into(), "".into()]);
-        assert_eq!(wanted, ["mp4", "jpg"]);
+        let wanted =
+            normalize_extensions(&[".MP4".into(), " jpg ".into(), "".into(), "*.tar.GZ".into()]);
+        assert_eq!(wanted, ["mp4", "jpg", "tar.gz"]);
         let root = Path::new("/a");
         let mut entries: Vec<(PathBuf, bool)> = [
             ("/a", true),
@@ -3661,12 +3691,28 @@ mod tests {
             ("/a/pdfs", true),
             ("/a/pdfs/y.pdf", false),
             ("/a/noext", false),
+            ("/a/jpg", false),
+            ("/a/xjpg", false),
+            ("/a/t", true),
+            ("/a/t/b.TAR.gz", false),
+            ("/a/t/c.gz", false),
         ]
         .iter()
         .map(|(p, d)| (PathBuf::from(p), *d))
         .collect();
         keep_extensions(&mut entries, root, &wanted);
         let kept: Vec<&str> = entries.iter().map(|(p, _)| p.to_str().unwrap()).collect();
-        assert_eq!(kept, ["/a", "/a/x.JPG", "/a/b", "/a/b/c", "/a/b/c/v.mp4"]);
+        assert_eq!(
+            kept,
+            [
+                "/a",
+                "/a/x.JPG",
+                "/a/b",
+                "/a/b/c",
+                "/a/b/c/v.mp4",
+                "/a/t",
+                "/a/t/b.TAR.gz"
+            ]
+        );
     }
 }

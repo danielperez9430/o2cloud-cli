@@ -96,7 +96,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <texto>` | Busca archivos y carpetas por nombre |
 | ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde, `--skip-existing` para reanudar) |
-| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto) |
+| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto; `--ext jpg,mp4` para solo esas extensiones) |
 | 🗜️ `upload-zip <dir>` | Comprime una carpeta y sube el `.zip` |
 | ⬇️ `download <archivo>` | Descarga un archivo (`-o` para elegir la ruta local) |
 | 🗑️ `rm <archivo o carpeta>` | Lo manda a la papelera (`-r` para carpetas, `-y` para no pedir confirmación) |

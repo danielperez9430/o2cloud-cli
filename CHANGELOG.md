@@ -2,6 +2,20 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.13.1] — 2026-11-24
+
+### Changed
+- `upload-dir --ext` matches the end of the file name, so `--ext tar.gz`
+  works, and accepts `*.jpg`. If no file matches it says so and creates
+  nothing, instead of creating the top folder and uploading 0 files. The
+  "Uploading" line says which extensions it is limited to.
+- A modification date after the year 9999 is sent as the end of 9999.
+
+### Security
+- Updated `cookie` to 0.18.3 (RUSTSEC-2026-0594) and `url` to 2.5.9
+  (RUSTSEC-2026-0592). 0.13.0 was tagged but not released, as the
+  dependency audit stopped its build.
+
 ## [0.13.0] — 2026-11-24
 
 ### Added
