@@ -2,33 +2,25 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [0.13.1] — 2026-11-24
-
-### Changed
-- `upload-dir --ext` matches the end of the file name, so `--ext tar.gz`
-  works, and accepts `*.jpg`. If no file matches it says so and creates
-  nothing, instead of creating the top folder and uploading 0 files. The
-  "Uploading" line says which extensions it is limited to.
-- A modification date after the year 9999 is sent as the end of 9999.
-
-### Security
-- Updated `cookie` to 0.18.3 (RUSTSEC-2026-0594) and `url` to 2.5.9
-  (RUSTSEC-2026-0592). 0.13.0 was tagged but not released, as the
-  dependency audit stopped its build.
-
 ## [0.13.0] — 2026-11-24
 
 ### Added
 - `upload-dir --ext jpg,mp4` uploads only the files with those
   extensions (comma-separated or repeated, any case, with or without
-  the dot), and creates only the folders that hold some. Contributed by
-  @pinta101 in #24.
+  the dot; `tar.gz` and `*.jpg` work too), and creates only the
+  subfolders that hold some. If no file matches it says so and creates
+  nothing. The "Uploading" line says which extensions it is limited to.
+  Contributed by @pinta101 in #24.
 
 ### Fixed
 - `upload` and `upload-dir` no longer crash (`SystemTimeError`) on a file
   whose modification date is before 1970, which some files carry as an
   invalid date; it is sent as 1970-01-01 (#24, reported and fixed by
-  @pinta101).
+  @pinta101). A date after the year 9999 is sent as the end of 9999.
+
+### Security
+- Updated `cookie` to 0.18.3 (RUSTSEC-2026-0594) and `url` to 2.5.9
+  (RUSTSEC-2026-0592).
 
 ## [0.12.1] — 2026-11-20
 
