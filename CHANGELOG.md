@@ -2,6 +2,20 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.13.0] — 2026-11-24
+
+### Added
+- `upload-dir --ext jpg,mp4` uploads only the files with those
+  extensions (comma-separated or repeated, any case, with or without
+  the dot), and creates only the folders that hold some. Contributed by
+  @pinta101 in #24.
+
+### Fixed
+- `upload` and `upload-dir` no longer crash (`SystemTimeError`) on a file
+  whose modification date is before 1970, which some files carry as an
+  invalid date; it is sent as 1970-01-01 (#24, reported and fixed by
+  @pinta101).
+
 ## [0.12.1] — 2026-11-20
 
 ### Changed

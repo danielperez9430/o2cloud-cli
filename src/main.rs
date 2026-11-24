@@ -196,6 +196,12 @@ enum Commands {
         #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=8))]
         jobs: u16,
 
+        /// Only upload files with these extensions (comma-separated or
+        /// repeated, any case, with or without the dot), e.g.
+        /// --ext jpg,mp4. Folders left with no such file aren't created
+        #[arg(long, value_delimiter = ',', value_name = "EXT")]
+        ext: Vec<String>,
+
         /// Print JSON instead of messages
         #[arg(long)]
         json: bool,
@@ -549,19 +555,27 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             folder,
             upload,
             jobs,
+            ext,
             json,
         } => {
-            let (client, auth) = require_client_and_auth().await?;
             let local_path = PathBuf::from(&path);
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
+            let extensions = ops::normalize_extensions(&ext);
+            if !ext.is_empty() && extensions.is_empty() {
+                return Err(O2Error::Invalid(
+                    "--ext needs at least one extension".into(),
+                ));
+            }
+            let (client, auth) = require_client_and_auth().await?;
             ops::upload_dir(
                 &client,
                 &auth,
                 &local_path,
                 folder,
                 &upload.options(jobs.into()),
+                &extensions,
                 json,
             )
             .await?;

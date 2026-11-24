@@ -186,6 +186,7 @@ o2cloud upload ./informe.pdf --folder 12345679    # a una carpeta (por ID)
 o2cloud upload-dir ./vacaciones                   # crea vacaciones/ y sube dentro
 o2cloud upload-zip ./proyecto                     # sube proyecto.zip
 o2cloud upload-dir ./vacaciones --skip-existing   # reanudar: salta lo que ya está
+o2cloud upload-dir ./vacaciones --ext jpg,mp4     # solo esas extensiones
 o2cloud upload ./disco.iso                        # más de 4 GB: disco.iso.001, disco.iso.002, …
 
 o2cloud download /Documentos/informe.pdf          # se guarda como ./informe.pdf

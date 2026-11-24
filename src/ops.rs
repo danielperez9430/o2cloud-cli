@@ -1098,13 +1098,15 @@ pub async fn upload_file(
 /// Upload a local directory recursively.  The directory is recreated as a
 /// folder of the same name inside the target (reusing it if it exists),
 /// with matching subfolders, then all files are uploaded, `opts.jobs` at
-/// a time.
+/// a time. With `extensions` (see `normalize_extensions`), only files
+/// with one of them, and only the subfolders that hold some.
 pub async fn upload_dir(
     client: &O2Client,
     auth: &AuthConfig,
     local_dir: &Path,
     parent_folder_id: Option<u64>,
     opts: &UploadOptions,
+    extensions: &[String],
     json: bool,
 ) -> Result<(), O2Error> {
     use futures_util::StreamExt;
@@ -1122,18 +1124,27 @@ pub async fn upload_dir(
     // system entries (see `is_skipped_name`).
     // The walk is synchronous filesystem work, so keep it off the runtime.
     let dir = local_dir.to_path_buf();
+    let wanted = extensions.to_vec();
     let (entries, skipped_entries, total_size, largest_file) = spawn_blocking_io(move || {
         let mut entries: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_dir)
         let mut skipped_entries = 0u32;
         walk_dir(&dir, &mut entries, &mut skipped_entries)?;
-        let largest_file = entries
+        if !wanted.is_empty() {
+            keep_extensions(&mut entries, &dir, &wanted);
+        }
+        let sizes: Vec<u64> = entries
             .iter()
             .filter(|(_, is_dir)| !is_dir)
             .filter_map(|(p, _)| std::fs::metadata(p).ok())
             .map(|m| m.len())
-            .max()
-            .unwrap_or(0);
-        Ok((entries, skipped_entries, dir_size(&dir), largest_file))
+            .collect();
+        let largest_file = sizes.iter().copied().max().unwrap_or(0);
+        let total_size = if wanted.is_empty() {
+            dir_size(&dir)
+        } else {
+            sizes.iter().sum()
+        };
+        Ok((entries, skipped_entries, total_size, largest_file))
     })
     .await?;
     let existing = if needs_listing(opts, largest_file) {
@@ -1351,6 +1362,36 @@ const SYSTEM_NAMES: &[&str] = &[
 /// be uploaded) and the OS files in `SYSTEM_NAMES`.
 fn is_skipped_name(name: &str) -> bool {
     name.starts_with('.') || SYSTEM_NAMES.contains(&name.to_lowercase().as_str())
+}
+
+/// The extensions given to `--ext`, lowercase and without the dot
+/// (`.JPG` → `jpg`), leaving out empty ones.
+pub fn normalize_extensions(extensions: &[String]) -> Vec<String> {
+    extensions
+        .iter()
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+/// Keep, of the `entries` `walk_dir` collected under `root`, the files
+/// with one of the `wanted` extensions (see `normalize_extensions`), the
+/// directories that hold one somewhere below, and `root` itself.
+fn keep_extensions(entries: &mut Vec<(PathBuf, bool)>, root: &Path, wanted: &[String]) {
+    let is_wanted = |p: &Path| {
+        p.extension()
+            .is_some_and(|e| wanted.contains(&e.to_string_lossy().to_lowercase()))
+    };
+    entries.retain(|(p, is_dir)| *is_dir || is_wanted(p));
+    let mut needed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for (path, _) in entries.iter().filter(|(_, is_dir)| !is_dir) {
+        for dir in path.ancestors().skip(1) {
+            if !needed.insert(dir.to_path_buf()) || dir == root {
+                break;
+            }
+        }
+    }
+    entries.retain(|(p, is_dir)| !is_dir || p == root || needed.contains(p));
 }
 
 /// Recursively collect files and directories under `dir`, skipping the
@@ -3602,5 +3643,30 @@ mod tests {
         assert_eq!(body.used, 12970640066);
         assert_eq!(body.softdeleted, 5011);
         assert!(!body.nolimit);
+    }
+
+    #[test]
+    fn test_keep_extensions() {
+        let wanted = normalize_extensions(&[".MP4".into(), " jpg ".into(), "".into()]);
+        assert_eq!(wanted, ["mp4", "jpg"]);
+        let root = Path::new("/a");
+        let mut entries: Vec<(PathBuf, bool)> = [
+            ("/a", true),
+            ("/a/x.JPG", false),
+            ("/a/doc.pdf", false),
+            ("/a/b", true),
+            ("/a/b/c", true),
+            ("/a/b/c/v.mp4", false),
+            ("/a/empty", true),
+            ("/a/pdfs", true),
+            ("/a/pdfs/y.pdf", false),
+            ("/a/noext", false),
+        ]
+        .iter()
+        .map(|(p, d)| (PathBuf::from(p), *d))
+        .collect();
+        keep_extensions(&mut entries, root, &wanted);
+        let kept: Vec<&str> = entries.iter().map(|(p, _)| p.to_str().unwrap()).collect();
+        assert_eq!(kept, ["/a", "/a/x.JPG", "/a/b", "/a/b/c", "/a/b/c/v.mp4"]);
     }
 }
