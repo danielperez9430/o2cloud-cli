@@ -181,6 +181,7 @@ o2cloud upload ./report.pdf --folder 12345679    # to a folder (by ID)
 o2cloud upload-dir ./holidays                    # creates holidays/ and uploads into it
 o2cloud upload-zip ./project                     # uploads project.zip
 o2cloud upload-dir ./holidays --skip-existing    # resume: skip what's already there
+o2cloud upload-dir ./holidays --ext jpg,mp4      # only these extensions
 o2cloud upload ./disk.iso                        # over 4 GB: disk.iso.001, disk.iso.002, …
 
 o2cloud download /Documents/report.pdf           # saved as ./report.pdf
