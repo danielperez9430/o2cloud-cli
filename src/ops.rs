@@ -894,6 +894,23 @@ struct Uploaded {
     parts: usize,
     /// How many pieces were skipped (already in the folder).
     skipped: usize,
+    /// Not uploaded: an empty image, which O2 Cloud rejects (see
+    /// `is_empty_image`).
+    empty: bool,
+}
+
+/// Image types O2 Cloud rejects when the file is empty (`MED-1050`, or
+/// `MED-1000` for HEIC). Tested: it takes other empty files, including
+/// `.heif`, `.avif`, `.svg`, `.bmp`, `.tif`, `.ico`, `.psd` and RAW.
+const REJECTED_IF_EMPTY: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "heic"];
+
+/// Whether a file `name` of `size` bytes is an empty image O2 Cloud
+/// would reject, so it isn't sent.
+fn is_empty_image(name: &str, size: u64) -> bool {
+    size == 0
+        && Path::new(name).extension().is_some_and(|e| {
+            REJECTED_IF_EMPTY.contains(&e.to_string_lossy().to_lowercase().as_str())
+        })
 }
 
 /// Upload the local file `path` (`size` bytes) to `folder_id` as `name`,
@@ -931,6 +948,7 @@ async fn upload_local_file(
         ids: Vec::new(),
         parts: if split { pieces.len() } else { 0 },
         skipped: 0,
+        empty: false,
     };
     for (i, (piece_name, offset, len)) in pieces.iter().enumerate() {
         let already = opts
@@ -1027,6 +1045,13 @@ pub async fn upload_file(
         .and_then(|n| n.to_str())
         .ok_or_else(|| O2Error::Invalid("Invalid file name".into()))?
         .to_string();
+    if is_empty_image(&name, size) {
+        return Err(O2Error::Invalid(format!(
+            "{} is empty, and O2 Cloud rejects empty .{} images",
+            name,
+            REJECTED_IF_EMPTY.join(", .")
+        )));
+    }
 
     let folder_id = match folder_id {
         Some(id) => id,
@@ -1243,6 +1268,7 @@ pub async fn upload_dir(
                     return (i, result, Err(O2Error::SessionExpired));
                 }
                 let file_meta = tokio::fs::metadata(file_path).await.ok();
+                let file_meta_ok = file_meta.is_some();
                 let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = file_meta.and_then(|m| m.modified().ok());
 
@@ -1254,12 +1280,26 @@ pub async fn upload_dir(
                     format_size(size)
                 );
 
-                let result = serde_json::json!({
+                let mut result = serde_json::json!({
                     "local": local_path_in(local_dir, file_path),
                     "name": name,
                     "folderid": parent_o2,
                     "size": size,
                 });
+                if file_meta_ok && is_empty_image(&name, size) {
+                    eprintln!(
+                        "  ∅ {} is empty: skipped (O2 Cloud rejects empty images)",
+                        name
+                    );
+                    result["empty"] = true.into();
+                    let empty = Uploaded {
+                        ids: Vec::new(),
+                        parts: 0,
+                        skipped: 0,
+                        empty: true,
+                    };
+                    return (i, result, Ok(empty));
+                }
                 let uploaded = upload_local_file(
                     client, auth, file_path, &name, size, modified, parent_o2, existing, opts,
                 )
@@ -1282,10 +1322,15 @@ pub async fn upload_dir(
 
     // One entry per file for `--json`, failed uploads included.
     let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
+    let mut empty_images = 0usize;
     let results: Vec<serde_json::Value> = results
         .into_iter()
         .map(|(_, mut result, uploaded)| {
             match uploaded {
+                Ok(up) if up.empty => {
+                    result["skipped"] = true.into();
+                    empty_images += 1;
+                }
                 Ok(up) => {
                     if up.skipped == up.ids.len() {
                         skipped += 1;
@@ -1320,6 +1365,13 @@ pub async fn upload_dir(
     }
     if skipped > 0 {
         eprintln!("  ({} file(s) were already uploaded)", skipped);
+    }
+    if empty_images > 0 {
+        eprintln!(
+            "  ({} empty image(s) skipped: O2 Cloud rejects empty .{} files)",
+            empty_images,
+            REJECTED_IF_EMPTY.join(", .")
+        );
     }
     if failed > 0 {
         eprintln!("⚠ {} file(s) failed to upload", failed);
@@ -3708,6 +3760,16 @@ mod tests {
         assert_eq!(body.used, 12970640066);
         assert_eq!(body.softdeleted, 5011);
         assert!(!body.nolimit);
+    }
+
+    #[test]
+    fn test_is_empty_image() {
+        assert!(is_empty_image("IMG-20220829-WA0008.jpg", 0));
+        assert!(is_empty_image("a.HEIC", 0));
+        assert!(!is_empty_image("a.jpg", 1));
+        assert!(!is_empty_image("a.txt", 0));
+        assert!(!is_empty_image("a.heif", 0));
+        assert!(!is_empty_image("jpg", 0));
     }
 
     #[test]
