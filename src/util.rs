@@ -160,7 +160,9 @@ mod tests {
         // Used to panic with `SystemTimeError(1s)` (#24).
         let t = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert_eq!(system_time_to_compact_iso(t), "19700101T000000");
-        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::MAX / 4);
+        // About the year 21,000: past 9999, and within what a `SystemTime`
+        // can hold on Windows (up to about the year 30,000).
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(600_000_000_000);
         assert_eq!(system_time_to_compact_iso(t), "99991231T235959");
     }
 }
