@@ -41,7 +41,7 @@ pub enum O2Error {
     Ambiguous(String),
 
     /// The server answered 401 in the middle of a command: the session
-    /// expired (web logins last about 24 hours) or was revoked.
+    /// expired (a web login ends after a while without use) or was revoked.
     #[error(
         "the session has expired; run the command again to log in (with \
          `upload-dir --skip-existing` it carries on where it stopped)"

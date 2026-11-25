@@ -13,6 +13,11 @@ All notable changes to o2cloud-cli will be documented in this file.
   `id`. `upload` of one fails at once with a clear message. Other empty
   files, which O2 Cloud accepts (`.txt`, `.pdf`, `.mp4`, `.heif`, `.svg`,
   RAW…), are still uploaded (#24).
+- The README, `status` and error messages no longer say a session lasts
+  about 24 hours: a web login ends after a while without use (it was
+  gone after two hours idle in our tests), while one in constant use
+  lasts much longer. The README also explains what O2 Cloud rejects
+  (`MED-1050`/`MED-1000`).
 
 ## [0.13.1] — 2026-11-25
 
