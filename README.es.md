@@ -299,7 +299,7 @@ $ o2cloud ls
 ...
 ```
 
-`o2cloud status` indica si tu sesión se renueva sola. Mantén el client secret fuera del repositorio y del historial de la terminal: usa mejor las variables de entorno que las flags `--oauth-client-id` / `--oauth-client-secret`, y no lo subas a ningún sitio.
+El client id y el secret se guardan con la sesión en `auth.json` (solo lo puede leer tu usuario; `logout` los borra), así que si alguna renovación falla, la ventana de login que se abre vuelve a usar este mismo login y la sesión se sigue renovando sola. `o2cloud login` también, hasta que hagas `logout`. `o2cloud status` indica si tu sesión se renueva sola. Mantén el client secret fuera del repositorio y del historial de la terminal: usa mejor las variables de entorno que las flags `--oauth-client-id` / `--oauth-client-secret`, y no lo subas a ningún sitio.
 
 ## ⚙️ Cómo funciona
 

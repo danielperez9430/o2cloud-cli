@@ -25,6 +25,40 @@ pub struct AuthConfig {
     /// When the session was created (Unix seconds); 0 if unknown.
     #[serde(default)]
     pub logged_in_at: u64,
+    /// The OAuth client of the mobile-app login, kept so that logging in
+    /// again (when silent renewal fails) uses the same kind of login
+    /// instead of falling back to the web one. Only that login sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client: Option<OAuthClient>,
+}
+
+/// The mobile app's OAuth client id and secret, which the user supplies.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthClient {
+    pub id: String,
+    pub secret: String,
+}
+
+impl OAuthClient {
+    /// From `O2CLOUD_OAUTH_CLIENT_ID` and `O2CLOUD_OAUTH_CLIENT_SECRET`,
+    /// if both are set.
+    pub fn from_env() -> Option<Self> {
+        let get = |k| std::env::var(k).ok().filter(|v: &String| !v.is_empty());
+        Some(OAuthClient {
+            id: get("O2CLOUD_OAUTH_CLIENT_ID")?,
+            secret: get("O2CLOUD_OAUTH_CLIENT_SECRET")?,
+        })
+    }
+}
+
+/// Never prints the secret.
+impl std::fmt::Debug for OAuthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClient")
+            .field("id", &self.id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Current time in Unix seconds.
@@ -259,7 +293,27 @@ mod tests {
             platform: "macos".into(),
             device_id: String::new(),
             logged_in_at: 0,
+            oauth_client: None,
         }
+    }
+
+    #[test]
+    fn test_oauth_client_stored_and_redacted() {
+        let mut cfg = config_with_access_token("");
+        // Files written before the field existed still load.
+        let old: AuthConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(old.oauth_client.is_none());
+        assert!(!serde_json::to_string(&cfg)
+            .unwrap()
+            .contains("oauth_client"));
+
+        cfg.oauth_client = Some(OAuthClient {
+            id: "the-id".into(),
+            secret: "the-secret".into(),
+        });
+        let back: AuthConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.oauth_client, cfg.oauth_client);
+        assert!(!format!("{:?}", cfg).contains("the-secret"));
     }
 
     #[test]

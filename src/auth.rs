@@ -44,6 +44,7 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
         platform: "web".into(),
         device_id: client.device_id().to_string(),
         logged_in_at: config::now_unix(),
+        oauth_client: None,
     };
     // Only used for display, so a failure here doesn't fail the login.
     if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
@@ -74,6 +75,7 @@ pub async fn login_manual(jsessionid: &str, validationkey: &str) -> Result<AuthC
         platform: "web".into(),
         device_id: client.device_id().to_string(),
         logged_in_at: config::now_unix(),
+        oauth_client: None,
     };
 
     eprintln!("→ Checking session...");
@@ -129,6 +131,10 @@ pub async fn login_native(client_id: &str, client_secret: &str) -> Result<AuthCo
         platform: "ios".into(),
         device_id: client.device_id().to_string(),
         logged_in_at: config::now_unix(),
+        oauth_client: Some(config::OAuthClient {
+            id: client_id.to_string(),
+            secret: client_secret.to_string(),
+        }),
     };
     // Only used for display, so a failure here doesn't fail the login.
     if let Ok(Some(msisdn)) = client.get_profile_msisdn(&config).await {
