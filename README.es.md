@@ -37,7 +37,7 @@ Con [Rust](https://rustup.rs) instalado:
 cargo install o2cloud-cli
 ```
 
-En cada [release de GitHub](https://github.com/danielperez9430/o2cloud-cli/releases) hay binarios ya compilados para macOS, Linux y Windows.
+En cada [release de GitHub](https://github.com/danielperez9430/o2cloud-cli/releases) hay binarios ya compilados para macOS, Linux y Windows. El de Linux necesita glibc 2.39 o posterior (Ubuntu 24.04, Debian 13, Fedora 40 o más nuevos); en sistemas más antiguos, instálalo con `cargo install`.
 
 <details>
 <summary>🛠️ Compilar desde el código</summary>
