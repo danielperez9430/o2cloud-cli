@@ -385,6 +385,7 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                     platform: auth.platform.clone(),
                     device_id: client.device_id().to_string(),
                     logged_in_at: config::now_unix(),
+                    oauth_client: auth.oauth_client.clone(),
                 };
                 if let Err(e) = config::save_auth(&new_auth) {
                     eprintln!("Failed to save refreshed auth: {}", e);
@@ -402,10 +403,32 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
         "→ Opening login window... (without one, run `o2cloud login --jsessionid ... \
          --validationkey ...` instead)"
     );
-    let new_auth = crate::auth::login().await?;
+    let new_auth = login_like(&auth).await?;
     eprintln!("✓ Re-login successful");
     let new_client = api::O2Client::new(&new_auth.device_id)?;
     Ok((new_client, new_auth))
+}
+
+/// Log in again the way `old` was logged in: a session from the mobile-app
+/// login (which renews without SMS) gets that login again, with the OAuth
+/// client from the environment or the one stored with it. Without one it
+/// says so and falls back to the web login.
+async fn login_like(old: &config::AuthConfig) -> Result<config::AuthConfig, O2Error> {
+    let was_app_login = old.oauth_client.is_some() || old.platform == "ios";
+    if !was_app_login {
+        return crate::auth::login().await;
+    }
+    match config::OAuthClient::from_env().or_else(|| old.oauth_client.clone()) {
+        Some(c) => crate::auth::login_native(&c.id, &c.secret).await,
+        None => {
+            eprintln!(
+                "⚠ This session came from the mobile-app login, but its OAuth client isn't \
+                 stored or set (O2CLOUD_OAUTH_CLIENT_ID / O2CLOUD_OAUTH_CLIENT_SECRET), so \
+                 this is the web login: its sessions end after a while without use."
+            );
+            crate::auth::login().await
+        }
+    }
 }
 
 async fn run(cli: Cli) -> Result<(), O2Error> {
@@ -434,7 +457,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 (_, _, Some(jsessionid), Some(validationkey)) => {
                     auth::login_manual(&jsessionid, &validationkey).await?
                 }
-                _ => auth::login().await?,
+                // Same kind of login as the stored session, if any.
+                _ => match config::load_auth() {
+                    Ok(old) => login_like(&old).await?,
+                    Err(_) => auth::login().await?,
+                },
             };
             if config.msisdn.is_empty() {
                 println!("Logged in");

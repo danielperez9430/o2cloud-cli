@@ -4,6 +4,16 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [0.13.2] — 2026-11-25
 
+### Fixed
+- A session from the mobile-app login (the one that renews without SMS)
+  no longer turns into a web session when a silent renewal fails: the
+  login window that opens then uses the mobile-app login again, so the
+  session keeps renewing itself. The OAuth client id and secret are now
+  stored with the session in `auth.json` (readable only by the user,
+  deleted by `logout`), so this works without the environment variables;
+  `o2cloud login` also keeps using that login until `logout`. Without
+  them, it now says it is falling back to the web login.
+
 ### Changed
 - `upload-dir` skips empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` and
   `.heic` files instead of sending them: O2 Cloud rejects every one

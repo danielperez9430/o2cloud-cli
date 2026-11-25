@@ -294,7 +294,7 @@ $ o2cloud ls
 ...
 ```
 
-`o2cloud status` shows whether your session renews on its own. Keep the client secret out of the repository and your shell history: prefer the environment variables over the `--oauth-client-id` / `--oauth-client-secret` flags, and never commit it.
+The client id and secret are stored with the session in `auth.json` (readable only by you; `logout` deletes them), so if a renewal ever fails, the login window that opens uses this same login again and the session keeps renewing itself. `o2cloud login` does too, until you `logout`. `o2cloud status` shows whether your session renews on its own. Keep the client secret out of the repository and your shell history: prefer the environment variables over the `--oauth-client-id` / `--oauth-client-secret` flags, and never commit it.
 
 ## ⚙️ How it works
 
