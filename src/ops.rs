@@ -1192,6 +1192,48 @@ pub async fn upload_dir(
             local_dir.display()
         )));
     }
+    // The uploaded directory becomes a folder of the same name inside the
+    // target (like `cp -r`); `canonicalize` gives `.`/`..` their real name.
+    let top_name = local_dir
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    // O2 Cloud's limits on names and depth: what doesn't fit is reported
+    // and left out, rather than failing the whole upload halfway.
+    let top_level = folder_level(root_parent, &existing_folders) + usize::from(top_name.is_some());
+    if let Some(name) = &top_name {
+        if let Some(problem) = crate::api::folder_name_problem(name) {
+            return Err(O2Error::Invalid(format!(
+                "can't upload {}: {}",
+                name, problem
+            )));
+        }
+        if top_level > crate::api::MAX_FOLDER_LEVEL {
+            return Err(O2Error::Invalid(format!(
+                "can't upload {} there: O2 Cloud allows at most {} levels of folders below the root",
+                name,
+                crate::api::MAX_FOLDER_LEVEL
+            )));
+        }
+    }
+    let mut entries = entries;
+    let rejected = keep_within_o2_limits(&mut entries, local_dir, top_level);
+    for (path, is_dir, reason) in &rejected {
+        if *is_dir {
+            eprintln!(
+                "  ⚠ Skipping {}/ and what's in it: {}",
+                local_path_in(local_dir, path),
+                reason
+            );
+        } else if reason.starts_with("the name") {
+            eprintln!(
+                "  ⚠ Skipping {}: {}",
+                local_path_in(local_dir, path),
+                reason
+            );
+        }
+    }
+    let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
     eprintln!(
         "→ Uploading {} ({}) — {} files, {} dirs{}...",
         local_dir.display(),
@@ -1209,10 +1251,6 @@ pub async fn upload_dir(
     // becomes a folder of the same name inside the target (like `cp -r`);
     // `canonicalize` gives `.`/`..` their real name.
     let mut folder_map: HashMap<PathBuf, u64> = HashMap::new();
-    let top_name = local_dir
-        .canonicalize()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     let top_id = match top_name {
         Some(name) => ensure_folder(client, auth, &existing_folders, &name, root_parent).await?,
         // Only `/` has no name: upload its contents into the target.
@@ -1357,6 +1395,13 @@ pub async fn upload_dir(
         })
         .collect();
 
+    let too_big = rejected.iter().filter(|(_, is_dir, _)| !is_dir).count();
+    if too_big > 0 {
+        eprintln!(
+            "⚠ {} file(s) not uploaded: beyond O2 Cloud's limits on names or folder depth",
+            too_big
+        );
+    }
     if skipped_entries > 0 {
         eprintln!(
             "  (skipped {} hidden or system files/dirs: .git, .DS_Store, Thumbs.db, etc.)",
@@ -1385,19 +1430,104 @@ pub async fn upload_dir(
         );
     }
     if json {
+        let mut results = results;
+        results.extend(rejected.iter().filter(|(_, is_dir, _)| !is_dir).map(
+            |(path, _, reason)| {
+                serde_json::json!({
+                    "local": local_path_in(local_dir, path),
+                    "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    "error": reason,
+                })
+            },
+        ));
         print_json(&serde_json::Value::Array(results));
     }
 
     if not_done > 0 {
         return Err(O2Error::SessionExpired);
     }
+    let failed = failed + too_big;
     if failed > 0 {
         return Err(O2Error::Api(format!(
             "{} of {} files failed to upload",
-            failed, file_count
+            failed,
+            file_count + too_big
         )));
     }
     Ok(())
+}
+
+/// How many levels below the root folder `id` is (the root is 0).
+fn folder_level(id: u64, folders: &[crate::api::FolderEntry]) -> usize {
+    let parent: HashMap<u64, u64> = folders.iter().map(|f| (f.id, f.parentid)).collect();
+    let (mut level, mut current) = (0, id);
+    while let Some(&p) = parent.get(&current) {
+        if p == 0 || p == current || level > 1000 {
+            break;
+        }
+        level += 1;
+        current = p;
+    }
+    level
+}
+
+/// Leave out of `entries` (as `walk_dir` collects them under `root`) what
+/// O2 Cloud won't take, given that `root` becomes a folder at `root_level`:
+/// folders deeper than `MAX_FOLDER_LEVEL` or with too long a name, with
+/// everything in them, and files with too long a name. Returns each one
+/// left out with the reason: the folders once, and every file.
+fn keep_within_o2_limits(
+    entries: &mut Vec<(PathBuf, bool)>,
+    root: &Path,
+    root_level: usize,
+) -> Vec<(PathBuf, bool, String)> {
+    let mut bad_dirs: Vec<(PathBuf, String)> = Vec::new();
+    let mut rejected = Vec::new();
+    let mut dirs: Vec<&PathBuf> = entries.iter().filter(|(_, d)| *d).map(|(p, _)| p).collect();
+    dirs.sort_by_key(|p| p.components().count()); // parents first
+    for dir in dirs {
+        if dir.as_path() == root || bad_dirs.iter().any(|(b, _)| dir.starts_with(b)) {
+            continue;
+        }
+        let rel = dir.strip_prefix(root).unwrap_or(dir).components().count();
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let reason = crate::api::folder_name_problem(&name).or_else(|| {
+            (root_level + rel > crate::api::MAX_FOLDER_LEVEL).then(|| {
+                format!(
+                    "O2 Cloud allows at most {} levels of folders below the root",
+                    crate::api::MAX_FOLDER_LEVEL
+                )
+            })
+        });
+        if let Some(reason) = reason {
+            rejected.push((dir.clone(), true, reason.clone()));
+            bad_dirs.push((dir.clone(), reason));
+        }
+    }
+    entries.retain(|(path, is_dir)| {
+        if let Some((dir, reason)) = bad_dirs.iter().find(|(b, _)| path.starts_with(b)) {
+            if !is_dir {
+                let reason = format!("in {}: {}", local_path_in(root, dir), reason);
+                rejected.push((path.clone(), false, reason));
+            }
+            return false;
+        }
+        if !is_dir {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(reason) = crate::api::file_name_problem(&name) {
+                rejected.push((path.clone(), false, reason));
+                return false;
+            }
+        }
+        true
+    });
+    rejected
 }
 
 /// `file_path` inside the uploaded directory `local_dir`, with `/` on
@@ -3760,6 +3890,103 @@ mod tests {
         assert_eq!(body.used, 12970640066);
         assert_eq!(body.softdeleted, 5011);
         assert!(!body.nolimit);
+    }
+
+    #[test]
+    fn test_keep_within_o2_limits() {
+        let root = Path::new("/r");
+        let long_dir = "d".repeat(256);
+        let long_file = format!("{}.txt", "ñ".repeat(126)); // 256 bytes
+        let mut deep = String::from("/r");
+        for i in 0..20 {
+            deep.push_str(&format!("/l{}", i));
+        }
+        let mut entries: Vec<(PathBuf, bool)> = vec![
+            ("/r".into(), true),
+            ("/r/ok.txt".into(), false),
+            (format!("/r/{}", "ñ".repeat(125) + ".txt").into(), false), // 254 bytes
+            (format!("/r/{}", long_file).into(), false),
+            (format!("/r/{}", long_dir).into(), true),
+            (format!("/r/{}/in.txt", long_dir).into(), false),
+            (format!("/r/{}", "é".repeat(255)).into(), true), // 255 chars, 510 bytes
+        ];
+        // `/r` becomes level 1; l0 is level 2 … l18 is level 20, l19 is 21.
+        let mut path = String::from("/r");
+        for i in 0..20 {
+            path.push_str(&format!("/l{}", i));
+            entries.push((path.clone().into(), true));
+        }
+        entries.push((format!("{}/deep.txt", deep).into(), false));
+        let rejected = keep_within_o2_limits(&mut entries, root, 1);
+        let kept: Vec<String> = entries
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        assert!(kept.contains(&"/r/ok.txt".to_string()));
+        assert!(kept.iter().any(|k| k.ends_with(&"é".repeat(255))));
+        assert!(kept.iter().any(|k| k.ends_with("/l18")));
+        assert!(!kept
+            .iter()
+            .any(|k| k.contains("/l19") || k.contains(&long_dir) || k.contains(&long_file)));
+        let why = |end: &str| {
+            rejected
+                .iter()
+                .find(|(p, _, _)| p.display().to_string().ends_with(end))
+                .map(|(_, d, r)| (*d, r.clone()))
+        };
+        assert!(why(&long_file).unwrap().1.contains("256 bytes"));
+        assert!(why(&long_dir).unwrap().1.contains("256 characters"));
+        assert!(why("/in.txt").unwrap().1.starts_with("in "));
+        assert!(why("/l19").unwrap().1.contains("levels"));
+        assert!(!why("/deep.txt").unwrap().0);
+        assert_eq!(rejected.iter().filter(|(_, d, _)| !d).count(), 3);
+    }
+
+    #[test]
+    fn test_folder_level() {
+        let f = |id, name: &str, parentid| crate::api::FolderEntry {
+            id,
+            name: name.into(),
+            parentid,
+        };
+        let folders = vec![f(1, "/", 0), f(2, "a", 1), f(3, "b", 2)];
+        assert_eq!(folder_level(1, &folders), 0);
+        assert_eq!(folder_level(3, &folders), 2);
+    }
+
+    /// Paths longer than Windows' old 260-character limit (MAX_PATH):
+    /// walked, measured and opened the way `upload-dir` does, from a
+    /// relative root as users type it. Run on Windows in CI with
+    /// `LongPathsEnabled` off.
+    #[test]
+    fn test_long_local_paths() {
+        use std::io::{Read, Seek};
+        let root = PathBuf::from(format!("target/longpath-test-{}", std::process::id()));
+        let mut dir = root.clone();
+        for i in 0..8 {
+            dir.push(format!("{:02}-{}", i, "x".repeat(48)));
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{}.txt", "f".repeat(60)));
+        std::fs::write(&file, b"hello long path").unwrap();
+        assert!(std::path::absolute(&file).unwrap().as_os_str().len() > 400);
+
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        walk_dir(&root, &mut entries, &mut skipped).unwrap();
+        let found: Vec<&PathBuf> = entries.iter().filter(|(_, d)| !d).map(|(p, _)| p).collect();
+        assert_eq!(found, [&file]);
+        assert_eq!(dir_size(&root), 15);
+        assert!(local_path_in(&root, &file).ends_with(&format!("{}.txt", "f".repeat(60))));
+        let meta = std::fs::metadata(found[0]).unwrap();
+        assert_eq!(meta.len(), 15);
+        assert!(meta.modified().is_ok());
+        let mut f = std::fs::File::open(found[0]).unwrap();
+        f.seek(std::io::SeekFrom::Start(6)).unwrap();
+        let mut rest = String::new();
+        f.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "long path");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

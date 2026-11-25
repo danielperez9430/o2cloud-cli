@@ -55,6 +55,55 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// O2 Cloud's limits on names and nesting, measured live (2026-11-25):
+/// a longer file name is `COM-1010` "Invalid filename", a longer folder
+/// name `FOL-1000`, a deeper folder `FOL-1015`. A file name is limited in
+/// UTF-8 bytes (129 `ñ`), a folder name in characters (255 `ñ` fit).
+/// The root folder is level 0; folders can go 20 levels below it.
+pub const MAX_FILE_NAME_BYTES: usize = 255;
+pub const MAX_FOLDER_NAME_CHARS: usize = 255;
+pub const MAX_FOLDER_LEVEL: usize = 20;
+
+/// Why O2 Cloud won't take `name` as a file name, if it won't.
+pub fn file_name_problem(name: &str) -> Option<String> {
+    (name.len() > MAX_FILE_NAME_BYTES).then(|| {
+        format!(
+            "the name is {} bytes long; O2 Cloud takes file names of up to {} bytes \
+             (UTF-8: fewer characters if they have accents or are from other alphabets)",
+            name.len(),
+            MAX_FILE_NAME_BYTES
+        )
+    })
+}
+
+/// Why O2 Cloud won't take `name` as a folder name, if it won't.
+pub fn folder_name_problem(name: &str) -> Option<String> {
+    let chars = name.chars().count();
+    (chars > MAX_FOLDER_NAME_CHARS).then(|| {
+        format!(
+            "the name is {} characters long; O2 Cloud takes folder names of up to {}",
+            chars, MAX_FOLDER_NAME_CHARS
+        )
+    })
+}
+
+/// What a folder or rename error means, for the codes that don't say.
+fn limit_hint(err: &str) -> String {
+    if err.contains("FOL-1015") {
+        format!(
+            " — O2 Cloud allows at most {} levels of folders below the root",
+            MAX_FOLDER_LEVEL
+        )
+    } else if err.contains("COM-1010") {
+        format!(
+            " — the name may be too long: O2 Cloud takes file names of up to {} bytes",
+            MAX_FILE_NAME_BYTES
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// What an upload rejection means, for the codes that look like
 /// something else. The server checks the content, not just the name:
 /// tested with `.jpg` files, `MED-1050` is an empty file, one of zeros or
@@ -67,6 +116,8 @@ fn rejection_hint(err: &str) -> &'static str {
     } else if err.contains("MED-1000") {
         " — the server couldn't read the file: it may be damaged or incomplete \
          (e.g. a leftover .tmp)"
+    } else if err.contains("COM-1010") {
+        " — the name may be too long: O2 Cloud takes file names of up to 255 bytes"
     } else {
         ""
     }
@@ -1475,6 +1526,12 @@ impl O2Client {
         parent_id: u64,
         auth: &AuthConfig,
     ) -> Result<u64, O2Error> {
+        if let Some(problem) = folder_name_problem(name) {
+            return Err(O2Error::Invalid(format!(
+                "can't create folder: {}",
+                problem
+            )));
+        }
         let url = format!("{}/sapi/media/folder", BASE_URL);
         let now = crate::util::system_time_to_compact_iso(std::time::SystemTime::now());
 
@@ -1521,7 +1578,11 @@ impl O2Client {
             )));
         }
         if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Api(format!("Create folder failed: {}", err)));
+            return Err(O2Error::Api(format!(
+                "Create folder failed: {}{}",
+                err,
+                limit_hint(&err)
+            )));
         }
 
         #[derive(Deserialize)]
@@ -1557,6 +1618,12 @@ impl O2Client {
         parent_id: u64,
         auth: &AuthConfig,
     ) -> Result<(), O2Error> {
+        if let Some(problem) = folder_name_problem(name) {
+            return Err(O2Error::Invalid(format!(
+                "can't name the folder so: {}",
+                problem
+            )));
+        }
         let body = serde_json::json!({
             "data": { "id": folder_id, "name": name, "parentid": parent_id }
         });
@@ -1866,7 +1933,12 @@ impl O2Client {
             )));
         }
         if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Api(format!("{} failed: {}", what, err)));
+            return Err(O2Error::Api(format!(
+                "{} failed: {}{}",
+                what,
+                err,
+                limit_hint(&err)
+            )));
         }
         Ok(raw_body)
     }
@@ -1946,6 +2018,12 @@ impl O2Client {
         auth: &AuthConfig,
     ) -> Result<(), O2Error> {
         let new_name = changes["name"].as_str().unwrap_or(current_name);
+        if let Some(problem) = file_name_problem(new_name) {
+            return Err(O2Error::Invalid(format!(
+                "can't name the file so: {}",
+                problem
+            )));
+        }
         // The guesses from the names first, then every other route, in
         // case the server classes an extension differently.
         let mut kinds: Vec<&str> = Vec::new();
@@ -2014,7 +2092,11 @@ impl O2Client {
             )));
         }
         if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Api(format!("Update file failed: {}", err)));
+            return Err(O2Error::Api(format!(
+                "Update file failed: {}{}",
+                err,
+                limit_hint(&err)
+            )));
         }
         Ok(())
     }

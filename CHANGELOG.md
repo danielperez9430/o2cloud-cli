@@ -2,7 +2,21 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased]
+## [0.13.3] — 2026-11-26
+
+### Added
+- O2 Cloud's limits, measured live, are checked before sending: a file
+  name can be up to 255 bytes in UTF-8, a folder name up to 255
+  characters, and folders can go 20 levels below the root. `upload-dir`
+  leaves out the folders (with what's in them) and files that exceed
+  them, says why, lists them in `--json` with an `error`, and uploads the
+  rest instead of stopping at the first folder it can't create (#24).
+  `mkdir`, `rename` and `upload` say which limit was hit, before any
+  request where possible, and the server's `COM-1010`, `FOL-1015` errors
+  get an explanation.
+- Tests run on Windows in CI, with long path support turned off as on
+  most PCs, including one with a local path of over 400 characters:
+  paths over 260 characters work without `LongPathsEnabled` (#24).
 
 ### Fixed
 - The Linux binary in the releases is built on Ubuntu 24.04 instead of
@@ -14,6 +28,8 @@ All notable changes to o2cloud-cli will be documented in this file.
 - Dependabot opens a weekly PR for the Rust dependencies and one for the
   GitHub Actions, and CI also runs weekly, so a new security advisory
   (`cargo audit`) shows up before a release instead of stopping it.
+- Dependencies updated, among them `wry` 0.57 (the login window) and
+  `dirs` 7 (same session and cache locations as before).
 
 ## [0.13.2] — 2026-11-25
 
