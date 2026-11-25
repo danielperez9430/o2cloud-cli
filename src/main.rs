@@ -399,10 +399,6 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
         eprintln!("→ Session expired");
     }
 
-    eprintln!(
-        "→ Opening login window... (without one, run `o2cloud login --jsessionid ... \
-         --validationkey ...` instead)"
-    );
     let new_auth = login_like(&auth).await?;
     eprintln!("✓ Re-login successful");
     let new_client = api::O2Client::new(&new_auth.device_id)?;
@@ -416,6 +412,12 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
 async fn login_like(old: &config::AuthConfig) -> Result<config::AuthConfig, O2Error> {
     let was_app_login = old.oauth_client.is_some() || old.platform == "ios";
     if !was_app_login {
+        // Logging in with browser cookies gives the same kind of session;
+        // for an app session it would give a web one, so it isn't offered.
+        eprintln!(
+            "  (without a login window, run `o2cloud login --jsessionid ... \
+             --validationkey ...` instead)"
+        );
         return crate::auth::login().await;
     }
     match config::OAuthClient::from_env().or_else(|| old.oauth_client.clone()) {
@@ -505,6 +507,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                         ),
                         "session": state,
                         "renews_silently": cfg.sapi_auth_header().is_some(),
+                        "login": if cfg.sapi_auth_header().is_some() { "app" } else { "web" },
                         "storage": storage,
                     }));
                     return Ok(());
@@ -517,6 +520,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                     println!("  Since: {}", util::format_unix_utc(cfg.logged_in_at));
                 }
                 println!("  Session: {}", session);
+                if cfg.sapi_auth_header().is_some() {
+                    println!("  Login: app (the session renews itself without SMS)");
+                } else {
+                    println!("  Login: web (the session ends after a while without use)");
+                }
                 if let Some(space) = storage {
                     if space.nolimit {
                         println!("  Storage: {} used", util::format_size(space.used));
@@ -527,12 +535,6 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                             util::format_size(space.quota)
                         );
                     }
-                }
-                if cfg.sapi_auth_header().is_none() {
-                    println!(
-                        "  Sessions end after a while without use (gone after 2 h idle \
-                         in our tests) and aren't renewed automatically."
-                    );
                 }
             }
             Err(_) if json => {

@@ -13,6 +13,14 @@ All notable changes to o2cloud-cli will be documented in this file.
   deleted by `logout`), so this works without the environment variables;
   `o2cloud login` also keeps using that login until `logout`. Without
   them, it now says it is falling back to the web login.
+- The login says which kind it is, before the window opens and in the
+  window's title: `app` (the session renews itself without SMS) or `web`
+  (it ends after a while without use). `status` shows it too, and
+  `status --json` has a new `login` field (`app` or `web`). The kind is
+  still chosen as before, by `--oauth-client-id`/`--oauth-client-secret`
+  (or their environment variables) or the stored session, never by
+  asking. Logging in again after an app session no longer suggests the
+  browser-cookie login, which would give a web session.
 
 ### Changed
 - `upload-dir` skips empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` and

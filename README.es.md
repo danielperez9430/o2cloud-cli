@@ -65,7 +65,7 @@ También necesitas una cuenta de O2 Cloud (una línea móvil de O2 España).
 
 ```console
 $ o2cloud login
-→ Opening login window (enter your phone number there)...
+→ Opening login window (web login: the session ends after a while without use; enter your phone number there)...
 ✓ Login successful — tokens saved
 Logged in as +34 600000000
 
@@ -132,7 +132,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 - `share`: `id` y `url` del enlace, `path` y `folder` (`true` para una carpeta; su `id` es el que acepta `unshare`).
 - `shares`: un array de enlaces: `id`, `url`, `uses`, `folderid`, `path` y `foldername`.
 - `quota`: `quota`, `used`, `free`, `softdeleted` (en la papelera), en bytes, y `nolimit`.
-- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` o `unknown`), `renews_silently` y `storage` (como en `quota`, o `null`).
+- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` o `unknown`), `renews_silently`, `login` (`app` para el login que se renueva sin SMS, `web` si no) y `storage` (como en `quota`, o `null`).
 
 ### 🎯 Cómo indicar archivos y carpetas
 

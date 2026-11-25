@@ -27,8 +27,12 @@ pub async fn login() -> Result<AuthConfig, O2Error> {
     let authorize_url = client.start_oauth_login().await?;
 
     // Step 3 – WebView OAuth2 (must run on main thread for macOS/Cocoa)
-    eprintln!("→ Opening login window (enter your phone number there)...");
-    let (code, state) = webview::intercept_oauth_code_sync(&authorize_url)?;
+    eprintln!(
+        "→ Opening login window (web login: the session ends after a while without use; \
+         enter your phone number there)..."
+    );
+    let (code, state) =
+        webview::intercept_oauth_code_sync(&authorize_url, "O2 Cloud — Iniciar sesión (web)")?;
     eprintln!("✓ Authorization code received");
 
     // Step 4 – Complete the login
@@ -113,8 +117,12 @@ pub async fn login_native(client_id: &str, client_secret: &str) -> Result<AuthCo
     // Build the Telefónica authorization URL (with our own PKCE) and open
     // the login window to intercept the code.
     let (authorize_url, verifier, _state) = client.build_oidc_authorize_url(client_id)?;
-    eprintln!("→ Opening login window (enter your phone number there)...");
-    let (code, _state) = webview::intercept_oauth_code_sync(&authorize_url)?;
+    eprintln!(
+        "→ Opening login window (app login: the session renews itself without SMS; \
+         enter your phone number there)..."
+    );
+    let (code, _state) =
+        webview::intercept_oauth_code_sync(&authorize_url, "O2 Cloud — Iniciar sesión (app)")?;
     eprintln!("✓ Authorization code received");
 
     eprintln!("→ Exchanging token and logging in...");
