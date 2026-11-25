@@ -74,7 +74,10 @@ jobs:
   build-linux:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the binary needs at least the glibc of
+    # the system it is built on (2.39 here), so a newer runner would stop
+    # it from running on Ubuntu 24.04 LTS and similar.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -90,6 +93,12 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: Check the glibc it needs
+        run: |
+          need=$(objdump -T target/release/o2cloud | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "Needs $need"
+          [ "$(printf '%s\n' "$need" GLIBC_2.39 | sort -V | tail -1)" = GLIBC_2.39 ] || { echo "::error::needs $need, more than Ubuntu 24.04's GLIBC_2.39"; exit 1; }
 
       - name: Package
         run: |

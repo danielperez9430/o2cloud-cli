@@ -2,6 +2,14 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- The Linux binary in the releases is built on Ubuntu 24.04 instead of
+  the newest runner, so it runs on Ubuntu 24.04 LTS and other systems
+  with glibc 2.39 or later. Recent ones needed glibc 2.43 and failed to
+  start there (`GLIBC_2.43 not found`). The release now checks it.
+
 ## [0.13.2] — 2026-11-25
 
 ### Fixed

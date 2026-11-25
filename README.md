@@ -32,7 +32,7 @@ With [Rust](https://rustup.rs) installed:
 cargo install o2cloud-cli
 ```
 
-Pre-built binaries for macOS, Linux and Windows are attached to each [GitHub release](https://github.com/danielperez9430/o2cloud-cli/releases).
+Pre-built binaries for macOS, Linux and Windows are attached to each [GitHub release](https://github.com/danielperez9430/o2cloud-cli/releases). The Linux one needs glibc 2.39 or later (Ubuntu 24.04, Debian 13, Fedora 40 or newer); on older systems, install with `cargo install`.
 
 <details>
 <summary>🛠️ Build from source</summary>
