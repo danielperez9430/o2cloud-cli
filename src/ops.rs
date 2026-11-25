@@ -1001,10 +1001,184 @@ async fn upload_local_file(
                     ids.join(", ")
                 )));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(explain_rejection(e, path)),
         }
     }
     Ok(uploaded)
+}
+
+/// `err` with the reason, if O2 Cloud rejected the JPEG at `path`
+/// (`MED-1000`) because of a colour profile it can't read.
+fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
+    let is_jpeg = path.extension().is_some_and(|e| {
+        let e = e.to_string_lossy().to_lowercase();
+        e == "jpg" || e == "jpeg"
+    });
+    match err {
+        O2Error::Api(msg) if is_jpeg && msg.contains("MED-1000") => {
+            match std::fs::read(path)
+                .ok()
+                .and_then(|b| crate::jpeg::profile_problem(&b))
+            {
+                Some(problem) => O2Error::Api(format!(
+                    "{} — {}",
+                    msg.split(" — ").next().unwrap_or(&msg),
+                    crate::jpeg::describe(&problem)
+                )),
+                None => O2Error::Api(msg),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Check the JPEGs in `paths` (files, or folders searched recursively)
+/// for colour profiles O2 Cloud can't read, and with `apply` repair the
+/// ones that can be (see `crate::jpeg`). A repaired file is written next
+/// to the original and renamed over it, keeping its modification date.
+pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Error> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut entries = Vec::new();
+            let mut skipped = 0;
+            walk_dir(path, &mut entries, &mut skipped)?;
+            files.extend(entries.into_iter().filter(|(_, d)| !d).map(|(p, _)| p));
+        } else if path.exists() {
+            files.push(path.clone());
+        } else {
+            return Err(O2Error::NotFound(format!("{}", path.display())));
+        }
+    }
+    files.retain(|p| {
+        p.extension().is_some_and(|e| {
+            let e = e.to_string_lossy().to_lowercase();
+            e == "jpg" || e == "jpeg"
+        })
+    });
+
+    let (mut mislabelled, mut fixed, mut damaged, mut failed) = (0, 0, 0, 0);
+    let mut results = Vec::new();
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("  ⚠ Can't read {}", path.display());
+            failed += 1;
+            continue;
+        };
+        let Some(problem) = crate::jpeg::profile_problem(&bytes) else {
+            continue;
+        };
+        let mut entry = serde_json::json!({ "path": path.display().to_string() });
+        match problem {
+            crate::jpeg::ProfileProblem::Mislabelled { chunks } => {
+                mislabelled += 1;
+                entry["problem"] = "mislabelled".into();
+                entry["chunks"] = chunks.into();
+                if apply {
+                    match rewrite_keeping_date(path, &bytes) {
+                        Ok(()) => {
+                            fixed += 1;
+                            eprintln!(
+                                "  ✓ {}: colour profile relabelled ({} chunks)",
+                                path.display(),
+                                chunks
+                            );
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            eprintln!("  ⚠ {}: couldn't repair it: {}", path.display(), e);
+                            entry["error"] = e.to_string().into();
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "  • {}: colour profile split into {} chunks all labelled \"1 of 1\"",
+                        path.display(),
+                        chunks
+                    );
+                }
+                entry["fixed"] = (apply && entry.get("error").is_none()).into();
+            }
+            crate::jpeg::ProfileProblem::Broken { chunks } => {
+                damaged += 1;
+                eprintln!(
+                    "  ✗ {}: colour profile damaged ({} chunks); can't be repaired safely — \
+                     save it again from an image editor",
+                    path.display(),
+                    chunks
+                );
+                entry["problem"] = "damaged".into();
+                entry["chunks"] = chunks.into();
+                entry["fixed"] = false.into();
+            }
+        }
+        results.push(entry);
+    }
+
+    eprintln!("Checked {} JPEG file(s).", files.len());
+    if mislabelled == 0 && damaged == 0 {
+        eprintln!("✓ None has a colour profile O2 Cloud can't read.");
+    }
+    if mislabelled > 0 && apply {
+        eprintln!(
+            "✓ Repaired {} of {} with a mislabelled colour profile.",
+            fixed, mislabelled
+        );
+    } else if mislabelled > 0 {
+        eprintln!(
+            "→ {} with a mislabelled colour profile; run again with --apply to repair them \
+             (only the labels change, not the image).",
+            mislabelled
+        );
+    }
+    if damaged > 0 {
+        eprintln!(
+            "⚠ {} with a damaged colour profile; save them again from an image editor.",
+            damaged
+        );
+    }
+    if json {
+        print_json(&serde_json::Value::Array(results));
+    }
+    if failed > 0 {
+        return Err(O2Error::Invalid(format!(
+            "{} file(s) couldn't be read or repaired",
+            failed
+        )));
+    }
+    Ok(())
+}
+
+/// Replace `path` with its repaired contents: written to a temporary
+/// file in the same folder, checked, given the original's modification
+/// date and permissions, then renamed over it.
+fn rewrite_keeping_date(path: &Path, original: &[u8]) -> Result<(), O2Error> {
+    let fixed = crate::jpeg::repair(original)
+        .ok_or_else(|| O2Error::Invalid("nothing to repair".into()))?;
+    let meta = std::fs::metadata(path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{}.o2fix-{}", name, std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, &fixed)?;
+        file.sync_all()?;
+        if let Ok(modified) = meta.modified() {
+            file.set_modified(modified)?;
+        }
+        drop(file);
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+        if std::fs::read(&tmp)? != fixed {
+            return Err(std::io::Error::other("the written file doesn't match"));
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
 }
 
 /// Whether uploading needs the cloud's file listing: to skip what is

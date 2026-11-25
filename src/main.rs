@@ -3,6 +3,7 @@ mod auth;
 mod cache;
 mod config;
 mod error;
+mod jpeg;
 mod ops;
 mod util;
 mod webview;
@@ -315,6 +316,24 @@ enum Commands {
         /// Create missing parent folders too, and don't fail if the folder exists
         #[arg(short, long)]
         parents: bool,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find JPEGs whose colour profile O2 Cloud can't read (upload fails
+    /// with MED-1000), and with --apply repair them without touching the
+    /// image. Works on local files only; no login needed
+    FixJpeg {
+        /// Files or folders to check (folders are searched recursively)
+        #[arg(required = true)]
+        paths: Vec<String>,
+
+        /// Repair the files in place (keeping their dates); without it,
+        /// only list them
+        #[arg(long)]
+        apply: bool,
 
         /// Print JSON instead of messages
         #[arg(long)]
@@ -717,6 +736,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         } => {
             let (client, auth) = require_client_and_auth().await?;
             ops::make_folder(&client, &auth, &path, parents, json).await?;
+        }
+
+        Commands::FixJpeg { paths, apply, json } => {
+            let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            ops::fix_jpeg(&paths, apply, json)?;
         }
 
         Commands::Quota { json } => {

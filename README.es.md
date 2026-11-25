@@ -107,6 +107,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 📦 `mv <archivo o carpeta> <carpeta>` | Mueve un archivo o una carpeta a otra carpeta |
 | 📑 `cp <archivo> <carpeta>` | Copia un archivo en el servidor (`--name` para darle otro nombre) |
 | ✏️ `rename <archivo o carpeta> <nombre>` | Renombra un archivo o una carpeta |
+| 🩹 `fix-jpeg <archivo o carpeta>` | Busca los JPEG cuyo perfil de color O2 Cloud no puede leer (`MED-1000`); `--apply` los repara sin tocar la imagen |
 | 📊 `quota` | Muestra el almacenamiento usado, libre y en la papelera |
 
 Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
@@ -251,6 +252,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 - **Archivos de más de 4 GB** (lo máximo que O2 Cloud acepta en una subida): se suben en partes llamadas `nombre.001`, `nombre.002`, … `download nombre` las une, igual que `cat nombre.0* > nombre` (o 7-Zip) si descargas las partes de otra forma. `download` se niega a unirlas si falta alguna parte o alguna no encaja con las demás. Subir un archivo en partes donde ya hay partes de otro con el mismo nombre se rechaza, salvo que `--skip-existing` reanude el mismo archivo.
 - **`--skip-existing`** salta un archivo (o parte) que la carpeta de destino ya tiene con el mismo nombre y tamaño (no compara el contenido). Las subidas nuevas tardan hasta un minuto en aparecer en los listados, así que justo después de subir puede no verlas todavía.
 - **O2 Cloud revisa lo que guarda:** los archivos vacíos o dañados, o cuyo contenido no coincide con la extensión (una foto HEIC llamada `.jpg`), se rechazan con `MED-1050` o `MED-1000`, siempre, así que reintentar no sirve. `upload-dir` ni siquiera envía los `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacíos (los muestra como omitidos); el resto de archivos vacíos sí se suben.
+- **JPEG rechazados con `MED-1000`:** algunos programas parten un perfil de color grande en trozos numerados todos como "1 de 1"; los visores lo toleran, O2 Cloud no. `o2cloud fix-jpeg ./fotos` los lista y `--apply` renumera los trozos en el sitio (unos 12 bytes; se conservan la imagen y la fecha del archivo). Cuando una subida falla por esto, el error lo dice.
 - **Límites de O2 Cloud:** un nombre de archivo puede tener hasta 255 bytes en UTF-8 (255 letras sin acentos, pero solo 129 `ñ` o 87 `日`), un nombre de carpeta hasta 255 caracteres, y las carpetas pueden anidarse hasta 20 niveles por debajo de la raíz. No hay límite para la ruta completa, porque O2 Cloud guarda nombres, no rutas. `upload-dir` deja fuera (y avisa de) lo que no cabe en vez de pararse a medias, y `mkdir`, `rename` y `upload` dicen qué límite se ha superado.
 - **Rutas largas en Windows:** las rutas locales de más de 260 caracteres funcionan sin activar `LongPathsEnabled`.
 - **Enlaces simbólicos:** los enlaces a archivos se siguen; los enlaces a carpetas se omiten con un aviso, para que un enlace a una carpeta superior no provoque un bucle infinito.

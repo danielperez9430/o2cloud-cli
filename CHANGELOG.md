@@ -5,6 +5,15 @@ All notable changes to o2cloud-cli will be documented in this file.
 ## [0.13.3] — 2026-11-26
 
 ### Added
+- `fix-jpeg <files or folders> [--apply]`: finds JPEGs whose colour
+  profile is split into chunks all labelled "1 of 1", which O2 Cloud
+  rejects with `MED-1000`, and with `--apply` relabels the chunks in
+  place (about 12 bytes; the image, the file's date and permissions are
+  kept; written to a temporary file, checked, then renamed over it). A
+  profile whose chunks don't add up is reported, not touched. Works on
+  local files, without logging in. An upload rejected this way now says
+  why and suggests the command. Found with photos from #24: 16 of 16
+  repaired ones uploaded, all had failed before.
 - O2 Cloud's limits, measured live, are checked before sending: a file
   name can be up to 255 bytes in UTF-8, a folder name up to 255
   characters, and folders can go 20 levels below the root. `upload-dir`
