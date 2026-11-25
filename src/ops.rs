@@ -761,6 +761,7 @@ pub const DEFAULT_PART_SIZE: u64 = (MAX_UPLOAD_MB - 96) * 1024 * 1024;
 const MAX_PARTS: u64 = 999;
 
 /// Options shared by `upload`, `upload-dir` and `upload-zip`.
+#[derive(Clone)]
 pub struct UploadOptions {
     /// Don't upload a file (or part) the target folder already has with
     /// the same name and size, so an interrupted upload can be resumed.
@@ -772,6 +773,134 @@ pub struct UploadOptions {
     /// so `cat name.0* > name` joins them too); `download name` joins
     /// them. At least 2.
     pub part_size: u64,
+    /// `upload-dir --update`: also upload the files that changed locally
+    /// (see `decide`), replacing the cloud's copy.
+    pub update: bool,
+    /// `upload-dir --dry-run`: only say what would be done.
+    pub dry_run: bool,
+}
+
+/// How much newer a local file must be than the cloud's copy to count as
+/// changed: filesystems like FAT keep times to 2 seconds.
+const MODIFY_WINDOW_MS: u64 = 2000;
+
+/// What `upload-dir` does with one local file, given what the cloud has.
+#[derive(Debug, Clone, PartialEq)]
+enum Decision {
+    /// Not in the cloud (or its folder doesn't exist yet): upload it.
+    New,
+    /// In the cloud with the same size, and not newer locally.
+    Unchanged,
+    /// In the cloud with the same size, but older locally: left alone.
+    Older,
+    /// Changed locally (another size, or newer): with `--update`, upload
+    /// it and move these cloud files (the old version) to the trash.
+    Changed { old: Vec<u64> },
+    /// Some of its parts are in the cloud: upload the rest.
+    Resume,
+}
+
+impl Decision {
+    /// The word for `--json` (`--dry-run` uses the same ones).
+    fn label(&self) -> &'static str {
+        match self {
+            Decision::New => "upload",
+            Decision::Unchanged => "unchanged",
+            Decision::Older => "older",
+            Decision::Changed { .. } => "update",
+            Decision::Resume => "resume",
+        }
+    }
+}
+
+/// A file's modification time as O2 Cloud stores it (whole seconds, in
+/// Unix ms; before 1970 is 0, after 9999 the end of 9999).
+fn mtime_ms(t: std::time::SystemTime) -> u64 {
+    const END_OF_9999: u64 = 253_402_300_799;
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .min(END_OF_9999)
+        * 1000
+}
+
+/// Decide what to do with the local file `name` (`size` bytes, modified
+/// at `local_ms`) for the cloud folder `folder` (`None` if it doesn't
+/// exist yet). `mdates` has the cloud files' `modificationdate` by ID.
+/// Without `update`, a changed file is left to the plain upload as before
+/// (`New` if its size differs, `Unchanged` otherwise).
+fn decide(
+    name: &str,
+    size: u64,
+    local_ms: u64,
+    folder: Option<u64>,
+    existing: &ExistingFiles,
+    mdates: &HashMap<u64, u64>,
+    opts: &UploadOptions,
+) -> Decision {
+    let Some(folder) = folder else {
+        return Decision::New;
+    };
+    let by_date = |id: u64, old: Vec<u64>| match mdates.get(&id) {
+        Some(&cloud) if local_ms > cloud + MODIFY_WINDOW_MS => {
+            if opts.update {
+                Decision::Changed { old }
+            } else {
+                Decision::Unchanged
+            }
+        }
+        Some(&cloud) if local_ms + MODIFY_WINDOW_MS < cloud => Decision::Older,
+        _ => Decision::Unchanged,
+    };
+    let Ok(pieces) = upload_pieces(name, size, opts.part_size) else {
+        return Decision::New;
+    };
+    if pieces.len() == 1 {
+        let Some(found) = existing
+            .get(&(folder, name.to_string()))
+            .filter(|f| !f.is_empty())
+        else {
+            return Decision::New;
+        };
+        let all: Vec<u64> = found.iter().map(|(_, id)| *id).collect();
+        return match found
+            .iter()
+            .filter(|(s, _)| *s == size)
+            .map(|(_, id)| *id)
+            .min()
+        {
+            Some(id) => by_date(id, all),
+            None if opts.update => Decision::Changed { old: all },
+            None => Decision::New,
+        };
+    }
+    // In parts: compare the parts in the cloud with the ones it would make.
+    let mut there: Vec<(usize, &Vec<(u64, u64)>)> = existing
+        .iter()
+        .filter(|((f, _), _)| *f == folder)
+        .filter_map(|((_, n), found)| part_number(name, n).map(|n| (n, found)))
+        .collect();
+    if there.is_empty() {
+        return Decision::New;
+    }
+    there.sort_by_key(|(n, _)| *n);
+    let all: Vec<u64> = there
+        .iter()
+        .flat_map(|(_, f)| f.iter().map(|(_, id)| *id))
+        .collect();
+    let complete = there.len() == pieces.len()
+        && there.iter().all(|(n, f)| {
+            matches!((pieces.get(n - 1), f.as_slice()), (Some((_, _, len)), [(s, _)]) if s == len)
+        });
+    if complete {
+        by_date(there[0].1[0].1, all)
+    } else if check_existing_parts(name, &pieces, folder, existing, true).is_ok() {
+        Decision::Resume
+    } else if opts.update {
+        Decision::Changed { old: all }
+    } else {
+        // Left to the upload, which says the parts don't match.
+        Decision::New
+    }
 }
 
 /// Files already in the cloud, by (folder ID, name): their sizes and IDs.
@@ -1010,6 +1139,96 @@ async fn upload_local_file(
     Ok(uploaded)
 }
 
+/// What became of one file in `upload-dir`.
+enum FileOutcome {
+    Uploaded(Uploaded),
+    /// Uploaded to replace the cloud files listed (now in the trash).
+    Updated(Uploaded, Vec<u64>),
+    /// Older locally than in the cloud: left alone.
+    Older,
+    /// `--dry-run`: what would be done.
+    Planned(Decision),
+}
+
+/// Upload a changed file and replace the cloud's copy `old` with it. The
+/// server renames an upload whose name is taken (`a (1).jpg`, and
+/// `a.jpg (1).001` for parts), so: upload, and only once that worked move
+/// `old` to the trash and give the new files their names. A failed upload
+/// leaves the old version untouched.
+#[allow(clippy::too_many_arguments)]
+async fn replace_file(
+    client: &O2Client,
+    auth: &AuthConfig,
+    path: &Path,
+    name: &str,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    folder_id: u64,
+    opts: &UploadOptions,
+    old: &[u64],
+) -> Result<Uploaded, O2Error> {
+    let fresh = UploadOptions {
+        skip_existing: false,
+        ..opts.clone()
+    };
+    let up = upload_local_file(
+        client,
+        auth,
+        path,
+        name,
+        size,
+        modified,
+        folder_id,
+        &ExistingFiles::new(),
+        &fresh,
+    )
+    .await?;
+    let ids: Vec<String> = up.ids.iter().map(u64::to_string).collect();
+    client.delete_files(old, auth).await.map_err(|e| {
+        O2Error::Api(format!(
+            "the new version of {} is up (ids: {}), but the old one couldn't be moved \
+             to the trash: {}",
+            name,
+            ids.join(", "),
+            e
+        ))
+    })?;
+    for (k, id) in up.ids.iter().enumerate() {
+        let new_name = if up.parts > 0 {
+            part_name(name, k + 1)
+        } else {
+            name.to_string()
+        };
+        client
+            .update_file(
+                *id,
+                &new_name,
+                serde_json::json!({ "name": new_name }),
+                auth,
+            )
+            .await
+            .map_err(|e| {
+                O2Error::Api(format!(
+                    "the new version of {} is up (ids: {}) and the old one is in the trash, \
+                     but it couldn't be renamed to {}: {}",
+                    name,
+                    ids.join(", "),
+                    new_name,
+                    e
+                ))
+            })?;
+    }
+    Ok(up)
+}
+
+/// The folder `name` inside `parent`, if it exists.
+fn find_folder(folders: &[crate::api::FolderEntry], name: &str, parent: u64) -> Option<u64> {
+    folders
+        .iter()
+        .find(|f| f.name == name && f.parentid == parent)
+        .map(|f| f.id)
+}
+
 /// `err` with the reason, if O2 Cloud rejected the JPEG at `path`
 /// (`MED-1000`) because of a colour profile it can't read.
 fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
@@ -1187,7 +1406,7 @@ fn rewrite_keeping_date(path: &Path, original: &[u8]) -> Result<(), O2Error> {
 /// Whether uploading needs the cloud's file listing: to skip what is
 /// already there, or to check for old parts before a split upload.
 fn needs_listing(opts: &UploadOptions, largest_file: u64) -> bool {
-    opts.skip_existing || largest_file > opts.part_size
+    opts.skip_existing || opts.update || opts.dry_run || largest_file > opts.part_size
 }
 
 /// The root folder's ID.
@@ -1349,10 +1568,15 @@ pub async fn upload_dir(
         Ok((entries, skipped_entries, total_size, largest_file))
     })
     .await?;
-    let existing = if needs_listing(opts, largest_file) {
-        existing_files(&client.get_all_media(auth).await?)
+    let (existing, mdates) = if needs_listing(opts, largest_file) {
+        let media = client.get_all_media(auth).await?;
+        let mdates: HashMap<u64, u64> = media
+            .iter()
+            .filter_map(|m| m.modificationdate.map(|d| (m.id, d)))
+            .collect();
+        (existing_files(&media), mdates)
     } else {
-        ExistingFiles::new()
+        (ExistingFiles::new(), HashMap::new())
     };
 
     // Count files for progress
@@ -1412,7 +1636,12 @@ pub async fn upload_dir(
     }
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
     eprintln!(
-        "→ Uploading {} ({}) — {} files, {} dirs{}...",
+        "→ {} {} ({}) — {} files, {} dirs{}...",
+        if opts.dry_run {
+            "Checking (dry run)"
+        } else {
+            "Uploading"
+        },
         local_dir.display(),
         format_size(total_size),
         file_count,
@@ -1427,11 +1656,16 @@ pub async fn upload_dir(
     // Map: local dir path → o2 folder id. The uploaded directory itself
     // becomes a folder of the same name inside the target (like `cp -r`);
     // `canonicalize` gives `.`/`..` their real name.
-    let mut folder_map: HashMap<PathBuf, u64> = HashMap::new();
+    // With --dry-run nothing is created: a folder that doesn't exist yet
+    // is `None`, and everything in it is new.
+    let mut folder_map: HashMap<PathBuf, Option<u64>> = HashMap::new();
     let top_id = match top_name {
-        Some(name) => ensure_folder(client, auth, &existing_folders, &name, root_parent).await?,
+        Some(name) if opts.dry_run => find_folder(&existing_folders, &name, root_parent),
+        Some(name) => {
+            Some(ensure_folder(client, auth, &existing_folders, &name, root_parent).await?)
+        }
         // Only `/` has no name: upload its contents into the target.
-        None => root_parent,
+        None => Some(root_parent),
     };
     folder_map.insert(local_dir.to_path_buf(), top_id);
 
@@ -1446,12 +1680,17 @@ pub async fn upload_dir(
         let parent_local = dir_path.parent().unwrap();
         let parent_o2 = folder_map.get(parent_local).copied().unwrap_or(top_id);
         let name = dir_path.file_name().unwrap().to_string_lossy().into_owned();
-        let folder_id = ensure_folder(client, auth, &existing_folders, &name, parent_o2).await?;
+        let folder_id = if opts.dry_run {
+            parent_o2.and_then(|p| find_folder(&existing_folders, &name, p))
+        } else {
+            let parent = parent_o2.unwrap_or(root_parent);
+            Some(ensure_folder(client, auth, &existing_folders, &name, parent).await?)
+        };
         folder_map.insert(dir_path.clone(), folder_id);
     }
 
     // Upload files, `opts.jobs` at a time.
-    let files: Vec<(usize, &PathBuf, u64)> = entries
+    let files: Vec<(usize, &PathBuf, Option<u64>)> = entries
         .iter()
         .filter(|(_, is_dir)| !is_dir)
         .enumerate()
@@ -1461,12 +1700,12 @@ pub async fn upload_dir(
             (i, file_path, parent_o2)
         })
         .collect();
-    let existing = &existing;
+    let (existing, mdates) = (&existing, &mdates);
     // Set when the session expires: the files not started yet are left
     // alone rather than each failing the same way.
     let expired = std::sync::atomic::AtomicBool::new(false);
     let expired = &expired;
-    let mut results: Vec<(usize, serde_json::Value, Result<Uploaded, O2Error>)> =
+    let mut results: Vec<(usize, serde_json::Value, Result<FileOutcome, O2Error>)> =
         futures_util::stream::iter(files)
             .map(|(i, file_path, parent_o2)| async move {
                 let name = file_path
@@ -1487,13 +1726,15 @@ pub async fn upload_dir(
                 let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = file_meta.and_then(|m| m.modified().ok());
 
-                eprintln!(
-                    "  [{}/{}] 📄 {} ({})",
-                    i + 1,
-                    file_count,
-                    name,
-                    format_size(size)
-                );
+                if !opts.dry_run {
+                    eprintln!(
+                        "  [{}/{}] 📄 {} ({})",
+                        i + 1,
+                        file_count,
+                        name,
+                        format_size(size)
+                    );
+                }
 
                 let mut result = serde_json::json!({
                     "local": local_path_in(local_dir, file_path),
@@ -1513,12 +1754,51 @@ pub async fn upload_dir(
                         skipped: 0,
                         empty: true,
                     };
-                    return (i, result, Ok(empty));
+                    return (i, result, Ok(FileOutcome::Uploaded(empty)));
                 }
-                let uploaded = upload_local_file(
-                    client, auth, file_path, &name, size, modified, parent_o2, existing, opts,
-                )
-                .await;
+                let decision = (opts.update || opts.dry_run).then(|| {
+                    let local_ms = modified.map(mtime_ms).unwrap_or(0);
+                    decide(&name, size, local_ms, parent_o2, existing, mdates, opts)
+                });
+                let local = local_path_in(local_dir, file_path);
+                if let (true, Some(decision)) = (opts.dry_run, &decision) {
+                    match &decision {
+                        Decision::New => eprintln!("  + {}", local),
+                        Decision::Changed { .. } => eprintln!("  ↻ {} (changed locally)", local),
+                        Decision::Resume => eprintln!("  … {} (parts missing)", local),
+                        _ => {}
+                    }
+                    result["action"] = decision.label().into();
+                    result["dry_run"] = true.into();
+                    if let Decision::Changed { old } = decision {
+                        result["replaces"] = old.clone().into();
+                    }
+                    let decision = decision.clone();
+                    return (i, result, Ok(FileOutcome::Planned(decision)));
+                }
+                let folder = parent_o2.unwrap_or(root_parent);
+                let uploaded = match decision {
+                    Some(Decision::Changed { old }) => {
+                        eprintln!("  ↻ {} changed locally: replacing the cloud's copy", local);
+                        replace_file(
+                            client, auth, file_path, &name, size, modified, folder, opts, &old,
+                        )
+                        .await
+                        .map(|up| FileOutcome::Updated(up, old))
+                    }
+                    Some(Decision::Older) => {
+                        eprintln!(
+                            "  = {} is older locally than in the cloud: left alone",
+                            local
+                        );
+                        Ok(FileOutcome::Older)
+                    }
+                    _ => upload_local_file(
+                        client, auth, file_path, &name, size, modified, folder, existing, opts,
+                    )
+                    .await
+                    .map(FileOutcome::Uploaded),
+                };
                 match &uploaded {
                     Err(O2Error::SessionExpired) => {
                         if !expired.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -1537,40 +1817,81 @@ pub async fn upload_dir(
 
     // One entry per file for `--json`, failed uploads included.
     let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
-    let mut empty_images = 0usize;
+    let (mut empty_images, mut updated, mut older) = (0usize, 0usize, 0usize);
+    let mut planned: HashMap<&'static str, usize> = HashMap::new();
+    let set_ids = |result: &mut serde_json::Value, up: &Uploaded| {
+        if up.parts > 0 {
+            result["parts"] = up.ids.clone().into();
+        } else {
+            result["id"] = up.ids[0].into();
+        }
+    };
     let results: Vec<serde_json::Value> = results
         .into_iter()
         .map(|(_, mut result, uploaded)| {
             match uploaded {
-                Ok(up) if up.empty => {
+                Ok(FileOutcome::Uploaded(up)) if up.empty => {
                     result["skipped"] = true.into();
+                    result["action"] = "empty".into();
                     empty_images += 1;
                 }
-                Ok(up) => {
-                    if up.skipped == up.ids.len() {
+                Ok(FileOutcome::Uploaded(up)) => {
+                    let all_skipped = up.skipped == up.ids.len();
+                    if all_skipped {
                         skipped += 1;
                     } else {
                         succeeded += 1;
                     }
-                    result["skipped"] = (up.skipped == up.ids.len()).into();
-                    if up.parts > 0 {
-                        result["parts"] = up.ids.into();
-                    } else {
-                        result["id"] = up.ids[0].into();
-                    }
+                    result["skipped"] = all_skipped.into();
+                    result["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
+                    set_ids(&mut result, &up);
+                }
+                Ok(FileOutcome::Updated(up, old)) => {
+                    updated += 1;
+                    result["skipped"] = false.into();
+                    result["action"] = "updated".into();
+                    result["replaced"] = old.into();
+                    set_ids(&mut result, &up);
+                }
+                Ok(FileOutcome::Older) => {
+                    older += 1;
+                    result["skipped"] = true.into();
+                    result["action"] = "older".into();
+                }
+                Ok(FileOutcome::Planned(d)) => {
+                    *planned.entry(d.label()).or_default() += 1;
                 }
                 Err(O2Error::SessionExpired) => {
                     result["error"] = O2Error::SessionExpired.to_string().into();
+                    result["action"] = "failed".into();
                     not_done += 1;
                 }
                 Err(e) => {
                     result["error"] = e.to_string().into();
+                    result["action"] = "failed".into();
                     failed += 1;
                 }
             }
             result
         })
         .collect();
+    if opts.dry_run {
+        let n = |k| planned.get(k).copied().unwrap_or(0);
+        eprintln!(
+            "Dry run: {} to upload, {} to update, {} to resume, {} unchanged, {} older locally, \
+             {} empty image(s); nothing was changed.",
+            n("upload"),
+            n("update"),
+            n("resume"),
+            n("unchanged"),
+            n("older"),
+            empty_images
+        );
+        if json {
+            print_json(&serde_json::Value::Array(results));
+        }
+        return Ok(());
+    }
 
     let too_big = rejected.iter().filter(|(_, is_dir, _)| !is_dir).count();
     if too_big > 0 {
@@ -1587,6 +1908,18 @@ pub async fn upload_dir(
     }
     if skipped > 0 {
         eprintln!("  ({} file(s) were already uploaded)", skipped);
+    }
+    if older > 0 {
+        eprintln!(
+            "  ({} file(s) are older locally than in the cloud; left alone)",
+            older
+        );
+    }
+    if updated > 0 {
+        eprintln!(
+            "↻ Updated {} changed file(s); their old versions are in the trash",
+            updated
+        );
     }
     if empty_images > 0 {
         eprintln!(
@@ -1614,6 +1947,7 @@ pub async fn upload_dir(
                     "local": local_path_in(local_dir, path),
                     "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
                     "error": reason,
+                    "action": "failed",
                 })
             },
         ));
@@ -4067,6 +4401,88 @@ mod tests {
         assert_eq!(body.used, 12970640066);
         assert_eq!(body.softdeleted, 5011);
         assert!(!body.nolimit);
+    }
+
+    #[test]
+    fn test_decide() {
+        let opts = |update| UploadOptions {
+            skip_existing: true,
+            jobs: 1,
+            part_size: 100,
+            update,
+            dry_run: false,
+        };
+        let mut existing = ExistingFiles::new();
+        existing.insert((1, "same.txt".into()), vec![(10, 11)]);
+        existing.insert((1, "dup.txt".into()), vec![(10, 21), (10, 22)]);
+        existing.insert((1, "sized.txt".into()), vec![(5, 31)]);
+        // A file in 3 parts of 100 + 100 + 50.
+        existing.insert((1, "big.001".into()), vec![(100, 41)]);
+        existing.insert((1, "big.002".into()), vec![(100, 42)]);
+        existing.insert((1, "big.003".into()), vec![(50, 43)]);
+        existing.insert((1, "half.001".into()), vec![(100, 51)]);
+        let t = 1_600_000_000_000u64;
+        let mdates: HashMap<u64, u64> = [(11, t), (21, t), (22, t), (31, t), (41, t), (51, t)]
+            .into_iter()
+            .collect();
+        let d = |name, size, local, update| {
+            decide(
+                name,
+                size,
+                local,
+                Some(1),
+                &existing,
+                &mdates,
+                &opts(update),
+            )
+        };
+
+        assert_eq!(d("new.txt", 10, t, true), Decision::New);
+        assert_eq!(
+            decide("x", 1, t, None, &existing, &mdates, &opts(true)),
+            Decision::New
+        );
+        assert_eq!(d("same.txt", 10, t, true), Decision::Unchanged);
+        // Within the 2 s window either way: unchanged.
+        assert_eq!(d("same.txt", 10, t + 2000, true), Decision::Unchanged);
+        assert_eq!(d("same.txt", 10, t - 2000, true), Decision::Unchanged);
+        assert_eq!(
+            d("same.txt", 10, t + 3000, true),
+            Decision::Changed { old: vec![11] }
+        );
+        // Without --update a newer file of the same size is left alone.
+        assert_eq!(d("same.txt", 10, t + 3000, false), Decision::Unchanged);
+        assert_eq!(d("same.txt", 10, t - 3000, true), Decision::Older);
+        assert_eq!(
+            d("sized.txt", 10, t, true),
+            Decision::Changed { old: vec![31] }
+        );
+        assert_eq!(d("sized.txt", 10, t, false), Decision::New);
+        // Duplicates: both replaced.
+        assert_eq!(
+            d("dup.txt", 10, t + 5000, true),
+            Decision::Changed { old: vec![21, 22] }
+        );
+        // Parts: all there, by the first part's date.
+        assert_eq!(d("big", 250, t, true), Decision::Unchanged);
+        let mut changed = match d("big", 250, t + 5000, true) {
+            Decision::Changed { old } => old,
+            other => panic!("{:?}", other),
+        };
+        changed.sort();
+        assert_eq!(changed, [41, 42, 43]);
+        assert!(matches!(d("big", 260, t, true), Decision::Changed { .. }));
+        assert_eq!(d("half", 250, t, true), Decision::Resume);
+    }
+
+    #[test]
+    fn test_mtime_ms() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_600_000_000_999);
+        assert_eq!(mtime_ms(t), 1_600_000_000_000);
+        assert_eq!(
+            mtime_ms(std::time::UNIX_EPOCH - std::time::Duration::from_secs(5)),
+            0
+        );
     }
 
     #[test]

@@ -45,6 +45,8 @@ impl UploadFlags {
             skip_existing: self.skip_existing,
             jobs,
             part_size: self.part_size.unwrap_or(ops::DEFAULT_PART_SIZE).max(2),
+            update: false,
+            dry_run: false,
         }
     }
 }
@@ -203,6 +205,17 @@ enum Commands {
         /// aren't created
         #[arg(long, value_delimiter = ',', value_name = "EXT")]
         ext: Vec<String>,
+
+        /// Also upload files that changed locally (another size, or a
+        /// newer modification date than in the cloud) and move the cloud's
+        /// old copy to the trash. Implies --skip-existing
+        #[arg(long)]
+        update: bool,
+
+        /// Only say what would be uploaded or updated; nothing is created,
+        /// uploaded or moved to the trash
+        #[arg(long)]
+        dry_run: bool,
 
         /// Print JSON instead of messages
         #[arg(long)]
@@ -642,6 +655,8 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             upload,
             jobs,
             ext,
+            update,
+            dry_run,
             json,
         } => {
             let local_path = PathBuf::from(&path);
@@ -660,7 +675,12 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 &auth,
                 &local_path,
                 folder,
-                &upload.options(jobs.into()),
+                &ops::UploadOptions {
+                    skip_existing: upload.skip_existing || update,
+                    update,
+                    dry_run,
+                    ..upload.options(jobs.into())
+                },
                 &extensions,
                 json,
             )
