@@ -661,6 +661,14 @@ mod tests {
         .unwrap()
     }
 
+    /// A path with `/` between its parts on every system.
+    fn slashed(p: &Path) -> String {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     #[test]
     fn test_plan() {
         let f = |id, name: &str, parentid| crate::api::FolderEntry {
@@ -688,12 +696,12 @@ mod tests {
         let tree = Tree::new(&folders, &folder_name, &media);
 
         let (dirs, jobs) = plan(&tree, &media, 2, Some("Fotos"), &[], false);
-        let mut dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        let mut dirs: Vec<String> = dirs.iter().map(|d| slashed(d)).collect();
         dirs.sort();
         assert_eq!(dirs, ["Fotos", "Fotos/2024", "Fotos/Vacío"]);
         let mut got: Vec<(String, Option<u64>, usize)> = jobs
             .iter()
-            .map(|j| (j.local.display().to_string(), j.size, j.pieces.len()))
+            .map(|j| (slashed(&j.local), j.size, j.pieces.len()))
             .collect();
         got.sort();
         assert_eq!(
@@ -708,7 +716,7 @@ mod tests {
 
         // The root: straight into the output, phone-app files included.
         let (_, jobs) = plan(&tree, &media, 1, None, &[], false);
-        let locals: HashSet<String> = jobs.iter().map(|j| j.local.display().to_string()).collect();
+        let locals: HashSet<String> = jobs.iter().map(|j| slashed(&j.local)).collect();
         assert!(
             locals.contains("root.txt")
                 && locals.contains("phone.jpg")
@@ -717,7 +725,7 @@ mod tests {
 
         // --ext: only matching files, and only the folders that hold them.
         let (dirs, jobs) = plan(&tree, &media, 2, Some("Fotos"), &["png".to_string()], false);
-        let dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        let dirs: Vec<String> = dirs.iter().map(|d| slashed(d)).collect();
         assert_eq!(dirs, ["Fotos", "Fotos/2024"]);
         assert_eq!(jobs.len(), 1);
     }
