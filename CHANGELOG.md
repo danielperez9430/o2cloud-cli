@@ -2,6 +2,14 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.14.1] — 2026-11-26
+
+### Fixed
+- `download-dir /` (the whole account) failed for every file in the root,
+  such as the phone app's photos, when the `-o` folder didn't exist yet
+  and nothing else created it: with `--ext`, or with no subfolders to
+  download. The output folder is now always created first.
+
 ## [0.14.0] — 2026-11-26
 
 ### Added

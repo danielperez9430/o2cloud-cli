@@ -116,7 +116,9 @@ pub async fn download_dir(
         return Ok(());
     }
 
-    for dir in &dirs {
+    // The output directory itself too: the root's files go straight into
+    // it, and with --ext or no subfolders nothing else would create it.
+    for dir in std::iter::once(&PathBuf::new()).chain(&dirs) {
         let path = out_root.join(dir);
         std::fs::create_dir_all(&path).map_err(|e| {
             O2Error::Io(std::io::Error::new(
