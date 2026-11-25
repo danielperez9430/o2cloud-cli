@@ -60,7 +60,7 @@ You also need an O2 Cloud account (an O2 Spain mobile line).
 
 ```console
 $ o2cloud login
-→ Opening login window (enter your phone number there)...
+→ Opening login window (web login: the session ends after a while without use; enter your phone number there)...
 ✓ Login successful — tokens saved
 Logged in as +34 600000000
 
@@ -127,7 +127,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 - `share`: `id` and `url` of the link, `path`, and `folder` (`true` for a folder; its `id` is what `unshare` takes).
 - `shares`: an array of links: `id`, `url`, `uses`, `folderid`, `path` and `foldername`.
 - `quota`: `quota`, `used`, `free`, `softdeleted` (in the trash), in bytes, and `nolimit`.
-- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` or `unknown`), `renews_silently`, and `storage` (as in `quota`, or `null`).
+- `status`: `logged_in`, `phone`, `since`, `session` (`active`, `expired` or `unknown`), `renews_silently`, `login` (`app` for the login that renews without SMS, `web` otherwise), and `storage` (as in `quota`, or `null`).
 
 ### 🎯 Naming files and folders
 

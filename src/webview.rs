@@ -31,6 +31,7 @@ enum AppEvent {
 /// State for the temporary WebView window.
 struct WebViewState {
     auth_url: String,
+    title: String,
     tx: Option<mpsc::Sender<Result<(String, String), O2Error>>>,
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     #[allow(dead_code)]
@@ -58,7 +59,7 @@ impl ApplicationHandler<AppEvent> for WebViewState {
             .expect("proxy must be set before run_app");
 
         let mut attributes = Window::default_attributes();
-        attributes.title = "O2 Cloud — Iniciar sesión".into();
+        attributes.title = self.title.clone();
         attributes.inner_size = Some(winit::dpi::LogicalSize::new(480, 700).into());
 
         let window = match event_loop.create_window(attributes) {
@@ -123,7 +124,8 @@ impl ApplicationHandler<AppEvent> for WebViewState {
 /// thread because `winit`'s `EventLoop` requires the Cocoa run loop to
 /// live on the main thread.  It blocks until the user completes (or
 /// cancels) authentication.
-pub fn intercept_oauth_code_sync(auth_url: &str) -> Result<(String, String), O2Error> {
+/// `title` is the window's title.
+pub fn intercept_oauth_code_sync(auth_url: &str, title: &str) -> Result<(String, String), O2Error> {
     let (tx, rx) = mpsc::channel::<Result<(String, String), O2Error>>();
     let auth_url = auth_url.to_string();
 
@@ -138,6 +140,7 @@ pub fn intercept_oauth_code_sync(auth_url: &str) -> Result<(String, String), O2E
 
     let mut state = WebViewState {
         auth_url,
+        title: title.to_string(),
         tx: Some(tx),
         proxy: Some(proxy),
         window: None,
