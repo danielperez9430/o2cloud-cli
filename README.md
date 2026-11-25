@@ -102,6 +102,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 📦 `mv <file or folder> <folder>` | Move a file or folder to another folder |
 | 📑 `cp <file> <folder>` | Copy a file on the server (`--name` to name the copy) |
 | ✏️ `rename <file or folder> <name>` | Rename a file or folder |
+| 🩹 `fix-jpeg <file or folder>` | Find JPEGs whose colour profile O2 Cloud can't read (`MED-1000`); `--apply` repairs them without touching the image |
 | 📊 `quota` | Show storage used, free and in the trash |
 
 Run `o2cloud <command> --help` for all the options.
@@ -246,6 +247,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing or doesn't belong with the others. Uploading a file in parts where parts of one with the same name already are is refused, unless `--skip-existing` resumes the same file.
 - **`--skip-existing`** skips a file (or part) the target folder already has with the same name and size (the contents aren't compared). New uploads take up to a minute to show up in listings, so right after an upload it may not see them yet.
 - **O2 Cloud checks what it stores:** files that are empty or damaged, or whose content doesn't match their extension (a HEIC photo named `.jpg`), are rejected with `MED-1050` or `MED-1000`, every time, so retrying won't help. `upload-dir` doesn't send empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` files at all (it lists them as skipped); other empty files are uploaded.
+- **JPEGs rejected with `MED-1000`:** some software splits a large colour profile into chunks all labelled "1 of 1"; viewers cope, O2 Cloud doesn't. `o2cloud fix-jpeg ./photos` lists them and `--apply` relabels the chunks in place (about 12 bytes; the image and the file's date are kept). When an upload fails this way, the error says so.
 - **O2 Cloud's limits:** a file name can be up to 255 bytes in UTF-8 (255 plain letters, but only 129 `ñ` or 87 `日`), a folder name up to 255 characters, and folders can go 20 levels below the root. There is no limit on the whole path, since O2 Cloud stores names, not paths. `upload-dir` leaves out (and reports) what doesn't fit instead of stopping halfway, and `mkdir`, `rename` and `upload` say which limit was hit.
 - **Long paths on Windows:** local paths over 260 characters work without turning on `LongPathsEnabled`.
 - **Symlinks:** links to files are followed; links to folders are skipped with a warning, so a link back to a parent folder can't cause an endless loop.
