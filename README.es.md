@@ -240,7 +240,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 ## ⚠️ A tener en cuenta
 
 > [!NOTE]
-> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login (o, si no tienes, vuelve a entrar con las [cookies del navegador](#️-login-sin-ventana-de-acceso)). `o2cloud status` te dice si la tuya sigue activa. El modo avanzado **Mantener la sesión sin SMS** de más abajo sí se renueva solo.
+> **La sesión dura unas 24 horas** y no se renueva sola. Cuando caduca, el siguiente comando vuelve a abrir la ventana de login (o, si no tienes, vuelve a entrar con las [cookies del navegador](#️-login-sin-ventana-de-acceso)). `o2cloud status` te dice si la tuya sigue activa. Si caduca a mitad de un comando, el comando se para con "the session has expired"; un `upload-dir` largo se detiene en vez de fallar archivo a archivo, y al relanzarlo con `--skip-existing` pide login y sigue donde se quedó. El modo avanzado **Mantener la sesión sin SMS** de más abajo sí se renueva solo.
 
 > [!WARNING]
 > **Los enlaces compartidos son públicos**: cualquiera con la URL puede abrir el archivo o la carpeta. Compartir la carpeta raíz no está permitido, porque publicaría toda la cuenta.

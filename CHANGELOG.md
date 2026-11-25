@@ -2,6 +2,19 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.13.1] — 2026-11-25
+
+### Changed
+- If the session expires in the middle of a command (web logins last
+  about 24 hours), the command stops with "the session has expired"
+  instead of a generic API error. `upload-dir` stops starting new files,
+  lists the ones it didn't upload, and exits with an error; running it
+  again with `--skip-existing` logs in and carries on (#24).
+- Upload rejections `MED-1050` and `MED-1000` say what they mean: the
+  server checks the file's content, so an empty or damaged file, or one
+  whose format doesn't match its extension (a HEIC photo named `.jpg`),
+  is rejected every time (#24).
+
 ## [0.13.0] — 2026-11-24
 
 ### Added
