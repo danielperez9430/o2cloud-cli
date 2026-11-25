@@ -2,6 +2,24 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.15.0] — 2026-11-26
+
+### Added
+- `upload-dir --update`: also uploads files that changed locally (another
+  size, or a modification date more than 2 s newer than the cloud copy's
+  `modificationdate`) and replaces the cloud's copy (#24). The server
+  renames an upload whose name is taken (`a (1).txt`, `a.dat (1).001`),
+  so the new version is uploaded first, and only once that worked the
+  old one goes to the trash and the new one gets its name: a failed
+  upload leaves the old version alone. Files older locally are left
+  alone. Implies `--skip-existing`. Files in parts are compared by their
+  parts. Nothing is deleted that wasn't replaced.
+- `upload-dir --dry-run`: says what it would upload, update or resume,
+  and what is unchanged or older locally, without creating, uploading or
+  moving anything; with `--json`, one entry per file with `dry_run` and
+  the `action` it would take.
+- `upload-dir --json` entries have an `action` field.
+
 ## [0.14.1] — 2026-11-26
 
 ### Fixed

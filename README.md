@@ -91,7 +91,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
 | ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where, `--skip-existing` to resume) |
-| 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2; `--ext jpg,mp4` for only those extensions) |
+| 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2; `--ext jpg,mp4` for only those extensions; `--update` to also replace files changed locally; `--dry-run` to only see what it would do) |
 | 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
 | ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
 | 📥 `download-dir <folder>` | Download a folder and everything in it, or `/` for the whole account (`-o <dir>`, `-j <n>`, `--skip-existing` to resume, `--ext`, `--dry-run`) |
@@ -122,7 +122,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 - `ls`: `path`, `folders` (`id`, `name`, and the `files` and `size` they hold, `null` with `--folder-only`) and `files` (`id`, `name`, `size`, `date`). `ls -a --json` is a list of files with their `path`.
 - `find`: `folders` (`id`, `name`, `path`) and `files` (`id`, `name`, `size`, `date`, `path`), as in `ls --json`.
 - `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs in scripts: a new upload takes up to a minute to show up in `ls`, `find` and paths, but `rm`, `mv`, `rename`, `cp`, `share` and `download` accept its ID right away (waiting a few seconds for the server if needed).
-- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed. An empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` isn't sent, since O2 Cloud rejects empty images: it has `"skipped": true, "empty": true` and no `id`.
+- `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed. An empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` isn't sent, since O2 Cloud rejects empty images: it has `"skipped": true, "empty": true` and no `id`. Each entry also has `action`: `uploaded`, `skipped`, `empty`, `failed`, and with `--update` `updated` (plus `replaced`, the IDs of the old version now in the trash) or `older`. With `--dry-run` the entries have `"dry_run": true` and `action` is what it would do: `upload`, `update` (plus `replaces`), `resume`, `unchanged` or `older`.
 - `download`: `id` (or `parts`, for a file uploaded in parts), `name`, `path` (where it was saved, absolute) and `size`.
 - `download-dir`: an array with one object per file: `id` (or `parts`), `name`, `cloud` (its path in the cloud), `local` (its path inside the output folder, with `/`), `path` (where it was saved), `folderid`, `size`, `action` (`downloaded`, `skipped` or `failed`), `error` if it failed, and `renamed: true` if its local name differs from the cloud one. With `--dry-run`, the same without `action`.
 - `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
@@ -185,6 +185,8 @@ o2cloud upload-dir ./holidays                    # creates holidays/ and uploads
 o2cloud upload-zip ./project                     # uploads project.zip
 o2cloud upload-dir ./holidays --skip-existing    # resume: skip what's already there
 o2cloud upload-dir ./holidays --ext jpg,mp4      # only these extensions
+o2cloud upload-dir ./holidays --update --dry-run # what changed since the last upload
+o2cloud upload-dir ./holidays --update           # upload new and changed files
 o2cloud upload ./disk.iso                        # over 4 GB: disk.iso.001, disk.iso.002, …
 
 o2cloud download /Documents/report.pdf           # saved as ./report.pdf
@@ -251,6 +253,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
 - **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them, and the files the OS keeps for itself (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` includes them inside the zip.
 - **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing or doesn't belong with the others. Uploading a file in parts where parts of one with the same name already are is refused, unless `--skip-existing` resumes the same file.
+- **`upload-dir --update`** also uploads files that changed locally: another size, or a modification date more than 2 seconds newer than the one the cloud's copy was uploaded with. It uploads the new version first and only when that worked moves the old one to the trash and gives the new one its name (O2 Cloud would otherwise call it `name (1)`), so a failed upload leaves the old version alone. A file older locally than in the cloud is left alone. Files are compared by name, size and date, not contents. `--dry-run` shows what it would upload or update without changing anything: worth running first on a large folder.
 - **`--skip-existing`** skips a file (or part) the target folder already has with the same name and size (the contents aren't compared). New uploads take up to a minute to show up in listings, so right after an upload it may not see them yet.
 - **O2 Cloud checks what it stores:** files that are empty or damaged, or whose content doesn't match their extension (a HEIC photo named `.jpg`), are rejected with `MED-1050` or `MED-1000`, every time, so retrying won't help. `upload-dir` doesn't send empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` files at all (it lists them as skipped); other empty files are uploaded.
 - **JPEGs rejected with `MED-1000`:** some software splits a large colour profile into chunks all labelled "1 of 1"; viewers cope, O2 Cloud doesn't. `o2cloud fix-jpeg ./photos` lists them and `--apply` relabels the chunks in place (about 12 bytes; the image and the file's date are kept). When an upload fails this way, the error says so.
