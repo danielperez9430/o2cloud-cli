@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master]
+  # Weekly, so a new security advisory (`cargo audit`) or lint shows up
+  # as a failed run (GitHub emails it) before the next release, not
+  # during it. The build jobs only run on tags.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read

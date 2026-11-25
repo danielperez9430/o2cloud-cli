@@ -10,6 +10,11 @@ All notable changes to o2cloud-cli will be documented in this file.
   with glibc 2.39 or later. Recent ones needed glibc 2.43 and failed to
   start there (`GLIBC_2.43 not found`). The release now checks it.
 
+### Maintenance
+- Dependabot opens a weekly PR for the Rust dependencies and one for the
+  GitHub Actions, and CI also runs weekly, so a new security advisory
+  (`cargo audit`) shows up before a release instead of stopping it.
+
 ## [0.13.2] — 2026-11-25
 
 ### Fixed
