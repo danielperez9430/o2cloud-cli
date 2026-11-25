@@ -96,7 +96,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <texto>` | Busca archivos y carpetas por nombre |
 | ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde, `--skip-existing` para reanudar) |
-| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto; `--ext jpg,mp4` para solo esas extensiones) |
+| 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto; `--ext jpg,mp4` para solo esas extensiones; `--update` para reemplazar también los que cambiaron en local; `--dry-run` para ver solo lo que haría) |
 | 🗜️ `upload-zip <dir>` | Comprime una carpeta y sube el `.zip` |
 | ⬇️ `download <archivo>` | Descarga un archivo (`-o` para elegir la ruta local) |
 | 📥 `download-dir <carpeta>` | Descarga una carpeta con todo su contenido, o `/` para toda la cuenta (`-o <dir>`, `-j <n>`, `--skip-existing` para reanudar, `--ext`, `--dry-run`) |
@@ -127,7 +127,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 - `ls`: `path`, `folders` (`id`, `name`, y los `files` y el `size` que contienen, `null` con `--folder-only`) y `files` (`id`, `name`, `size`, `date`). `ls -a --json` es una lista de archivos con su `path`.
 - `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
 - `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs en los scripts: una subida nueva tarda hasta un minuto en aparecer en `ls`, `find` y las rutas, pero `rm`, `mv`, `rename`, `cp`, `share` y `download` aceptan su ID al momento (esperando unos segundos al servidor si hace falta).
-- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló. Un `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacío no se envía, porque O2 Cloud rechaza las imágenes vacías: lleva `"skipped": true, "empty": true` y no tiene `id`.
+- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló. Un `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacío no se envía, porque O2 Cloud rechaza las imágenes vacías: lleva `"skipped": true, "empty": true` y no tiene `id`. Cada entrada lleva además `action`: `uploaded`, `skipped`, `empty`, `failed`, y con `--update` `updated` (más `replaced`, los IDs de la versión antigua, ahora en la papelera) u `older`. Con `--dry-run` las entradas llevan `"dry_run": true` y `action` es lo que haría: `upload`, `update` (más `replaces`), `resume`, `unchanged` u `older`.
 - `download`: `id` (o `parts`, para un archivo subido en partes), `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
 - `download-dir`: un array con un objeto por archivo: `id` (o `parts`), `name`, `cloud` (su ruta en la nube), `local` (su ruta dentro de la carpeta de destino, con `/`), `path` (dónde se guardó), `folderid`, `size`, `action` (`downloaded`, `skipped` o `failed`), `error` si falló, y `renamed: true` si su nombre local es distinto del de la nube. Con `--dry-run`, lo mismo sin `action`.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
@@ -190,6 +190,8 @@ o2cloud upload-dir ./vacaciones                   # crea vacaciones/ y sube dent
 o2cloud upload-zip ./proyecto                     # sube proyecto.zip
 o2cloud upload-dir ./vacaciones --skip-existing   # reanudar: salta lo que ya está
 o2cloud upload-dir ./vacaciones --ext jpg,mp4     # solo esas extensiones
+o2cloud upload-dir ./vacaciones --update --dry-run  # qué ha cambiado desde la última subida
+o2cloud upload-dir ./vacaciones --update          # sube lo nuevo y lo que cambió
 o2cloud upload ./disco.iso                        # más de 4 GB: disco.iso.001, disco.iso.002, …
 
 o2cloud download /Documentos/informe.pdf          # se guarda como ./informe.pdf
@@ -256,6 +258,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 - **`download` nunca sobrescribe** un archivo local que ya exista. Sin `-o`, solo usa el nombre del archivo, nunca una carpeta enviada por el servidor.
 - **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza, y los que el sistema guarda para sí mismo (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` sí los incluye dentro del zip.
 - **Archivos de más de 4 GB** (lo máximo que O2 Cloud acepta en una subida): se suben en partes llamadas `nombre.001`, `nombre.002`, … `download nombre` las une, igual que `cat nombre.0* > nombre` (o 7-Zip) si descargas las partes de otra forma. `download` se niega a unirlas si falta alguna parte o alguna no encaja con las demás. Subir un archivo en partes donde ya hay partes de otro con el mismo nombre se rechaza, salvo que `--skip-existing` reanude el mismo archivo.
+- **`upload-dir --update`** sube también los archivos que cambiaron en local: con otro tamaño, o con una fecha de modificación más de 2 segundos posterior a la que tenía la copia de la nube al subirse. Primero sube la versión nueva y solo cuando eso ha ido bien manda la antigua a la papelera y le da a la nueva su nombre (si no, O2 Cloud la llamaría `nombre (1)`), así que una subida fallida deja intacta la versión antigua. Un archivo más antiguo en local que en la nube no se toca. Se comparan nombre, tamaño y fecha, no el contenido. `--dry-run` muestra lo que subiría o actualizaría sin cambiar nada: conviene usarlo primero en una carpeta grande.
 - **`--skip-existing`** salta un archivo (o parte) que la carpeta de destino ya tiene con el mismo nombre y tamaño (no compara el contenido). Las subidas nuevas tardan hasta un minuto en aparecer en los listados, así que justo después de subir puede no verlas todavía.
 - **O2 Cloud revisa lo que guarda:** los archivos vacíos o dañados, o cuyo contenido no coincide con la extensión (una foto HEIC llamada `.jpg`), se rechazan con `MED-1050` o `MED-1000`, siempre, así que reintentar no sirve. `upload-dir` ni siquiera envía los `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacíos (los muestra como omitidos); el resto de archivos vacíos sí se suben.
 - **JPEG rechazados con `MED-1000`:** algunos programas parten un perfil de color grande en trozos numerados todos como "1 de 1"; los visores lo toleran, O2 Cloud no. `o2cloud fix-jpeg ./fotos` los lista y `--apply` renumera los trozos en el sitio (unos 12 bytes; se conservan la imagen y la fecha del archivo). Cuando una subida falla por esto, el error lo dice.
