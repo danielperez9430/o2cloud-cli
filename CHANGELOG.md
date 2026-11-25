@@ -2,6 +2,18 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.13.2] — 2026-11-25
+
+### Changed
+- `upload-dir` skips empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` and
+  `.heic` files instead of sending them: O2 Cloud rejects every one
+  (`MED-1050`, or `MED-1000` for HEIC), so they used to show up as
+  failures. They are listed as `∅ … is empty: skipped`, counted in the
+  summary, and in `--json` have `"skipped": true, "empty": true` and no
+  `id`. `upload` of one fails at once with a clear message. Other empty
+  files, which O2 Cloud accepts (`.txt`, `.pdf`, `.mp4`, `.heif`, `.svg`,
+  RAW…), are still uploaded (#24).
+
 ## [0.13.1] — 2026-11-25
 
 ### Changed

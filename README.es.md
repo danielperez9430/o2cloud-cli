@@ -125,7 +125,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 - `ls`: `path`, `folders` (`id`, `name`, y los `files` y el `size` que contienen, `null` con `--folder-only`) y `files` (`id`, `name`, `size`, `date`). `ls -a --json` es una lista de archivos con su `path`.
 - `find`: `folders` (`id`, `name`, `path`) y `files` (`id`, `name`, `size`, `date`, `path`), como en `ls --json`.
 - `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs en los scripts: una subida nueva tarda hasta un minuto en aparecer en `ls`, `find` y las rutas, pero `rm`, `mv`, `rename`, `cp`, `share` y `download` aceptan su ID al momento (esperando unos segundos al servidor si hace falta).
-- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló.
+- `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló. Un `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacío no se envía, porque O2 Cloud rechaza las imágenes vacías: lleva `"skipped": true, "empty": true` y no tiene `id`.
 - `download`: `id` (o `parts`, para un archivo subido en partes), `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
 - `cp`: `id` de la copia, `name`, `folderid`, `path` y `source` (el ID del original).
