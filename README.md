@@ -94,6 +94,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2; `--ext jpg,mp4` for only those extensions) |
 | 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
 | ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
+| 📥 `download-dir <folder>` | Download a folder and everything in it, or `/` for the whole account (`-o <dir>`, `-j <n>`, `--skip-existing` to resume, `--ext`, `--dry-run`) |
 | 🗑️ `rm <file or folder>` | Move to the trash (`-r` for folders, `-y` to skip confirmation) |
 | 🔗 `share <file or folder>` | Create a public link and print its URL |
 | 📋 `shares` | List shared folders |
@@ -109,7 +110,7 @@ Run `o2cloud <command> --help` for all the options.
 
 ### 🧩 JSON output
 
-`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr, and errors are `Error: …` on stderr with exit code 1.
+`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr, and errors are `Error: …` on stderr with exit code 1.
 
 ```console
 $ o2cloud upload ./movie.mkv --json 2>/dev/null
@@ -123,6 +124,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 - `upload` and `upload-zip`: `id`, `name`, `folderid`, `size` and `skipped` (`true` if `--skip-existing` found it already there). A file uploaded in parts has `parts` (one ID per part) instead of `id`. Use the IDs in scripts: a new upload takes up to a minute to show up in `ls`, `find` and paths, but `rm`, `mv`, `rename`, `cp`, `share` and `download` accept its ID right away (waiting a few seconds for the server if needed).
 - `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed. An empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` isn't sent, since O2 Cloud rejects empty images: it has `"skipped": true, "empty": true` and no `id`.
 - `download`: `id` (or `parts`, for a file uploaded in parts), `name`, `path` (where it was saved, absolute) and `size`.
+- `download-dir`: an array with one object per file: `id` (or `parts`), `name`, `cloud` (its path in the cloud), `local` (its path inside the output folder, with `/`), `path` (where it was saved), `folderid`, `size`, `action` (`downloaded`, `skipped` or `failed`), `error` if it failed, and `renamed: true` if its local name differs from the cloud one. With `--dry-run`, the same without `action`.
 - `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
 - `cp`: `id` of the copy, `name`, `folderid`, `path`, and `source` (the original's ID).
 - `share`: `id` and `url` of the link, `path`, and `folder` (`true` for a folder; its `id` is what `unshare` takes).
@@ -188,6 +190,9 @@ o2cloud upload ./disk.iso                        # over 4 GB: disk.iso.001, disk
 o2cloud download /Documents/report.pdf           # saved as ./report.pdf
 o2cloud download 1234567890 -o ~/Desktop/copy.pdf
 o2cloud download /disk.iso                       # joins disk.iso.001, .002, … into disk.iso
+o2cloud download-dir /Photos -o ~/backup         # ~/backup/Photos with every subfolder
+o2cloud download-dir / -o ~/o2-account           # the whole account (e.g. before leaving)
+o2cloud download-dir / -o ~/o2-account --skip-existing   # resume after a cut
 ```
 
 </details>
@@ -242,6 +247,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 > **Shared links are public**: anyone with the URL can open the file or folder. Sharing the root folder is refused, since it would publish the whole account.
 
 - **Deletes go to the trash**, so they can be restored from the O2 Cloud website.
+- **`download-dir`** recreates the folder inside `-o` (the whole account, `/`, goes straight into it, phone-app photos included), with empty subfolders, and joins files uploaded in parts. Each file is written to `name.o2part` and renamed when complete, with the date it had when it was uploaded; `--skip-existing` skips files already there with the same size and resumes a cut download from where it stopped. Names your system can't use are adjusted (on Windows `<>:"|?*`, trailing dots, `CON`…), and two names that differ only in case get the file's ID added, so nothing is lost on a case-insensitive disk; `--json` marks those `renamed`.
 - **`download` never overwrites** an existing local file. Without `-o`, it only uses the file's name, never a directory sent by the server.
 - **`upload-dir` skips hidden files and folders** (`.git`, `.DS_Store`…), because O2 Cloud rejects them, and the files the OS keeps for itself (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` includes them inside the zip.
 - **Files over 4 GB** (the most O2 Cloud takes in one upload) go up in parts named `name.001`, `name.002`, … `download name` joins them, and so does `cat name.0* > name` (or 7-Zip) after downloading the parts some other way. `download` refuses to join them if a part is missing or doesn't belong with the others. Uploading a file in parts where parts of one with the same name already are is refused, unless `--skip-existing` resumes the same file.

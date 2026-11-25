@@ -1373,7 +1373,7 @@ impl O2Client {
         let url = format!("{}/sapi/media", BASE_URL);
         let payload = serde_json::json!({
             "data": {
-                "fields": ["name", "size", "etag", "folderid", "url", "creationdate"]
+                "fields": ["name", "size", "etag", "folderid", "url", "creationdate", "modificationdate"]
             }
         });
         let mut query = vec![
@@ -1433,7 +1433,7 @@ impl O2Client {
     /// The files with these IDs that exist, in one request (the server
     /// answers 2,000 at once in a fraction of a second; callers send at
     /// most `MEDIA_PAGE_SIZE`). IDs that don't exist are left out.
-    async fn get_media_by_ids(
+    pub async fn get_media_by_ids(
         &self,
         media_ids: &[u64],
         auth: &AuthConfig,
@@ -1447,7 +1447,7 @@ impl O2Client {
         let body = serde_json::json!({
             "data": {
                 "ids": ids,
-                "fields": ["name", "size", "etag", "folderid", "url", "creationdate"]
+                "fields": ["name", "size", "etag", "folderid", "url", "creationdate", "modificationdate"]
             }
         });
         let raw = retry_while_validating(|| async {
@@ -2164,6 +2164,62 @@ impl O2Client {
         }
     }
 
+    /// Like `download_into`, but `file` already holds the first `offset`
+    /// bytes of a download that was cut short: the rest is asked for with
+    /// a `Range` request (O2 answers 206 to it, checked live) and
+    /// appended. If the server sends the whole file instead, `file` is
+    /// emptied and it is written from the start. Returns the file's size.
+    pub async fn download_resuming(
+        &self,
+        download_url: &str,
+        file: &mut tokio::fs::File,
+        path: &std::path::Path,
+        offset: u64,
+        expected_size: Option<u64>,
+    ) -> Result<u64, O2Error> {
+        use tokio::io::AsyncSeekExt;
+        if offset == 0 {
+            return self
+                .download_into(download_url, file, path, expected_size)
+                .await;
+        }
+        if expected_size == Some(offset) {
+            return Ok(offset);
+        }
+        let resp = self
+            .client
+            .get(download_url)
+            .header(header::RANGE, format!("bytes={}-", offset))
+            .send_traced()
+            .await?;
+        let status = resp.status();
+        let total = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            file.seek(std::io::SeekFrom::End(0)).await?;
+            offset + Self::stream_response_to_file(resp, file, path).await?
+        } else if status.is_success() {
+            drop(resp);
+            file.set_len(0).await?;
+            file.seek(std::io::SeekFrom::Start(0)).await?;
+            return self
+                .download_into(download_url, file, path, expected_size)
+                .await;
+        } else {
+            let raw_body = resp.text().await.unwrap_or_default();
+            return Err(O2Error::Api(format!(
+                "Download failed (status {}): {}",
+                status,
+                truncate_utf8(&raw_body, 200)
+            )));
+        };
+        match expected_size {
+            Some(size) if size != total => Err(O2Error::Api(format!(
+                "Download incomplete: got {} of {} bytes",
+                total, size
+            ))),
+            _ => Ok(total),
+        }
+    }
+
     async fn write_bytes_to_file(
         bytes: &[u8],
         file: &mut tokio::fs::File,
@@ -2419,6 +2475,12 @@ pub struct MediaItem {
     /// in Unix milliseconds.
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub creationdate: Option<u64>,
+    /// The local file's modification date sent when it was uploaded, in
+    /// Unix milliseconds (0 for one before 1970). Unlike `creationdate`,
+    /// which O2 replaces with a photo's EXIF date, it is kept as sent
+    /// (checked live), so it is the date to give a downloaded file.
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+    pub modificationdate: Option<u64>,
     /// Catch-all for fields we don't use (etag, mediatype, status, …).
     #[serde(flatten)]
     _rest: serde_json::Value,
@@ -2433,6 +2495,7 @@ impl MediaItem {
             size: self.size,
             date: self.date,
             creationdate: self.creationdate,
+            modificationdate: self.modificationdate,
         }
     }
 
@@ -2447,6 +2510,7 @@ impl MediaItem {
             url: None,
             date: item.date,
             creationdate: item.creationdate,
+            modificationdate: item.modificationdate,
             _rest: serde_json::Value::Null,
         }
     }

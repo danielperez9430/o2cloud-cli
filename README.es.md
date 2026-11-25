@@ -99,6 +99,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto; `--ext jpg,mp4` para solo esas extensiones) |
 | 🗜️ `upload-zip <dir>` | Comprime una carpeta y sube el `.zip` |
 | ⬇️ `download <archivo>` | Descarga un archivo (`-o` para elegir la ruta local) |
+| 📥 `download-dir <carpeta>` | Descarga una carpeta con todo su contenido, o `/` para toda la cuenta (`-o <dir>`, `-j <n>`, `--skip-existing` para reanudar, `--ext`, `--dry-run`) |
 | 🗑️ `rm <archivo o carpeta>` | Lo manda a la papelera (`-r` para carpetas, `-y` para no pedir confirmación) |
 | 🔗 `share <archivo o carpeta>` | Crea un enlace público e imprime su URL |
 | 📋 `shares` | Lista las carpetas compartidas |
@@ -114,7 +115,7 @@ Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 
 ### 🧩 Salida JSON
 
-`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `mkdir`, `cp`, `share`, `shares`, `status` y `quota` aceptan `--json` e imprimen un único valor JSON en stdout, para scripts y otras apps. Los mensajes de progreso siguen saliendo por stderr, y los errores son `Error: …` en stderr con código de salida 1.
+`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `mkdir`, `cp`, `share`, `shares`, `status` y `quota` aceptan `--json` e imprimen un único valor JSON en stdout, para scripts y otras apps. Los mensajes de progreso siguen saliendo por stderr, y los errores son `Error: …` en stderr con código de salida 1.
 
 ```console
 $ o2cloud upload ./pelicula.mkv --json 2>/dev/null
@@ -128,6 +129,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 - `upload` y `upload-zip`: `id`, `name`, `folderid`, `size` y `skipped` (`true` si `--skip-existing` lo encontró ya subido). Un archivo subido en partes lleva `parts` (un ID por parte) en lugar de `id`. Usa los IDs en los scripts: una subida nueva tarda hasta un minuto en aparecer en `ls`, `find` y las rutas, pero `rm`, `mv`, `rename`, `cp`, `share` y `download` aceptan su ID al momento (esperando unos segundos al servidor si hace falta).
 - `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló. Un `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacío no se envía, porque O2 Cloud rechaza las imágenes vacías: lleva `"skipped": true, "empty": true` y no tiene `id`.
 - `download`: `id` (o `parts`, para un archivo subido en partes), `name`, `path` (dónde se guardó, ruta absoluta) y `size`.
+- `download-dir`: un array con un objeto por archivo: `id` (o `parts`), `name`, `cloud` (su ruta en la nube), `local` (su ruta dentro de la carpeta de destino, con `/`), `path` (dónde se guardó), `folderid`, `size`, `action` (`downloaded`, `skipped` o `failed`), `error` si falló, y `renamed: true` si su nombre local es distinto del de la nube. Con `--dry-run`, lo mismo sin `action`.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
 - `cp`: `id` de la copia, `name`, `folderid`, `path` y `source` (el ID del original).
 - `share`: `id` y `url` del enlace, `path` y `folder` (`true` para una carpeta; su `id` es el que acepta `unshare`).
@@ -193,6 +195,9 @@ o2cloud upload ./disco.iso                        # más de 4 GB: disco.iso.001,
 o2cloud download /Documentos/informe.pdf          # se guarda como ./informe.pdf
 o2cloud download 1234567890 -o ~/Desktop/copia.pdf
 o2cloud download /disco.iso                       # une disco.iso.001, .002, … en disco.iso
+o2cloud download-dir /Fotos -o ~/copia            # ~/copia/Fotos con todas sus subcarpetas
+o2cloud download-dir / -o ~/cuenta-o2             # toda la cuenta (p. ej. antes de darte de baja)
+o2cloud download-dir / -o ~/cuenta-o2 --skip-existing   # reanudar tras un corte
 ```
 
 </details>
@@ -247,6 +252,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 > **Los enlaces compartidos son públicos**: cualquiera con la URL puede abrir el archivo o la carpeta. Compartir la carpeta raíz no está permitido, porque publicaría toda la cuenta.
 
 - **Lo borrado va a la papelera**, así que se puede restaurar desde la web de O2 Cloud.
+- **`download-dir`** recrea la carpeta dentro de `-o` (toda la cuenta, `/`, va directamente dentro, fotos de la app del móvil incluidas), con las subcarpetas vacías, y une los archivos subidos en partes. Cada archivo se escribe como `nombre.o2part` y se renombra al terminar, con la fecha que tenía al subirlo; `--skip-existing` salta los que ya están con el mismo tamaño y reanuda una descarga cortada desde donde se quedó. Los nombres que tu sistema no admite se ajustan (en Windows `<>:"|?*`, puntos finales, `CON`…), y a dos nombres que solo difieren en mayúsculas se les añade el ID del archivo, para no perder nada en un disco que no distingue mayúsculas; `--json` los marca como `renamed`.
 - **`download` nunca sobrescribe** un archivo local que ya exista. Sin `-o`, solo usa el nombre del archivo, nunca una carpeta enviada por el servidor.
 - **`upload-dir` omite los archivos y carpetas ocultos** (`.git`, `.DS_Store`…), porque O2 Cloud los rechaza, y los que el sistema guarda para sí mismo (`Thumbs.db`, `desktop.ini`, `$RECYCLE.BIN`…). `upload-zip` sí los incluye dentro del zip.
 - **Archivos de más de 4 GB** (lo máximo que O2 Cloud acepta en una subida): se suben en partes llamadas `nombre.001`, `nombre.002`, … `download nombre` las une, igual que `cat nombre.0* > nombre` (o 7-Zip) si descargas las partes de otra forma. `download` se niega a unirlas si falta alguna parte o alguna no encaja con las demás. Subir un archivo en partes donde ya hay partes de otro con el mismo nombre se rechaza, salvo que `--skip-existing` reanude el mismo archivo.

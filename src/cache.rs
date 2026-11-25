@@ -11,8 +11,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped when the format changes; an older file is ignored.
-const VERSION: u32 = 1;
+/// Bumped when the format changes; an older file is ignored (2: files
+/// carry `modificationdate`).
+const VERSION: u32 = 2;
 
 /// After this long the whole account is listed again, in case the change
 /// log ever missed something.
@@ -46,6 +47,7 @@ pub struct CachedItem {
     pub size: Option<u64>,
     pub date: Option<u64>,
     pub creationdate: Option<u64>,
+    pub modificationdate: Option<u64>,
 }
 
 impl MediaCache {

@@ -6,6 +6,9 @@ use crate::config::AuthConfig;
 use crate::error::O2Error;
 use crate::util::{format_size, format_unix_utc, mime_type_from_name, system_time_to_compact_iso};
 
+mod download_dir;
+pub use download_dir::{download_dir, DownloadDirOptions};
+
 // ------------------------------------------------------------------
 // List
 // ------------------------------------------------------------------
