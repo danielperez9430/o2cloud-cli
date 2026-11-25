@@ -1,0 +1,30 @@
+# Weekly update PRs: one for the Rust dependencies, one for the GitHub
+# Actions, each grouped. Security updates (enabled in the repo settings)
+# open their own PR as soon as an advisory comes out.
+# The runner images in the workflow (`runs-on`) are pinned on purpose and
+# are updated by hand.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"
+    open-pull-requests-limit: 5
