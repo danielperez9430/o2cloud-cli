@@ -235,7 +235,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 ## ⚠️ Good to know
 
 > [!NOTE]
-> **Sessions last about 24 hours** and aren't renewed automatically. When one expires, the next command opens the login window again (or, without one, log in again with [browser cookies](#️-logging-in-without-a-login-window)). `o2cloud status` tells you whether yours is still active. If it expires in the middle of a command, the command stops with "the session has expired"; a long `upload-dir` stops instead of failing every remaining file, and running it again with `--skip-existing` logs in and carries on. The advanced **Staying logged in without SMS** mode below renews itself.
+> **A session ends when it goes unused for a while** (in our tests it was gone after two hours without use; one in constant use, by a long `upload-dir`, lasted over 14 hours), and it isn't renewed automatically. So expect the login window again after a break. When one expires, the next command opens the login window again (or, without one, log in again with [browser cookies](#️-logging-in-without-a-login-window)). `o2cloud status` tells you whether yours is still active. If it expires in the middle of a command, the command stops with "the session has expired"; a long `upload-dir` stops instead of failing every remaining file, and running it again with `--skip-existing` logs in and carries on. The advanced **Staying logged in without SMS** mode below renews itself.
 
 > [!WARNING]
 > **Shared links are public**: anyone with the URL can open the file or folder. Sharing the root folder is refused, since it would publish the whole account.
@@ -269,7 +269,7 @@ export O2CLOUD_JSESSIONID="<JSESSIONID>" O2CLOUD_VALIDATIONKEY="<validationkey>"
 o2cloud login
 ```
 
-The cookies are checked against O2 Cloud before they are saved. Treat them like a password — anyone who has them can reach your account until the session expires. Like any session, this one lasts about 24 hours; after that, copy fresh cookies and log in again.
+The cookies are checked against O2 Cloud before they are saved. Treat them like a password — anyone who has them can reach your account until the session expires. Like any session, this one ends when it goes unused for a while; after that, copy fresh cookies and log in again.
 
 ## 🧪 Advanced: staying logged in without SMS
 

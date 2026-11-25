@@ -502,7 +502,10 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                     }
                 }
                 if cfg.sapi_auth_header().is_none() {
-                    println!("  Sessions last about 24 h and aren't renewed automatically.");
+                    println!(
+                        "  Sessions end after a while without use (gone after 2 h idle \
+                         in our tests) and aren't renewed automatically."
+                    );
                 }
             }
             Err(_) if json => {
