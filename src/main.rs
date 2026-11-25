@@ -347,6 +347,40 @@ enum Commands {
         json: bool,
     },
 
+    /// Download a folder and everything in it (or with `/`, the whole
+    /// account) into a local folder; files uploaded in parts are joined
+    DownloadDir {
+        /// Folder ID or path (e.g. /Photos), or / for the whole account
+        target: String,
+
+        /// Local folder to download into (default: the current one; needed
+        /// for /)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Files downloaded at the same time
+        #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=8))]
+        jobs: u16,
+
+        /// Skip files already there with the same size, and resume cut
+        /// downloads (nothing is ever overwritten)
+        #[arg(long)]
+        skip_existing: bool,
+
+        /// Only files with these extensions (comma-separated or repeated,
+        /// any case, with or without the dot), e.g. --ext jpg,mp4
+        #[arg(long, value_delimiter = ',', value_name = "EXT")]
+        ext: Vec<String>,
+
+        /// Only say how many files and how much would be downloaded
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Download a file from O2 Cloud
     Download {
         /// Media ID (shown in `o2cloud ls`), file path (e.g. /docs/a.txt),
@@ -741,6 +775,39 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         Commands::FixJpeg { paths, apply, json } => {
             let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             ops::fix_jpeg(&paths, apply, json)?;
+        }
+
+        Commands::DownloadDir {
+            target,
+            output,
+            jobs,
+            skip_existing,
+            ext,
+            dry_run,
+            json,
+        } => {
+            let extensions = ops::normalize_extensions(&ext);
+            if !ext.is_empty() && extensions.is_empty() {
+                return Err(O2Error::Invalid(
+                    "--ext needs at least one extension".into(),
+                ));
+            }
+            let (client, auth) = require_client_and_auth().await?;
+            let opts = ops::DownloadDirOptions {
+                jobs: jobs.into(),
+                skip_existing,
+                extensions,
+                dry_run,
+            };
+            ops::download_dir(
+                &client,
+                &auth,
+                &target,
+                output.map(PathBuf::from),
+                &opts,
+                json,
+            )
+            .await?;
         }
 
         Commands::Quota { json } => {

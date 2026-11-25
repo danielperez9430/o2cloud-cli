@@ -2,6 +2,31 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.14.0] — 2026-11-26
+
+### Added
+- `download-dir <folder> [-o dir]`: downloads a folder and everything in
+  it, or with `/` the whole account (which needs `-o`), the reverse of
+  `upload-dir` (#24). Subfolders are recreated, empty ones too, files
+  uploaded in parts are joined, and each file gets the modification date
+  it had when uploaded. Files are written to `name.o2part` and renamed
+  when complete; with `--skip-existing`, files already there with the
+  same size are skipped without asking the server anything, and a cut
+  download resumes where it stopped (O2 answers Range requests). Nothing
+  local is overwritten. Names the local system can't use are adjusted,
+  and names that clash ignoring case get the file's ID. `-j` downloads
+  several at once, `--ext` keeps some extensions, `--dry-run` only counts,
+  and `--json` lists every file. Download URLs are asked for 200 files at
+  a time, just before downloading them; a session that expires stops the
+  run cleanly. Tested with a round trip (nested, empty and accented
+  folders, a file in parts): identical contents and dates.
+
+### Changed
+- Listings and the file cache now carry each file's `modificationdate`
+  (the date sent at upload, which O2 keeps as is, while it replaces
+  `creationdate` with a photo's EXIF date). The cache format changed, so
+  the first command after updating lists the whole account once.
+
 ## [0.13.3] — 2026-11-26
 
 ### Added
