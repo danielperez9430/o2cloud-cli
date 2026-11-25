@@ -55,6 +55,23 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// What an upload rejection means, for the codes that look like
+/// something else. The server checks the content, not just the name:
+/// tested with `.jpg` files, `MED-1050` is an empty file, one of zeros or
+/// random bytes, or a HEIC named `.jpg`, and `MED-1000` a damaged JPEG.
+fn rejection_hint(err: &str) -> &'static str {
+    if err.contains("MED-1050") {
+        " — the server checks the content: the file is empty or damaged, \
+         or its format doesn't match its extension (e.g. a HEIC photo named .jpg); \
+         retrying won't help"
+    } else if err.contains("MED-1000") {
+        " — the server couldn't read the file: it may be damaged or incomplete \
+         (e.g. a leftover .tmp)"
+    } else {
+        ""
+    }
+}
+
 /// Extract the error from a SAPI error envelope, which the server can
 /// send even with a 200 status:
 /// `{"error":{"code":"PAPI-0000","message":"Unknown exception","parameters":[...]}}`.
@@ -573,7 +590,7 @@ impl O2Client {
             .get(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-        let resp = self.send_sapi(req, auth).await?;
+        let resp = self.send_sapi_any_status(req, auth).await?;
         let status = resp.status();
         let _ = resp.text().await?;
         Ok(status != reqwest::StatusCode::UNAUTHORIZED)
@@ -674,7 +691,23 @@ impl O2Client {
     /// anything (see `creates_something`). A streamed body (an upload)
     /// can't be replayed, so such a request is sent only once;
     /// `upload_file` retries it itself.
+    /// A 401 is `O2Error::SessionExpired`, so a long command (e.g. an
+    /// `upload-dir`) can stop instead of failing every remaining file.
     async fn send_sapi(
+        &self,
+        builder: reqwest::RequestBuilder,
+        auth: &AuthConfig,
+    ) -> Result<reqwest::Response, O2Error> {
+        let resp = self.send_sapi_any_status(builder, auth).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(O2Error::SessionExpired);
+        }
+        Ok(resp)
+    }
+
+    /// `send_sapi`, returning a 401 like any other status (for the
+    /// session checks).
+    async fn send_sapi_any_status(
         &self,
         builder: reqwest::RequestBuilder,
         auth: &AuthConfig,
@@ -1045,6 +1078,9 @@ impl O2Client {
             return Ok(folders);
         }
         let (status, raw) = self.request_folders(auth).await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(O2Error::SessionExpired);
+        }
         parse_folders(status, &raw)
     }
 
@@ -1076,7 +1112,7 @@ impl O2Client {
             .post(&url)
             .timeout(REQUEST_TIMEOUT)
             .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-        let resp = self.send_sapi(req, auth).await?;
+        let resp = self.send_sapi_any_status(req, auth).await?;
         let status = resp.status();
         Ok((status, resp.text().await?))
     }
@@ -1724,7 +1760,11 @@ impl O2Client {
             )));
         }
         if let Some(err) = sapi_error(&raw_body) {
-            return Err(O2Error::Api(format!("Upload rejected: {}", err)));
+            return Err(O2Error::Api(format!(
+                "Upload rejected: {}{}",
+                err,
+                rejection_hint(&err)
+            )));
         }
 
         let resp_data: UploadResponse = serde_json::from_str(&raw_body).map_err(|e| {
@@ -2518,6 +2558,18 @@ mod tests {
         let item: MediaItem = serde_json::from_str(r#"{"id":1}"#).unwrap();
         assert_eq!(item.date, None);
         assert_eq!(item.creationdate, None);
+    }
+
+    #[test]
+    fn test_rejection_hint() {
+        assert!(
+            rejection_hint("The file extension or the format is not supported. (MED-1050)")
+                .contains("checks the content")
+        );
+        assert!(
+            rejection_hint("Unknown exception in media handling (MED-1000)").contains("damaged")
+        );
+        assert_eq!(rejection_hint("Quota exceeded (MED-1004)"), "");
     }
 
     #[test]

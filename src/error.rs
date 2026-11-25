@@ -40,6 +40,14 @@ pub enum O2Error {
     #[error("{0}")]
     Ambiguous(String),
 
+    /// The server answered 401 in the middle of a command: the session
+    /// expired (web logins last about 24 hours) or was revoked.
+    #[error(
+        "the session has expired; run the command again to log in (with \
+         `upload-dir --skip-existing` it carries on where it stopped)"
+    )]
+    SessionExpired,
+
     /// A server response could not be parsed into the expected shape.
     #[error("Invalid response: {0}")]
     Parse(String),

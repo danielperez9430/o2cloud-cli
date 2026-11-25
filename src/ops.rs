@@ -1222,6 +1222,10 @@ pub async fn upload_dir(
         })
         .collect();
     let existing = &existing;
+    // Set when the session expires: the files not started yet are left
+    // alone rather than each failing the same way.
+    let expired = std::sync::atomic::AtomicBool::new(false);
+    let expired = &expired;
     let mut results: Vec<(usize, serde_json::Value, Result<Uploaded, O2Error>)> =
         futures_util::stream::iter(files)
             .map(|(i, file_path, parent_o2)| async move {
@@ -1230,6 +1234,14 @@ pub async fn upload_dir(
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
+                if expired.load(std::sync::atomic::Ordering::Relaxed) {
+                    let result = serde_json::json!({
+                        "local": local_path_in(local_dir, file_path),
+                        "name": name,
+                        "folderid": parent_o2,
+                    });
+                    return (i, result, Err(O2Error::SessionExpired));
+                }
                 let file_meta = tokio::fs::metadata(file_path).await.ok();
                 let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = file_meta.and_then(|m| m.modified().ok());
@@ -1242,16 +1254,8 @@ pub async fn upload_dir(
                     format_size(size)
                 );
 
-                // Path inside the uploaded directory, with `/` on every platform.
-                let local = file_path
-                    .strip_prefix(local_dir)
-                    .unwrap_or(file_path)
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
                 let result = serde_json::json!({
-                    "local": local,
+                    "local": local_path_in(local_dir, file_path),
                     "name": name,
                     "folderid": parent_o2,
                     "size": size,
@@ -1260,8 +1264,14 @@ pub async fn upload_dir(
                     client, auth, file_path, &name, size, modified, parent_o2, existing, opts,
                 )
                 .await;
-                if let Err(e) = &uploaded {
-                    eprintln!("  ⚠ Upload failed for {}: {}", name, e);
+                match &uploaded {
+                    Err(O2Error::SessionExpired) => {
+                        if !expired.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!("  ✗ The session expired while uploading {}", name);
+                        }
+                    }
+                    Err(e) => eprintln!("  ⚠ Upload failed for {}: {}", name, e),
+                    Ok(_) => {}
                 }
                 (i, result, uploaded)
             })
@@ -1271,7 +1281,7 @@ pub async fn upload_dir(
     results.sort_by_key(|(i, _, _)| *i);
 
     // One entry per file for `--json`, failed uploads included.
-    let (mut succeeded, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
     let results: Vec<serde_json::Value> = results
         .into_iter()
         .map(|(_, mut result, uploaded)| {
@@ -1288,6 +1298,10 @@ pub async fn upload_dir(
                     } else {
                         result["id"] = up.ids[0].into();
                     }
+                }
+                Err(O2Error::SessionExpired) => {
+                    result["error"] = O2Error::SessionExpired.to_string().into();
+                    not_done += 1;
                 }
                 Err(e) => {
                     result["error"] = e.to_string().into();
@@ -1311,10 +1325,20 @@ pub async fn upload_dir(
         eprintln!("⚠ {} file(s) failed to upload", failed);
     }
     eprintln!("✓ Uploaded {} files to {}", succeeded, local_dir.display());
+    if not_done > 0 {
+        eprintln!(
+            "✗ {} file(s) not uploaded: the session expired. Run the same command \
+             with --skip-existing to log in and carry on.",
+            not_done
+        );
+    }
     if json {
         print_json(&serde_json::Value::Array(results));
     }
 
+    if not_done > 0 {
+        return Err(O2Error::SessionExpired);
+    }
     if failed > 0 {
         return Err(O2Error::Api(format!(
             "{} of {} files failed to upload",
@@ -1322,6 +1346,18 @@ pub async fn upload_dir(
         )));
     }
     Ok(())
+}
+
+/// `file_path` inside the uploaded directory `local_dir`, with `/` on
+/// every platform.
+fn local_path_in(local_dir: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(local_dir)
+        .unwrap_or(file_path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Return the ID of the folder `name` inside `parent`, creating it if it
