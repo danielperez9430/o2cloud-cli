@@ -1206,6 +1206,34 @@ impl O2Client {
         Ok(in_listing_order(media))
     }
 
+    /// `get_all_media`, after waiting (up to `max_wait`) for the files the
+    /// cache knows of but the server doesn't return yet, such as uploads
+    /// of the last minute, so they aren't taken for missing. Also returns
+    /// how many are still missing.
+    pub async fn get_all_media_settled(
+        &self,
+        auth: &AuthConfig,
+        max_wait: Duration,
+    ) -> Result<(Vec<MediaItem>, usize), O2Error> {
+        let start = std::time::Instant::now();
+        let mut said = false;
+        loop {
+            let media = self.get_all_media(auth).await?;
+            let pending = crate::cache::pending_count(&auth.msisdn);
+            if pending == 0 || start.elapsed() >= max_wait {
+                return Ok((media, pending));
+            }
+            if !said {
+                eprintln!(
+                    "→ Waiting for {} file(s) uploaded moments ago to show up in the listing…",
+                    pending
+                );
+                said = true;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     /// Apply the change log since `cache.cursor` to the cache, save it and
     /// return its files.
     async fn update_cache(

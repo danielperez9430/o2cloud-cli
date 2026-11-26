@@ -20,6 +20,17 @@ All notable changes to o2cloud-cli will be documented in this file.
   uploading it as `name (1)`.
 - `upload-zip` of a folder with a file of 4 GiB or more failed after
   zipping it all ("Large file option has not been set").
+- Running `upload-dir --skip-existing` again right after a run (as the
+  "session expired" message suggests) uploaded again, as `name (1)`, the
+  files of the last minute, which listings didn't include yet. What
+  `upload`, `upload-zip` and `upload-dir` upload is now noted in the
+  cache, and `upload-dir` waits (up to 2 minutes) for it to be listed
+  before deciding.
+- A file over the part size whose name is 252–255 bytes long is refused
+  before uploading: its parts' names (`name.001`) would be over O2
+  Cloud's limit.
+- The last line of `upload-dir` says "⚠" when files failed, names the
+  local folder as "from", and counts updated files.
 
 ## [0.15.2] — 2026-11-26
 

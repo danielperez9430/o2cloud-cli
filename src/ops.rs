@@ -784,6 +784,10 @@ pub struct UploadOptions {
 /// changed: filesystems like FAT keep times to 2 seconds.
 const MODIFY_WINDOW_MS: u64 = 2000;
 
+/// How long `upload-dir` waits, before deciding what to upload, for files
+/// uploaded moments ago to show up in the listing (they take 10–60 s).
+const SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What `upload-dir` does with one local file, given what the cloud has.
 #[derive(Debug, Clone, PartialEq)]
 enum Decision {
@@ -1080,6 +1084,13 @@ fn upload_pieces(
         part -= 1;
     }
     let count = size.div_ceil(part);
+    // The parts are named `name.001`…, 4 bytes longer than the file.
+    if let Some(reason) = crate::api::file_name_problem(&part_name(name, 1)) {
+        return Err(O2Error::Invalid(format!(
+            "{} goes up in parts, and their names are too long: {}",
+            name, reason
+        )));
+    }
     if count > MAX_PARTS {
         return Err(O2Error::Invalid(format!(
             "{} would need {} parts; the most is {}",
@@ -1667,6 +1678,7 @@ pub async fn upload_file(
     )
     .await?;
 
+    crate::cache::note_uploaded(&auth.msisdn, &uploaded.ids);
     let all_skipped = uploaded.skipped == uploaded.ids.len();
     let done = if all_skipped {
         "Already uploaded"
@@ -1762,7 +1774,16 @@ pub async fn upload_dir(
     })
     .await?;
     let (existing, mdates) = if needs_listing(opts, largest_file) {
-        let media = client.get_all_media(auth).await?;
+        // Uploads of the last minute may not be listed yet: wait for
+        // them rather than upload them again as `name (1)`.
+        let (media, unsettled) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
+        if unsettled > 0 {
+            eprintln!(
+                "⚠ {} file(s) uploaded moments ago still aren't listed; if any of them \
+                 is in this folder it may be uploaded again as `name (1)`",
+                unsettled
+            );
+        }
         let mdates: HashMap<u64, u64> = media
             .iter()
             .filter_map(|m| m.modificationdate.map(|d| (m.id, d)))
@@ -2064,6 +2085,8 @@ pub async fn upload_dir(
     // One entry per file for `--json`, failed uploads included.
     let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
     let (mut empty_images, mut updated, mut older, mut differs) = (0usize, 0usize, 0usize, 0usize);
+    // What this run put in the cloud, for the next listing (see below).
+    let mut uploaded_ids: Vec<u64> = Vec::new();
     let mut planned: HashMap<&'static str, usize> = HashMap::new();
     let set_ids = |result: &mut serde_json::Value, up: &Uploaded| {
         if up.parts > 0 {
@@ -2091,6 +2114,7 @@ pub async fn upload_dir(
                     result["skipped"] = all_skipped.into();
                     result["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
                     set_ids(&mut result, &up);
+                    uploaded_ids.extend(&up.ids);
                 }
                 Ok(FileOutcome::Updated(up, old)) => {
                     updated += 1;
@@ -2098,6 +2122,7 @@ pub async fn upload_dir(
                     result["action"] = "updated".into();
                     result["replaced"] = old.into();
                     set_ids(&mut result, &up);
+                    uploaded_ids.extend(&up.ids);
                 }
                 Ok(outcome @ (FileOutcome::Older(_) | FileOutcome::Differs(..))) => {
                     let (label, cloud, in_parts) = match outcome {
@@ -2185,6 +2210,10 @@ pub async fn upload_dir(
         return Ok(());
     }
 
+    // Listings take up to a minute to include new uploads: the next
+    // listing asks for these by ID, so a run right after this one (after
+    // the session expired, say) doesn't upload them again.
+    crate::cache::note_uploaded(&auth.msisdn, &uploaded_ids);
     let too_big = rejected.iter().filter(|(_, is_dir, _)| !is_dir).count();
     if too_big > 0 {
         eprintln!(
@@ -2230,7 +2259,21 @@ pub async fn upload_dir(
     if failed > 0 {
         eprintln!("⚠ {} file(s) failed to upload", failed);
     }
-    eprintln!("✓ Uploaded {} files to {}", succeeded, local_dir.display());
+    eprintln!(
+        "{} Uploaded {} file(s) from {}{}",
+        if failed + too_big + not_done > 0 {
+            "⚠"
+        } else {
+            "✓"
+        },
+        succeeded,
+        local_dir.display(),
+        if updated > 0 {
+            format!(", and updated {}", updated)
+        } else {
+            String::new()
+        }
+    );
     if not_done > 0 {
         eprintln!(
             "✗ {} file(s) not uploaded: the session expired. Run the same command \
@@ -4480,6 +4523,16 @@ mod tests {
         assert_eq!(part_number("big.iso", "big.iso.txt"), None);
         assert_eq!(part_number("big.iso", "big.isox001"), None);
         assert_eq!(part_number("big.iso", "other.iso.001"), None);
+    }
+
+    #[test]
+    fn test_part_names_within_limit() {
+        let ok = "a".repeat(250);
+        assert!(upload_pieces(&ok, 250, 100).is_ok());
+        let long = "a".repeat(253); // fine whole, 257 bytes as `name.001`
+        assert!(upload_pieces(&long, 50, 100).is_ok());
+        let err = upload_pieces(&long, 250, 100).unwrap_err().to_string();
+        assert!(err.contains("goes up in parts"), "{err}");
     }
 
     #[test]
