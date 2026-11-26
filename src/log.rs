@@ -64,7 +64,17 @@ struct FileSink {
     writer: std::io::BufWriter<std::fs::File>,
     written: u64,
     cap: u64,
+    /// Whether the cap was reached (and said so in the log).
+    capped: bool,
+    /// When it was last written to disk.
+    flushed: std::time::Instant,
 }
+
+/// How often what's buffered goes to disk, so a run cut short (Ctrl-C, a
+/// closed window) still leaves its log.
+const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// A log written to this recently may be a run still going: never pruned.
+const IN_USE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 struct Logger {
     run: String,
@@ -88,7 +98,7 @@ pub fn dir() -> Option<PathBuf> {
 /// file. `O2CLOUD_LOG` sets the stderr level (`off`, `error`, `warn`,
 /// `info`, `debug`, `trace`), and `O2CLOUD_LOG_FILE` the file (`0` for
 /// none, or a path).
-pub fn init(debug: bool) {
+pub fn init(debug: bool, to_file: bool) {
     let env_level = std::env::var("O2CLOUD_LOG")
         .ok()
         .and_then(|v| Level::parse(&v));
@@ -100,12 +110,19 @@ pub fn init(debug: bool) {
     let detailed = stderr.is_some_and(|l| l >= Level::Debug);
     let file_level = if detailed { Level::Debug } else { Level::Info };
     let run = run_id_new();
-    let (file, path) = match open_file(&run) {
+    let opened = if to_file || detailed {
+        open_file(&run)
+    } else {
+        None
+    };
+    let (file, path) = match opened {
         Some((f, p)) => (
             Some(Mutex::new(FileSink {
                 writer: std::io::BufWriter::new(f),
                 written: 0,
                 cap: if detailed { CAP_BYTES_DEBUG } else { CAP_BYTES },
+                capped: false,
+                flushed: std::time::Instant::now(),
             })),
             Some(p),
         ),
@@ -170,7 +187,15 @@ fn prune(dir: &std::path::Path, prefix: &str, keep: usize) {
     files.sort();
     let extra = files.len().saturating_sub(keep);
     for old in files.into_iter().take(extra) {
-        let _ = std::fs::remove_file(old);
+        // A long upload may still be writing to it.
+        let in_use = std::fs::metadata(&old)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < IN_USE);
+        if !in_use {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 
@@ -216,7 +241,7 @@ pub fn log(level: Level, target: &str, msg: &str, fields: serde_json::Value) {
                 }
             }
         }
-        eprintln!("{}", line);
+        crate::ui::line(&line);
     }
     if let (true, Some(file)) = (to_file, &l.file) {
         let record = serde_json::json!({
@@ -231,14 +256,23 @@ pub fn log(level: Level, target: &str, msg: &str, fields: serde_json::Value) {
         let mut sink = file.lock().unwrap_or_else(|e| e.into_inner());
         // Past the cap, only what matters to find out what went wrong.
         if sink.written > sink.cap && level > Level::Warn && target != "run" {
+            if !sink.capped {
+                sink.capped = true;
+                let note = serde_json::json!({
+                    "lvl": "warn", "run": l.run, "target": "log",
+                    "msg": "log full: only warnings, errors and the end from here",
+                });
+                let _ = writeln!(sink.writer, "{}", note);
+            }
             return;
         }
         let line = format!("{}\n", record);
         if sink.writer.write_all(line.as_bytes()).is_ok() {
             sink.written += line.len() as u64;
         }
-        if level <= Level::Warn {
+        if level <= Level::Warn || sink.flushed.elapsed() >= FLUSH_EVERY {
             let _ = sink.writer.flush();
+            sink.flushed = std::time::Instant::now();
         }
     }
 }
@@ -316,8 +350,19 @@ mod tests {
     fn test_prune() {
         let dir = std::env::temp_dir().join(format!("o2cli_prune_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
         for i in 0..5 {
-            std::fs::write(dir.join(format!("run-2026010{}.jsonl", i)), b"x").unwrap();
+            let path = dir.join(format!("run-2026010{}.jsonl", i));
+            std::fs::write(&path, b"x").unwrap();
+            // The first is still being written to: kept.
+            if i > 0 {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(old)
+                    .unwrap();
+            }
         }
         std::fs::write(dir.join("crash-1.txt"), b"x").unwrap();
         prune(&dir, "run-", 2);
@@ -328,7 +373,12 @@ mod tests {
         left.sort();
         assert_eq!(
             left,
-            ["crash-1.txt", "run-20260103.jsonl", "run-20260104.jsonl"]
+            [
+                "crash-1.txt",
+                "run-20260100.jsonl",
+                "run-20260103.jsonl",
+                "run-20260104.jsonl"
+            ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

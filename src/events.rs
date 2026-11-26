@@ -147,15 +147,28 @@ pub fn hash(bytes: &[u8]) {
     });
 }
 
-/// The hash so far, to go back to if a piece is sent again.
-pub fn hash_snapshot() -> Option<(Sha256, u64)> {
-    with_file(|file| file.hash.lock().unwrap_or_else(|e| e.into_inner()).clone()).flatten()
+/// Where the tracked file stood (hash and progress) before a piece.
+pub struct Snapshot {
+    hash: Option<(Sha256, u64)>,
+    moved: u64,
 }
 
-/// Back to `snapshot` before a piece is sent again.
-pub fn hash_restore(snapshot: &Option<(Sha256, u64)>) {
-    if snapshot.is_some() {
-        with_file(|file| *file.hash.lock().unwrap_or_else(|e| e.into_inner()) = snapshot.clone());
+/// The hash and progress so far, to go back to if a piece is sent again.
+pub fn hash_snapshot() -> Option<Snapshot> {
+    with_file(|file| Snapshot {
+        hash: file.hash.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        moved: file.moved.load(Ordering::Relaxed),
+    })
+}
+
+/// Back to `snapshot` before a piece is sent again, so it isn't hashed or
+/// counted twice.
+pub fn hash_restore(snapshot: &Option<Snapshot>) {
+    if let Some(snap) = snapshot {
+        with_file(|file| {
+            *file.hash.lock().unwrap_or_else(|e| e.into_inner()) = snap.hash.clone();
+            file.moved.store(snap.moved, Ordering::Relaxed);
+        });
     }
 }
 

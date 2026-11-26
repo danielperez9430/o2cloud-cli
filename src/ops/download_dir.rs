@@ -7,7 +7,7 @@
 //! are joined again. Each file is written to `.<id>.o2part` and renamed
 //! once complete, with its original modification date, so a cut download
 //! never looks finished: run the same command again with
-//! `--skip-existing` to resume it (from where it stopped, with a Range
+//! (it's the default since 1.0) to resume it (from where it stopped, with a Range
 //! request). Nothing local is ever overwritten.
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +56,8 @@ enum Outcome {
     Downloaded(u64),
     Skipped,
     Failed(O2Error),
+    /// Not started: the run stopped first.
+    NotStarted,
 }
 
 /// Download the cloud folder `target` (an ID or a path; `/` is the whole
@@ -236,7 +238,9 @@ pub async fn download_dir(
             .map(|(i, job)| {
                 async move {
                     if stop.load(Ordering::Relaxed) {
-                        return (i, Outcome::Failed(O2Error::SessionExpired));
+                        let outcome = Outcome::NotStarted;
+                        crate::events::emit("file", described(job, out_root, Some(&outcome)));
+                        return (i, outcome);
                     }
                     let key = serde_json::json!({ "local": job_json(job, out_root)["local"] });
                     let outcome = crate::events::track(
@@ -257,7 +261,13 @@ pub async fn download_dir(
                         if fatal && !stop.swap(true, Ordering::Relaxed) {
                             crate::warn!("  ✗ Stopping: {}", e);
                         } else if !fatal {
+                            let e = crate::redact::text(&e.to_string());
                             crate::warn!("  ⚠ {}: {}", job.cloud, e);
+                            crate::log::warn(
+                                "download-dir",
+                                "file failed",
+                                serde_json::json!({ "cloud": job.cloud, "error": e }),
+                            );
                         }
                     }
                     (i, outcome)
@@ -283,7 +293,7 @@ pub async fn download_dir(
                 bytes += n;
             }
             Some(Outcome::Skipped) => skipped += 1,
-            Some(Outcome::Failed(_)) => failed += 1,
+            Some(Outcome::Failed(_)) | Some(Outcome::NotStarted) => failed += 1,
             None => {
                 failed += 1;
                 // Never started: said once here.
@@ -333,7 +343,7 @@ pub async fn download_dir(
             std::io::ErrorKind::StorageFull,
             format!(
                 "stopped with {} file(s) left: the disk is full. Make room and run the \
-                 same command with --skip-existing to carry on",
+                 same command again to carry on",
                 failed
             ),
         )));
@@ -774,9 +784,9 @@ fn described(job: &Job<'_>, out_root: &Path, outcome: Option<&Outcome>) -> serde
         Some(Outcome::Skipped) => entry["action"] = "skipped".into(),
         Some(Outcome::Failed(e)) => {
             entry["action"] = "failed".into();
-            entry["error"] = e.to_string().into();
+            entry["error"] = crate::redact::text(&e.to_string()).into();
         }
-        None => {
+        Some(Outcome::NotStarted) | None => {
             entry["action"] = "failed".into();
             entry["error"] = "not started: the run stopped".into();
         }

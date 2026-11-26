@@ -1032,8 +1032,11 @@ fn decide(
         }
     };
     // The same size: by date.
+    // --on-conflict overwrite asks for the local version: one changed
+    // without changing size (a container, a database) counts too.
+    let replaces_newer = opts.update || opts.on_conflict == OnConflict::Overwrite;
     let same_size = || {
-        if newer && opts.update {
+        if newer && replaces_newer {
             Decision::Changed { old: all.clone() }
         } else if older && opts.update {
             Decision::Older { cloud: older_ids() }
@@ -1242,7 +1245,7 @@ fn check_existing_parts(
     if !skip_existing {
         return Err(O2Error::Conflict(format!(
             "this folder already has parts of a file named {} ({}): delete them \
-             first, or add --skip-existing to resume uploading the same file",
+             first (with --on-conflict duplicate, parts already there aren't resumed)",
             name,
             part_name(name, there[0].0)
         )));
@@ -1374,16 +1377,24 @@ async fn upload_local_file(
             // Say what is already up, so the upload can be resumed.
             Err(e) if split && !uploaded.ids.is_empty() => {
                 let ids: Vec<String> = uploaded.ids.iter().map(u64::to_string).collect();
-                return Err(O2Error::Api(format!(
-                    "{} — part {}/{} of {} failed; parts 1–{} are in the cloud \
-                     (ids: {}): run the same command with --skip-existing to resume",
-                    e,
+                let where_it_got = format!(
+                    "part {}/{} of {} failed; parts 1–{} are in the cloud (ids: {}): run the \
+                     same command again to resume",
                     i + 1,
                     pieces.len(),
                     name,
                     i,
                     ids.join(", ")
-                )));
+                );
+                // What went wrong keeps its kind (session, network,
+                // server), so the exit code and `retryable` say it.
+                let keeps_kind =
+                    matches!(e, O2Error::SessionExpired | O2Error::Http(_)) || e.exit_code() == 7;
+                if keeps_kind {
+                    crate::warn!("  ⚠ {}", where_it_got);
+                    return Err(e);
+                }
+                return Err(O2Error::Api(format!("{} — {}", e, where_it_got)));
             }
             Err(e) => return Err(explain_rejection(e, path)),
         }
@@ -2458,7 +2469,15 @@ pub async fn upload_dir(
                                 crate::warn!("  ✗ The session expired while uploading {}", name);
                             }
                         }
-                        Err(e) => crate::warn!("  ⚠ Upload failed for {}: {}", name, e),
+                        Err(e) => {
+                            let e = crate::redact::text(&e.to_string());
+                            crate::warn!("  ⚠ Upload failed for {}: {}", name, e);
+                            crate::log::warn(
+                                "upload-dir",
+                                "file failed",
+                                serde_json::json!({ "local": local, "error": e }),
+                            );
+                        }
                         Ok(_) => {}
                     }
                     // What was sent, whole, in this run.
@@ -2485,6 +2504,11 @@ pub async fn upload_dir(
                     _ => false,
                 };
                 crate::ui::file_done(result["size"].as_u64().unwrap_or(0), moved);
+                // Kept only for --json: for 288k files they'd take
+                // hundreds of MB.
+                if !json {
+                    done.1 = serde_json::Value::Null;
+                }
                 done
             })
             .buffer_unordered(opts.jobs.max(1))
@@ -2677,7 +2701,7 @@ pub async fn upload_dir(
     if not_done > 0 {
         crate::warn!(
             "✗ {} file(s) not uploaded: the session expired. Run the same command \
-             with --skip-existing to log in and carry on.",
+             again to log in and carry on.",
             not_done
         );
     }
@@ -2758,7 +2782,7 @@ fn describe(result: &mut serde_json::Value, outcome: &Result<FileOutcome, O2Erro
             result["cloud"] = there;
         }
         Err(e) => {
-            result["error"] = e.to_string().into();
+            result["error"] = crate::redact::text(&e.to_string()).into();
             result["action"] = "failed".into();
         }
     }
@@ -3451,7 +3475,7 @@ pub async fn download_file(
         output_path.display()
     );
     if json || crate::events::on() {
-        let path = output_path.canonicalize().unwrap_or(output_path);
+        let path = plain_path(output_path.canonicalize().unwrap_or(output_path));
         let mut out = serde_json::json!({
             "name": name,
             "path": path.display().to_string(),
@@ -3472,6 +3496,17 @@ pub async fn download_file(
         }
     }
     Ok(())
+}
+
+/// `path` without Windows' `\\?\` prefix, which `canonicalize` adds and
+/// which people and most programs don't expect.
+fn plain_path(path: PathBuf) -> PathBuf {
+    let text = path.display().to_string();
+    match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+        (Some(unc), _) => PathBuf::from(format!(r"\\{}", unc)),
+        (None, Some(local)) => PathBuf::from(local),
+        _ => path,
+    }
 }
 
 /// The hidden file that marks `path` as a download in progress:
@@ -5456,6 +5491,14 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_path() {
+        let p = |s: &str| plain_path(PathBuf::from(s)).display().to_string();
+        assert_eq!(p(r"\\?\C:\Users\a\x.bin"), r"C:\Users\a\x.bin");
+        assert_eq!(p(r"\\?\UNC\server\share\x"), r"\\server\share\x");
+        assert_eq!(p("/home/a/x.bin"), "/home/a/x.bin");
+    }
+
+    #[test]
     fn test_existing_parts_index() {
         let mut existing = ExistingFiles::new();
         existing.add(1, "f.002".into(), 10, 2);
@@ -5882,7 +5925,12 @@ mod tests {
         assert_eq!(o("dup.txt", 11, t), Decision::Changed { old: vec![21, 22] });
         assert!(matches!(o("big", 260, t), Decision::Changed { .. }));
         // The same size is still unchanged, and a new file new.
-        assert_eq!(o("same.txt", 10, t + 9000), Decision::Unchanged);
+        // The same size but newer locally: replaced too.
+        assert_eq!(
+            o("same.txt", 10, t + 9000),
+            Decision::Changed { old: vec![11] }
+        );
+        assert_eq!(o("same.txt", 10, t), Decision::Unchanged);
         assert_eq!(o("new.txt", 10, t), Decision::New);
         // Only `name.001` in the cloud: taken for old parts…
         assert!(matches!(

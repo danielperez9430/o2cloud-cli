@@ -42,13 +42,18 @@ pub fn register_auth(auth: &crate::config::AuthConfig) {
 }
 
 /// Keys whose value is always a secret, as `key=value` or `key: value`.
-const SECRET_KEYS: [&str; 6] = [
+const SECRET_KEYS: [&str; 11] = [
     "validationkey",
     "jsessionid",
     "access_token",
     "refresh_token",
+    "id_token",
+    "encryption_token",
+    "encryption-token",
     "client_secret",
+    "code_verifier",
     "authorization",
+    "\"code",
 ];
 
 /// `text` with every secret replaced: registered values, URLs (see
@@ -131,6 +136,8 @@ fn key_values(text: &str, key: &str) -> String {
             2
         } else if after.starts_with("\":\"") {
             3
+        } else if after.starts_with("\": \"") {
+            4
         } else {
             out.push_str(&text[pos..key_end]);
             pos = key_end;
@@ -171,16 +178,18 @@ fn bearer(text: &str) -> String {
 pub fn args(args: &[String]) -> Vec<String> {
     let secret = |flag: &str| {
         let flag = flag.trim_start_matches('-').to_ascii_lowercase();
-        [
-            "jsessionid",
-            "validationkey",
-            "secret",
-            "token",
-            "client-id",
-            "password",
-        ]
-        .iter()
-        .any(|s| flag.contains(s))
+        flag == "p"
+            || [
+                "jsessionid",
+                "validationkey",
+                "secret",
+                "token",
+                "client-id",
+                "password",
+                "phone",
+            ]
+            .iter()
+            .any(|s| flag.contains(s))
     };
     let mut out = Vec::with_capacity(args.len());
     let mut mask_next = false;
@@ -217,9 +226,13 @@ pub fn pseudonym(path: &str, salt: &str) -> String {
         }
         let hash = Sha256::digest(format!("{}{}", salt, name).as_bytes());
         let hex: String = hash[..3].iter().map(|b| format!("{:02x}", b)).collect();
+        // Only what looks like a real extension: `2019.Boda Ana y Luis`
+        // has none.
         let ext = std::path::Path::new(name)
             .extension()
-            .map(|e| format!(".{}", e.to_string_lossy()))
+            .map(|e| e.to_string_lossy().into_owned())
+            .filter(|e| e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(|e| format!(".{}", e))
             .unwrap_or_default();
         let mut flags = String::new();
         if !name.is_ascii() {
@@ -269,6 +282,13 @@ mod tests {
             "{t}"
         );
         assert!(t.ends_with("done"), "{t}");
+        let t = text(
+            r#"{"access_token": "AT-123456789", "encryption-token=ET-987654321", "code":"OC-55555"}"#,
+        );
+        assert!(
+            !t.contains("AT-1") && !t.contains("ET-9") && !t.contains("OC-5"),
+            "{t}"
+        );
         // A download link: its path is a token too.
         let t = text("from https://dl.o2online.es/a1b2c3d4e5/f/photo.jpg?sig=xyz).");
         assert_eq!(t, "from https://dl.o2online.es/…).");
@@ -293,6 +313,8 @@ mod tests {
             "--validationkey=VK-987654321",
             "--oauth-client-secret",
             "OCS-55555555",
+            "--phone",
+            "600111222",
             "upload-dir",
             "./ALBUM",
             "-j",
@@ -305,7 +327,10 @@ mod tests {
             !r.contains("JS-123456789") && !r.contains("VK-987654321"),
             "{r}"
         );
-        assert!(!r.contains("OCS-55555555"), "{r}");
+        assert!(
+            !r.contains("OCS-55555555") && !r.contains("600111222"),
+            "{r}"
+        );
         assert!(r.ends_with("upload-dir ./ALBUM -j 4"), "{r}");
     }
 
@@ -319,5 +344,7 @@ mod tests {
         assert_ne!(pseudonym("a/b", "s"), pseudonym("a/b", "t"));
         assert!(pseudonym("CON.txt", "s").contains("reserved"));
         assert!(pseudonym("x.", "s").contains("trailing"));
+        // A dot in a folder's name isn't an extension to keep.
+        assert!(!pseudonym("2019.Boda Ana y Luis", "s").contains("Boda"));
     }
 }
