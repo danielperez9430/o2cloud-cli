@@ -2,6 +2,21 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.3.0] — 2026-11-26
+
+### Added
+- `upload-dir --update --delete`: mirror a directory. Once the uploads
+  are done, what the cloud folder has and the directory no longer has
+  (files and whole folders: copies named `name (1)`, folders moved or
+  deleted locally, files uploaded from the web) goes to O2 Cloud's trash.
+  Only inside the uploaded folder. Never deleted: hidden and system
+  names, the parts of a file uploaded in parts, anything whose local path
+  still exists, and uploads not listed yet. Safeguards: worked out before
+  anything is uploaded; over 1,000 files stops the run with nothing
+  changed unless `--delete-max <n>`; a directory with no files is
+  refused; not with `--ext`. `--dry-run -v` lists what it would delete;
+  `--json` / `--json-lines` have `deleted` entries and counts.
+
 ## [1.2.2] — 2026-11-26
 
 ### Fixed
