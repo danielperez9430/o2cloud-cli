@@ -1298,6 +1298,37 @@ impl O2Client {
         Ok(in_listing_order(media))
     }
 
+    /// The server's time now, as the change log counts it (Unix ms): where
+    /// `changed_since` can start later.
+    pub async fn change_cursor(&self, auth: &AuthConfig) -> Result<u64, O2Error> {
+        Ok(self.changes_since(FAR_FUTURE_MS, auth).await?.requesttime)
+    }
+
+    /// The files added, changed, moved or renamed since `cursor` (from
+    /// `change_cursor`, a minute earlier to be safe), and whether the log
+    /// also had something it couldn't tell is not a file. The change log
+    /// knows of a new upload at once, while listings take up to a minute.
+    pub async fn changed_since(
+        &self,
+        cursor: u64,
+        auth: &AuthConfig,
+    ) -> Result<(Vec<u64>, bool), O2Error> {
+        let changes = self
+            .changes_since(cursor.saturating_sub(CHANGES_OVERLAP_MS), auth)
+            .await?;
+        Ok((changes.changed, changes.unknown.is_some()))
+    }
+
+    /// Every file, listed from the server now, without the local cache:
+    /// for decisions that delete (`upload-dir --delete`), which mustn't
+    /// rest on a change log that might have missed something.
+    pub async fn get_all_media_uncached(
+        &self,
+        auth: &AuthConfig,
+    ) -> Result<Vec<MediaItem>, O2Error> {
+        Ok(in_listing_order(self.list_media(None, auth).await?))
+    }
+
     /// `get_all_media`, after waiting (up to `max_wait`) for the files the
     /// cache knows of but the server doesn't return yet, such as uploads
     /// of the last minute, so they aren't taken for missing. Also returns

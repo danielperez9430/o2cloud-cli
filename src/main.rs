@@ -274,8 +274,9 @@ enum Commands {
         #[arg(long, requires = "update", conflicts_with = "ext")]
         delete: bool,
 
-        /// The most files --delete may move to the trash in one run
-        /// (default 1000): a safeguard against mirroring the wrong
+        /// The most files and folders --delete may move to the trash in
+        /// one run (default 1000; without it, also no more than half the
+        /// cloud folder's files): a safeguard against mirroring the wrong
         /// directory. Over it, nothing is done
         #[arg(long, value_name = "N", requires = "delete")]
         delete_max: Option<usize>,
@@ -904,7 +905,12 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 },
                 &extensions,
                 json,
-                delete.then(|| delete_max.unwrap_or(ops::DEFAULT_DELETE_MAX)),
+                delete.then(|| {
+                    (
+                        delete_max.unwrap_or(ops::DEFAULT_DELETE_MAX),
+                        delete_max.is_some(),
+                    )
+                }),
             )
             .await?;
         }
