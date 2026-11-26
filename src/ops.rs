@@ -796,6 +796,9 @@ enum Decision {
     /// Changed locally (another size, or newer): with `--update`, upload
     /// it and move these cloud files (the old version) to the trash.
     Changed { old: Vec<u64> },
+    /// Another version in the cloud (another size), without `--update`:
+    /// left alone rather than uploaded as `name (1)`.
+    Differs { cloud: Vec<u64> },
     /// Some of its parts are in the cloud: upload the rest.
     Resume,
 }
@@ -808,6 +811,7 @@ impl Decision {
             Decision::Unchanged => "unchanged",
             Decision::Older { .. } => "older",
             Decision::Changed { .. } => "update",
+            Decision::Differs { .. } => "differs",
             Decision::Resume => "resume",
         }
     }
@@ -832,8 +836,9 @@ fn mtime_ms(t: std::time::SystemTime) -> u64 {
 /// too. A file of another size counts as changed only if it isn't older
 /// locally: `--update` never puts an older version over a newer one.
 /// Without `--skip-existing` everything is uploaded, as `upload-dir` does
-/// then; without `--update`, a changed file is left to the plain upload
-/// as before (`New` if its size differs, `Unchanged` otherwise).
+/// then; without `--update`, a file of another size is `Differs` (left
+/// alone: uploading it would add a `name (1)` copy) and one of the same
+/// size is `Unchanged`, whatever its date.
 fn decide(
     name: &str,
     size: u64,
@@ -890,19 +895,19 @@ fn decide(
     let older_ids = || main_id.into_iter().collect::<Vec<_>>();
     // Another version: replaced with --update, unless older locally.
     let other_version = || {
-        if older {
+        if !opts.update {
+            Decision::Differs { cloud: all.clone() }
+        } else if older {
             Decision::Older { cloud: older_ids() }
-        } else if opts.update {
-            Decision::Changed { old: all.clone() }
         } else {
-            Decision::New
+            Decision::Changed { old: all.clone() }
         }
     };
     // The same size: by date.
     let same_size = || {
         if newer && opts.update {
             Decision::Changed { old: all.clone() }
-        } else if older {
+        } else if older && opts.update {
             Decision::Older { cloud: older_ids() }
         } else {
             Decision::Unchanged
@@ -1189,6 +1194,9 @@ enum FileOutcome {
     Updated(Uploaded, Vec<u64>),
     /// Older locally than in the cloud (these files): left alone.
     Older(Vec<u64>),
+    /// Another size than the cloud's copy (these files), without
+    /// `--update`: left alone.
+    Differs(Vec<u64>),
     /// `--dry-run`: what would be done.
     Planned(Decision),
 }
@@ -1833,7 +1841,7 @@ pub async fn upload_dir(
                     };
                     return (i, result, Ok(FileOutcome::Uploaded(empty)));
                 }
-                let decision = (opts.update || opts.dry_run).then(|| {
+                let decision = (opts.skip_existing || opts.dry_run).then(|| {
                     let local_ms = modified.map(mtime_ms).unwrap_or(0);
                     decide(&name, size, local_ms, parent_o2, existing, mdates, opts)
                 });
@@ -1843,6 +1851,10 @@ pub async fn upload_dir(
                         Decision::New => eprintln!("  + {}", local),
                         Decision::Changed { .. } => eprintln!("  ↻ {} (changed locally)", local),
                         Decision::Resume => eprintln!("  … {} (parts missing)", local),
+                        Decision::Differs { .. } => eprintln!(
+                            "  ≠ {} (another size than in the cloud; --update replaces it)",
+                            local
+                        ),
                         _ => {}
                     }
                     result["action"] = decision.label().into();
@@ -1850,10 +1862,14 @@ pub async fn upload_dir(
                     match decision {
                         Decision::Changed { old } => result["replaces"] = old.clone().into(),
                         // The cloud's copy, as in the real run.
-                        Decision::Older { cloud } if cloud.len() > 1 => {
+                        Decision::Older { cloud } | Decision::Differs { cloud }
+                            if cloud.len() > 1 =>
+                        {
                             result["parts"] = cloud.clone().into()
                         }
-                        Decision::Older { cloud } if !cloud.is_empty() => {
+                        Decision::Older { cloud } | Decision::Differs { cloud }
+                            if !cloud.is_empty() =>
+                        {
                             result["id"] = cloud[0].into()
                         }
                         _ => {}
@@ -1877,6 +1893,14 @@ pub async fn upload_dir(
                             local
                         );
                         Ok(FileOutcome::Older(cloud))
+                    }
+                    Some(Decision::Differs { cloud }) => {
+                        eprintln!(
+                            "  ≠ {} has another size than in the cloud: left alone \
+                             (--update replaces it)",
+                            local
+                        );
+                        Ok(FileOutcome::Differs(cloud))
                     }
                     _ => upload_local_file(
                         client,
@@ -1911,7 +1935,7 @@ pub async fn upload_dir(
 
     // One entry per file for `--json`, failed uploads included.
     let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
-    let (mut empty_images, mut updated, mut older) = (0usize, 0usize, 0usize);
+    let (mut empty_images, mut updated, mut older, mut differs) = (0usize, 0usize, 0usize, 0usize);
     let mut planned: HashMap<&'static str, usize> = HashMap::new();
     let set_ids = |result: &mut serde_json::Value, up: &Uploaded| {
         if up.parts > 0 {
@@ -1947,10 +1971,20 @@ pub async fn upload_dir(
                     result["replaced"] = old.into();
                     set_ids(&mut result, &up);
                 }
-                Ok(FileOutcome::Older(cloud)) => {
-                    older += 1;
+                Ok(outcome @ (FileOutcome::Older(_) | FileOutcome::Differs(_))) => {
+                    let (label, cloud) = match outcome {
+                        FileOutcome::Older(cloud) => {
+                            older += 1;
+                            ("older", cloud)
+                        }
+                        FileOutcome::Differs(cloud) => {
+                            differs += 1;
+                            ("differs", cloud)
+                        }
+                        _ => unreachable!(),
+                    };
                     result["skipped"] = true.into();
-                    result["action"] = "older".into();
+                    result["action"] = label.into();
                     // The cloud's copy, as `skipped` entries have.
                     if cloud.len() > 1 {
                         result["parts"] = cloud.into();
@@ -1997,12 +2031,20 @@ pub async fn upload_dir(
         let n = |k| planned.get(k).copied().unwrap_or(0);
         eprintln!(
             "Dry run: {} to upload, {} to update, {} to resume, {} unchanged, {} older locally, \
-             {} empty image(s), {} beyond O2 Cloud's limits; nothing was changed.",
+             {}{} empty image(s), {} beyond O2 Cloud's limits; nothing was changed.",
             n("upload"),
             n("update"),
             n("resume"),
             n("unchanged"),
             n("older"),
+            if n("differs") > 0 {
+                format!(
+                    "{} of another size (left alone without --update), ",
+                    n("differs")
+                )
+            } else {
+                String::new()
+            },
             empty_images,
             beyond_limits.len()
         );
@@ -2034,6 +2076,13 @@ pub async fn upload_dir(
         eprintln!(
             "  ({} file(s) are older locally than in the cloud; left alone)",
             older
+        );
+    }
+    if differs > 0 {
+        eprintln!(
+            "  ({} file(s) have another size than in the cloud; left alone. \
+             Use --update to replace the cloud's copies)",
+            differs
         );
     }
     if updated > 0 {
@@ -4586,7 +4635,17 @@ mod tests {
             d("sized.txt", 10, t, true),
             Decision::Changed { old: vec![31] }
         );
-        assert_eq!(d("sized.txt", 10, t, false), Decision::New);
+        // Without --update another size is left alone (not a `name (1)`
+        // copy), older or not; the same size is unchanged, whatever its date.
+        assert_eq!(
+            d("sized.txt", 10, t, false),
+            Decision::Differs { cloud: vec![31] }
+        );
+        assert_eq!(
+            d("sized.txt", 10, t - 3000, false),
+            Decision::Differs { cloud: vec![31] }
+        );
+        assert_eq!(d("same.txt", 10, t - 3000, false), Decision::Unchanged);
         // Duplicates: both replaced.
         assert_eq!(
             d("dup.txt", 10, t + 5000, true),
@@ -4610,7 +4669,7 @@ mod tests {
         };
         old.sort();
         assert_eq!(old, [41, 42, 43]);
-        assert_eq!(d("big", 90, t, false), Decision::New);
+        assert!(matches!(d("big", 90, t, false), Decision::Differs { .. }));
         // …and parts now, one file in the cloud.
         existing.insert((1, "grown".into()), vec![(90, 61)]);
         let mdates: HashMap<u64, u64> = mdates.into_iter().chain([(61, t)]).collect();

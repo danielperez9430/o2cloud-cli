@@ -2,6 +2,17 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.15.1] — 2026-11-26
+
+### Changed
+- `upload-dir --skip-existing` (without `--update`) no longer uploads a
+  file the cloud has under the same name with another size: the server
+  would keep both, the new one as `name (1)`. It is left alone and
+  reported (`≠ … has another size than in the cloud`), with a count at
+  the end; `--update` replaces it. `--json` entries for it have
+  `"action": "differs"`, `"skipped": true` and the cloud copy's `id` (or
+  `parts`); `--dry-run` counts them as "of another size".
+
 ## [0.15.0] — 2026-11-26
 
 ### Added
