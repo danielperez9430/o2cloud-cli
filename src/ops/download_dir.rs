@@ -94,7 +94,88 @@ pub async fn download_dir(
         &opts.extensions,
         cfg!(windows),
     );
+    run_jobs(
+        client,
+        auth,
+        &tree.path(folder),
+        dirs,
+        jobs,
+        out_root,
+        opts,
+        json,
+    )
+    .await
+}
 
+/// Download the photos and videos of a label (`media`, named `name`: a
+/// moment, a place, a person, an album) into a folder of that name inside
+/// `output`.
+pub async fn download_label(
+    client: &O2Client,
+    auth: &AuthConfig,
+    name: &str,
+    media: &[MediaItem],
+    output: Option<PathBuf>,
+    opts: &DownloadDirOptions,
+    json: bool,
+) -> Result<(), O2Error> {
+    let out_root = output.unwrap_or_else(|| PathBuf::from("."));
+    let (dirs, jobs) = plan_flat(media, name, &opts.extensions, cfg!(windows));
+    run_jobs(client, auth, name, dirs, jobs, out_root, opts, json).await
+}
+
+/// The folder (`top`) and the files to download for a flat list of media
+/// (a label's), with local names made safe and unique as `plan` does.
+fn plan_flat<'a>(
+    media: &'a [MediaItem],
+    top: &str,
+    extensions: &[String],
+    windows: bool,
+) -> (Vec<PathBuf>, Vec<Job<'a>>) {
+    let base = PathBuf::from(local_name(top, 0, true, windows));
+    let mut entries: Vec<(u64, String, Entry<'a>)> = media
+        .iter()
+        .map(|m| {
+            (
+                m.id,
+                m.name.clone().unwrap_or_default(),
+                Entry::File(vec![m]),
+            )
+        })
+        .collect();
+    entries.retain(|(_, name, _)| wanted(name, extensions));
+    let locals = local_names(&entries, windows);
+    let mut jobs = Vec::new();
+    for ((_, name, entry), local) in entries.into_iter().zip(locals) {
+        if let Entry::File(pieces) = entry {
+            let size = pieces.iter().map(|p| p.size).sum::<Option<u64>>();
+            let mtime = pieces[0].modificationdate.or(pieces[0].creationdate);
+            jobs.push(Job {
+                renamed: local != name,
+                pieces,
+                cloud: format!("{}/{}", top, name),
+                local: base.join(&local),
+                size,
+                mtime,
+            });
+        }
+    }
+    (vec![base], jobs)
+}
+
+/// Download `jobs` (from `source`, for messages) into `out_root`, creating
+/// `dirs` first.
+#[allow(clippy::too_many_arguments)]
+async fn run_jobs(
+    client: &O2Client,
+    auth: &AuthConfig,
+    source: &str,
+    dirs: Vec<PathBuf>,
+    jobs: Vec<Job<'_>>,
+    out_root: PathBuf,
+    opts: &DownloadDirOptions,
+    json: bool,
+) -> Result<(), O2Error> {
     let total: u64 = jobs.iter().filter_map(|j| j.size).sum();
     crate::events::emit(
         "start",
@@ -110,7 +191,7 @@ pub async fn download_dir(
         } else {
             "Downloading"
         },
-        tree.path(folder),
+        source,
         format_size(total),
         jobs.len(),
         dirs.len(),
@@ -943,6 +1024,27 @@ mod tests {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    #[test]
+    fn test_plan_flat() {
+        let media = vec![
+            item(1, "IMG_1.JPG", 2, 10),
+            item(2, "img_1.jpg", 3, 20),
+            item(3, "b.png", 4, 5),
+        ];
+        let (dirs, jobs) = plan_flat(&media, "Un día: hace 1 año", &[], true);
+        assert_eq!(dirs.len(), 1);
+        let locals: Vec<String> = jobs.iter().map(|j| slashed(&j.local)).collect();
+        // Into one folder named after the label (made safe for Windows),
+        // and two names that differ only in case kept apart.
+        assert!(locals.iter().all(|l| l.starts_with(&slashed(&dirs[0]))));
+        assert!(!slashed(&dirs[0]).contains(':'), "{:?}", dirs);
+        let mut names: Vec<String> = locals.iter().map(|l| l.to_lowercase()).collect();
+        names.dedup();
+        assert_eq!(names.len(), 3, "{locals:?}");
+        let (_, jobs) = plan_flat(&media, "x", &["png".to_string()], false);
+        assert_eq!(jobs.len(), 1);
     }
 
     #[test]

@@ -104,6 +104,7 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 📑 `cp <file> <folder>` | Copy a file on the server (`--name` to name the copy) |
 | ✏️ `rename <file or folder> <name>` | Rename a file or folder |
 | 🩹 `fix-jpeg <file or folder>` | Find JPEGs whose colour profile O2 Cloud can't read (`MED-1000`); `--apply` repairs them without touching the image |
+| 🏷️ `labels [label]` | List the moments, places, people and albums O2 Cloud groups photos into (`--kind moments\|places\|people\|albums`), or one label's photos; `download-dir --label <id or name>` downloads them |
 | 📊 `quota` | Show storage used, free and in the trash |
 
 Run `o2cloud <command> --help` for all the options.
@@ -153,6 +154,7 @@ $ o2cloud mkdir -p /Backups --json 2>/dev/null
 - `upload-dir`: an array with one object per file: `local` (its path inside the directory), `name`, `folderid`, `size`, `skipped`, and `id` (or `parts`), or `error` if that file failed. An empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` isn't sent, since O2 Cloud rejects empty images: it has `"skipped": true, "empty": true` and no `id`. Each entry also has `ids` (always a list) and `action`: `uploaded`, `skipped`, `empty`, `failed`, `differs` (another size than in the cloud, left alone with `--on-conflict skip`), `conflict` (another size, not uploaded: see Files already in the cloud), `updated` (plus `replaced`, the IDs of the old version now in the trash) or, with `--update`, `older`. An `older` entry has the cloud copy's `id`, and a `differs` entry its `id`, or `parts` if it's in parts. With `--dry-run` the entries have `"dry_run": true`, no `skipped`, and `action` is what it would do: `upload`, `update` (plus `replaces`), `resume`, `unchanged`, `differs`, `conflict`, `older`, `empty`, or `failed` for a file beyond O2 Cloud's limits; `folderid` is `null` for a folder that doesn't exist yet.
 - `download`: `id` (or `parts`, for a file uploaded in parts), `ids`, `name`, `path` (where it was saved, absolute), `size` and `"action": "downloaded"`.
 - `download-dir`: an array with one object per file: `id` (or `parts`), `name`, `cloud` (its path in the cloud), `local` (its path inside the output folder, with `/`), `path` (where it was saved), `folderid`, `size`, `action` (`downloaded`, `skipped` or `failed`), `error` if it failed, and `renamed: true` if its local name differs from the cloud one. `path` is relative if `-o` was. With `--dry-run`, the entries have `"dry_run": true` and `action` is what it would do with what's on disk: `download`, `resume` (a cut download it would carry on), `skipped` (already there) or `failed` (a local file of that name it won't overwrite).
+- `labels`: an array of labels: `id`, `name`, `kind` (`moment`, `place`, `person`, `album`), `origin` (O2 Cloud's: `flashback`, `event`, `geolocalized`, `face`, `omh`, `shared_label`), `count`, `date`, `cover` (the ID of its cover photo) and `items` (the IDs of its photos and videos). `labels <label> --json` is one label with `files` (`id`, `name`, `size`, `date`, `path`, which is `null` for the phone app's photos, which have no folder).
 - `fix-jpeg`: an array with one object per JPEG with a problem: `path`, `problem` (`mislabelled` or `damaged`), `chunks`, `fixed`, and `error` if repairing it failed.
 - `mkdir`: `id`, `path`, and `created` (`false` when `-p` found it already there).
 - `cp`: `id` of the copy, `name`, `folderid`, `path`, and `source` (the original's ID); for a file in parts, `parts` and `source_parts` instead of `id` and `source`.
@@ -224,6 +226,8 @@ o2cloud download /disk.iso                       # joins disk.iso.001, .002, …
 o2cloud download-dir /Photos -o ~/backup         # ~/backup/Photos with every subfolder
 o2cloud download-dir / -o ~/o2-account           # the whole account (e.g. before leaving)
 o2cloud download-dir / -o ~/o2-account                   # again: resumes after a cut
+o2cloud labels --kind moments                    # O2 Cloud's moments ("A day like today…")
+o2cloud download-dir --label 78778466 -o ~/Moments   # a moment's photos, by ID or name
 ```
 
 </details>

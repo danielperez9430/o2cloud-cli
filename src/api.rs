@@ -1598,6 +1598,62 @@ impl O2Client {
         Ok(data.data.media)
     }
 
+    /// The account's labels of these `origins` (see `Label`): albums,
+    /// and those O2 Cloud makes by itself (places, people, moments).
+    /// `POST /sapi/label?action=get`, 100 a page, as the web client asks.
+    pub async fn get_labels(
+        &self,
+        origins: &[&str],
+        auth: &AuthConfig,
+    ) -> Result<Vec<Label>, O2Error> {
+        #[derive(Deserialize)]
+        struct LabelData {
+            #[serde(default)]
+            labels: Vec<Label>,
+            #[serde(default)]
+            more: bool,
+        }
+        let body = serde_json::json!({
+            "data": { "types": ["picture", "video"], "origin": origins }
+        });
+        let mut labels = Vec::new();
+        loop {
+            let url = format!("{}/sapi/label", BASE_URL);
+            let offset = labels.len().to_string();
+            let req = self
+                .client
+                .post(&url)
+                .timeout(REQUEST_TIMEOUT)
+                .query(&[
+                    ("action", "get"),
+                    ("limit", "100"),
+                    ("shared_items", "true"),
+                    ("offset", offset.as_str()),
+                    ("validationkey", &auth.validationkey),
+                ])
+                .json(&body);
+            let resp = self.send_sapi(req, auth).await?;
+            let status = resp.status();
+            let raw = resp.text().await?;
+            if !status.is_success() {
+                return Err(O2Error::Api(format!(
+                    "Get labels failed (status {}): {}",
+                    status,
+                    truncate_utf8(&raw, 300)
+                )));
+            }
+            if let Some(err) = sapi_error(&raw) {
+                return Err(O2Error::Api(format!("Get labels failed: {}", err)));
+            }
+            let page: RawResponse<LabelData> = parse_json(&raw, "labels")?;
+            let got = page.data.labels.len();
+            labels.extend(page.data.labels);
+            if !page.data.more || got == 0 {
+                return Ok(labels);
+            }
+        }
+    }
+
     /// The download URL of one file, asked for by ID. A file uploaded a
     /// moment ago can be listed without a `url` until SAPI has validated
     /// it; this asks again until it has one.
@@ -2600,6 +2656,29 @@ pub struct StorageSpace {
 }
 
 /// A media item returned by `POST /sapi/media?action=get`.
+/// A label: a set of photos and videos. Albums are made by people
+/// (`origin` `omh`, or `shared_label` when shared); O2 Cloud makes the
+/// rest by itself: places (`geolocalized`), people (`face`, once face
+/// recognition is turned on) and moments (`flashback`, `event`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Label {
+    #[serde(rename = "labelid")]
+    pub id: u64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// The IDs of its photos and videos.
+    #[serde(default)]
+    pub items: Vec<u64>,
+    /// When it happened (Unix ms).
+    #[serde(default)]
+    pub date: Option<u64>,
+    /// The photo shown as its cover.
+    #[serde(default)]
+    pub coverid: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct MediaItem {
     #[serde(deserialize_with = "deserialize_id")]

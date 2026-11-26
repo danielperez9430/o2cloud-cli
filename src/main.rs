@@ -426,6 +426,22 @@ enum Commands {
         include_names: bool,
     },
 
+    /// List the albums and what O2 Cloud groups by itself (moments, places,
+    /// and people once face recognition is turned on in its website); with
+    /// a label's ID or name, its photos and videos
+    Labels {
+        /// A label's ID or name, to list its photos and videos
+        label: Option<String>,
+
+        /// Which labels to list
+        #[arg(long, value_enum, default_value_t = ops::LabelKind::All)]
+        kind: ops::LabelKind,
+
+        /// Print JSON instead of messages
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show storage used, free and in the trash
     Quota {
         /// Print JSON instead of messages
@@ -437,7 +453,14 @@ enum Commands {
     /// account) into a local folder; files uploaded in parts are joined
     DownloadDir {
         /// Folder ID or path (e.g. /Photos), or / for the whole account
-        target: String,
+        #[arg(required_unless_present = "label")]
+        target: Option<String>,
+
+        /// Download a label instead of a folder: a moment, a place, a person
+        /// or an album (its ID or name, see `o2cloud labels`), into a folder
+        /// of its name
+        #[arg(long, conflicts_with = "target", value_name = "LABEL")]
+        label: Option<String>,
 
         /// Local folder to download into (default: the current one; needed
         /// for /)
@@ -1025,6 +1048,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
 
         Commands::DownloadDir {
             target,
+            label,
             output,
             jobs,
             skip_existing,
@@ -1047,15 +1071,43 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 extensions,
                 dry_run,
             };
-            ops::download_dir(
-                &client,
-                &auth,
-                &target,
-                output.map(PathBuf::from),
-                &opts,
-                json,
-            )
-            .await?;
+            match (label, target) {
+                (Some(label), _) => {
+                    let label = ops::find_label(&client, &auth, &label).await?;
+                    let media = ops::label_media(&client, &auth, &label).await?;
+                    let name = label.name.clone().unwrap_or_else(|| label.id.to_string());
+                    ops::download_label(
+                        &client,
+                        &auth,
+                        &name,
+                        &media,
+                        output.map(PathBuf::from),
+                        &opts,
+                        json,
+                    )
+                    .await?;
+                }
+                (None, Some(target)) => {
+                    ops::download_dir(
+                        &client,
+                        &auth,
+                        &target,
+                        output.map(PathBuf::from),
+                        &opts,
+                        json,
+                    )
+                    .await?;
+                }
+                (None, None) => unreachable!("clap requires one"),
+            }
+        }
+
+        Commands::Labels { label, kind, json } => {
+            let (client, auth) = require_client_and_auth().await?;
+            match label {
+                Some(label) => ops::show_label(&client, &auth, &label, json).await?,
+                None => ops::list_labels(&client, &auth, kind, json).await?,
+            }
         }
 
         Commands::Quota { json } => {
@@ -1095,6 +1147,7 @@ async fn main() {
             | Commands::Status { .. }
             | Commands::Quota { .. }
             | Commands::Shares { .. }
+            | Commands::Labels { .. }
             | Commands::DebugReport { .. }
     );
     log::init(cli.debug, !only_looks);

@@ -7,7 +7,9 @@ use crate::error::O2Error;
 use crate::util::{format_size, format_unix_utc, mime_type_from_name, system_time_to_compact_iso};
 
 mod download_dir;
-pub use download_dir::{download_dir, DownloadDirOptions};
+pub use download_dir::{download_dir, download_label, DownloadDirOptions};
+mod labels;
+pub use labels::{find_label, label_media, list_labels, show_label, LabelKind};
 
 // ------------------------------------------------------------------
 // List

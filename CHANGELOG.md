@@ -2,6 +2,20 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.1.0] — 2026-11-26
+
+### Added
+- `o2cloud labels`: the moments ("A day like today, 1 year ago"…),
+  places and people O2 Cloud groups photos into by itself, and albums,
+  with how many photos each has and its date (`--kind
+  moments|places|people|albums`, `--json`). People appear only once face
+  recognition is turned on in O2 Cloud's website. `labels <id or name>`
+  lists a label's photos and videos.
+- `download-dir --label <id or name>`: downloads a label's photos and
+  videos into a folder of its name, with everything `download-dir` does
+  (resume, skip what's there, safe names, `--dry-run`, `--json`,
+  `--json-lines`).
+
 ## [1.0.1] — 2026-11-26
 
 ### Changed
