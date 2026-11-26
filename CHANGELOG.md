@@ -20,6 +20,39 @@ All notable changes to o2cloud-cli will be documented in this file.
   the `action` it would take.
 - `upload-dir --json` entries have an `action` field.
 
+### Fixed
+From a review of the new commands:
+- `download-dir` of files uploaded in parts would fail on Windows: the
+  partial file was opened in a mode Windows can't truncate. Parts now
+  resume from the one a cut stopped in (Range within it), each retried
+  once with a fresh URL, instead of starting over with URLs that could
+  expire during a long file. The partial file is now `.<id>.o2part`, so a
+  leftover from another version of the file is never resumed into this
+  one (and long names still fit), and one larger than the file is
+  started over. A session that expires while asking for URLs says so.
+- `upload-dir --update` never replaces a newer cloud copy with an older
+  local one of another size; replaces the parts of a file that is now
+  under the part size (and the whole file of one now over it), instead
+  of leaving the old version next to the new; and if a replacement fails
+  halfway it takes back what it had uploaded, so it doesn't leave
+  `name (1)` copies that pile up on each run. An expired session there
+  stops the run as elsewhere.
+- `upload-dir --dry-run` without `--skip-existing` reports every file as
+  to upload, as the real run does, and lists files beyond O2 Cloud's
+  limits; `older` entries carry the cloud copy's `id`.
+
+### Changed
+- Less memory on large folders: `upload-dir` and `download-dir` keep
+  their per-file results only with `--json` (about 200 MB fewer for
+  288,000 files), and listings no longer keep or ask for fields they
+  don't use (the first full listing of such an account takes about a
+  third of the memory).
+- `upload-dir` asks for the folder list once instead of twice.
+- `download-dir` joins files in parts looking only in their folder,
+  not the whole account.
+- `fix-jpeg` and the `MED-1000` explanation read only a JPEG's header
+  (the first 256 KB), not the whole file.
+
 ## [0.14.1] — 2026-11-26
 
 ### Fixed

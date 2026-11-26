@@ -60,8 +60,25 @@ fn icc_chunks(bytes: &[u8]) -> Option<Vec<(usize, u8, u8, &[u8])>> {
     }
 }
 
+/// The start of the file at `path`, enough to check its colour profile:
+/// the header ends before the image data, so the first 256 KB usually
+/// hold it all; if not, the whole file.
+pub fn read_header(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    std::fs::File::open(path)?
+        .take(256 * 1024)
+        .read_to_end(&mut head)?;
+    let complete = icc_chunks(&head).is_some() || !head.starts_with(&[0xFF, 0xD8]);
+    if complete || head.len() < 256 * 1024 {
+        Ok(head)
+    } else {
+        std::fs::read(path)
+    }
+}
+
 /// What, if anything, is wrong with the colour profile of the JPEG in
-/// `bytes`.
+/// `bytes` (the whole file, or its start from `read_header`).
 pub fn profile_problem(bytes: &[u8]) -> Option<ProfileProblem> {
     let chunks = icc_chunks(bytes)?;
     let n = chunks.len();
