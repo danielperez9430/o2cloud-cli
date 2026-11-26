@@ -261,7 +261,8 @@ enum Commands {
 
         /// Also upload files that changed locally (another size, or a
         /// newer modification date than in the cloud) and move the cloud's
-        /// old copy to the trash. Implies --skip-existing
+        /// old copy to the trash; a file older locally is left alone.
+        /// With it, --on-conflict doesn't apply
         #[arg(long)]
         update: bool,
 
@@ -580,6 +581,22 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     Ok((new_client, new_auth))
 }
 
+/// Take the destination off `upload`'s arguments: the last one, if there
+/// are several and it's a cloud path (starts with `/`) rather than a local
+/// file.
+fn split_destination(paths: &mut Vec<String>) -> Option<String> {
+    match paths.last() {
+        Some(last)
+            if paths.len() > 1
+                && last.starts_with('/')
+                && !std::path::Path::new(last).is_file() =>
+        {
+            paths.pop()
+        }
+        _ => None,
+    }
+}
+
 /// Why `--json-lines` can't be used with this command line, if it can't.
 fn json_lines_problem(cli: &Cli) -> Option<&'static str> {
     if !cli.json_lines {
@@ -692,7 +709,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                         ),
                         Ok(false) => (
                             "expired",
-                            "expired (the next command opens the login window)".to_string(),
+                            "expired (log in again with `o2cloud login`)".to_string(),
                         ),
                         Err(e) => (
                             "unknown",
@@ -867,23 +884,28 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             yes,
         } => {
             let (client, auth) = require_client_and_auth().await?;
-            // Each in turn, going on past one that fails.
+            // The folder list once for all; each target in turn, going on
+            // past one that fails.
+            let folders = client.get_all_folders(&auth).await?;
             let mut first_error = None;
             let mut failed = 0;
             for target in &targets {
-                if let Err(e) = ops::delete_target(&client, &auth, target, recursive, yes).await {
+                if let Err(e) =
+                    ops::delete_target(&client, &auth, target, recursive, yes, &folders).await
+                {
                     if matches!(e, O2Error::SessionExpired) {
                         return Err(e);
                     }
                     if targets.len() > 1 {
-                        crate::warn!("  ⚠ {}: {}", target, e);
+                        crate::warn!("  ⚠ {}: {}", target, redact::text(&e.to_string()));
                     }
                     failed += 1;
                     first_error.get_or_insert(e);
                 }
             }
             match first_error {
-                Some(e) if targets.len() == 1 => return Err(e),
+                // None deleted: what went wrong, as it is.
+                Some(e) if failed == targets.len() => return Err(e),
                 Some(_) => {
                     return Err(O2Error::Partial(format!(
                         "{} of {} could not be deleted",
@@ -901,18 +923,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             upload,
             json,
         } => {
-            // The last one is where to put them if it's a cloud path, not
-            // a local file.
-            let destination = match paths.last() {
-                Some(last)
-                    if paths.len() > 1
-                        && last.starts_with('/')
-                        && !std::path::Path::new(last).is_file() =>
-                {
-                    paths.pop()
-                }
-                _ => None,
-            };
+            let destination = split_destination(&mut paths);
             if destination.is_some() && folder.is_some() {
                 return Err(O2Error::Invalid(
                     "give the destination once: as the last argument or with --folder".into(),
@@ -931,7 +942,18 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 }
             }
             let (client, auth) = require_client_and_auth().await?;
-            let folder = ops::folder_arg(&client, &auth, destination.or(folder).as_deref()).await?;
+            let given = destination.is_some();
+            let folder = ops::folder_arg(&client, &auth, destination.or(folder).as_deref())
+                .await
+                .map_err(|e| match e {
+                    // Say why it was looked up in the cloud.
+                    O2Error::NotFound(msg) if given => O2Error::NotFound(format!(
+                        "{} (the last argument starts with `/`, so it was taken as the folder \
+                         in the cloud to upload to; it must exist)",
+                        msg
+                    )),
+                    e => e,
+                })?;
             ops::upload_files(
                 &client,
                 &auth,
@@ -1150,5 +1172,52 @@ async fn main() {
             println!("{}", e.to_json());
         }
         std::process::exit(e.exit_code());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_destination() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut p = v(&["a.jpg", "b.jpg", "/Fotos/2024"]);
+        assert_eq!(split_destination(&mut p).as_deref(), Some("/Fotos/2024"));
+        assert_eq!(p, v(&["a.jpg", "b.jpg"]));
+        // One argument is always a file to upload.
+        let mut p = v(&["/Fotos"]);
+        assert_eq!(split_destination(&mut p), None);
+        // The last one isn't a cloud path.
+        let mut p = v(&["a.jpg", "b.jpg"]);
+        assert_eq!(split_destination(&mut p), None);
+        // A local file given by its absolute path is a file, not a folder.
+        let here = std::env::current_exe().unwrap().display().to_string();
+        if here.starts_with('/') {
+            let mut p = v(&["a.jpg", &here]);
+            assert_eq!(split_destination(&mut p), None);
+        }
+    }
+
+    #[test]
+    fn test_upload_options() {
+        use ops::OnConflict;
+        let flags = |on_conflict, skip_existing| UploadFlags {
+            on_conflict,
+            skip_existing,
+            part_size: Some(100),
+        };
+        // Tests run without a terminal: no one to ask, so fail.
+        let o = flags(None, false).options(1);
+        assert_eq!((o.on_conflict, o.skip_existing), (OnConflict::Fail, true));
+        let o = flags(Some(OnConflict::Ask), false).options(1);
+        assert_eq!(o.on_conflict, OnConflict::Fail);
+        let o = flags(None, true).options(1);
+        assert_eq!(o.on_conflict, OnConflict::Skip);
+        let o = flags(Some(OnConflict::Overwrite), true).options(1);
+        assert_eq!(o.on_conflict, OnConflict::Overwrite);
+        // Only duplicate uploads what's already there again.
+        let o = flags(Some(OnConflict::Duplicate), false).options(1);
+        assert!(!o.skip_existing);
     }
 }

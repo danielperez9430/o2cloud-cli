@@ -12,6 +12,7 @@
 | [Errors with `--json`](#errors-with---json) | Only `Error: …` on stderr | Also `{"error": {…}}` on stdout | Check the exit code before reading stdout as a result |
 | [Session expired](#session-expired-and-the-login-window) | Opens the login window in the middle of any command | Opens it by itself only at a terminal; otherwise exit code `4` | Run `o2cloud login` when you get `4` |
 | [Messages](#fewer-lines-on-stderr) | A line per file on stderr | A progress bar and a summary | `-v` for a line per file; `--json` for results |
+| [`download-dir` and local files](#download-dir-skips-what-is-already-there) | Without `--skip-existing`, a local file already there was an error | Skipped if it has the same size; a cut download is resumed | Nothing; `--skip-existing` is still accepted |
 | [A file already in the cloud](#files-already-in-the-cloud) | Uploaded again; O2 Cloud names it `name (1)` | Same size: skipped. Another size: a conflict (`--on-conflict`) | Add `--on-conflict duplicate` for the old behaviour, or handle exit code `5` |
 
 What doesn't change:
@@ -40,7 +41,7 @@ In 0.x every error exited with `1`. In 1.0 the code says what went wrong:
 
 - If your script only checks for zero vs non-zero, nothing changes.
 - If it checks for `1` specifically, check for non-zero instead.
-- Codes `6` and `7` are worth retrying: run the same command again (with `--skip-existing` for `upload-dir`).
+- Codes `6` and `7` are worth retrying: run the same command again; what's already there is skipped.
 
 ## Errors with `--json`
 
@@ -99,6 +100,12 @@ A file in parts has `parts` (a list of IDs) instead of `id`.
 - **For the 0.x behaviour,** add `--on-conflict duplicate`.
 - **In an app,** don't pass `--on-conflict` the first time. On exit code `5`, show the user each `conflict` entry ("you have a.jpg, 2.4 MB, 02/06/2024; the cloud has 2.1 MB, 01/05/2024: overwrite or skip?"). Then run it again with `--on-conflict overwrite` or `--on-conflict skip`. You can run it once per file for answers that differ.
 - **In a script** that relied on `--skip-existing`, nothing changes.
+
+## `download-dir` skips what is already there
+
+In 0.x, `download-dir` without `--skip-existing` counted a local file that was already there as a failure (and never overwrote it). In 1.0 it always skips a local file with the same size, and resumes a cut download, as `--skip-existing` did. A local file with another size is still never overwritten: it's reported and counted as failed.
+
+**What to do:** nothing; `--skip-existing` is still accepted. A script that expected the failures should look at the `skipped` entries instead.
 
 ## Fewer lines on stderr
 

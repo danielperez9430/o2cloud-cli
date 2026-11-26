@@ -178,18 +178,17 @@ fn bearer(text: &str) -> String {
 pub fn args(args: &[String]) -> Vec<String> {
     let secret = |flag: &str| {
         let flag = flag.trim_start_matches('-').to_ascii_lowercase();
-        flag == "p"
-            || [
-                "jsessionid",
-                "validationkey",
-                "secret",
-                "token",
-                "client-id",
-                "password",
-                "phone",
-            ]
-            .iter()
-            .any(|s| flag.contains(s))
+        [
+            "jsessionid",
+            "validationkey",
+            "secret",
+            "token",
+            "client-id",
+            "password",
+            "phone",
+        ]
+        .iter()
+        .any(|s| flag.contains(s))
     };
     let mut out = Vec::with_capacity(args.len());
     let mut mask_next = false;

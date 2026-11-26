@@ -12,6 +12,7 @@ La 1.0 cambia algunos comportamientos por defecto para que la CLI sea más segur
 | [Errores con `--json`](#errores-con---json) | Solo `Error: …` en stderr | También `{"error": {…}}` en stdout | Mirar el código de salida antes de leer stdout como resultado |
 | [Sesión caducada](#sesión-caducada-y-ventana-de-login) | Abre la ventana de login a mitad de cualquier comando | Solo la abre sola en un terminal; si no, código `4` | Ejecutar `o2cloud login` al recibir un `4` |
 | [Mensajes](#menos-líneas-en-stderr) | Una línea por archivo en stderr | Una barra de progreso y un resumen | `-v` para una línea por archivo; `--json` para los resultados |
+| [`download-dir` y archivos locales](#download-dir-salta-lo-que-ya-está) | Sin `--skip-existing`, un archivo local que ya estaba era un error | Se salta si tiene el mismo tamaño; una descarga cortada se reanuda | Nada; `--skip-existing` se sigue aceptando |
 | [Un archivo que ya está en la nube](#archivos-que-ya-están-en-la-nube) | Se vuelve a subir y O2 Cloud lo llama `nombre (1)` | Mismo tamaño: se salta. Otro tamaño: conflicto (`--on-conflict`) | Añadir `--on-conflict duplicate` para el comportamiento anterior, o tratar el código `5` |
 
 Lo que no cambia:
@@ -40,7 +41,7 @@ En la 0.x todo error salía con `1`. En la 1.0 el código dice qué falló:
 
 - Si tu script solo mira si el código es cero o no, no cambia nada.
 - Si mira exactamente si es `1`, que mire si es distinto de cero.
-- Con `6` y `7` vale la pena reintentar: relanza el mismo comando (con `--skip-existing` si es `upload-dir`).
+- Con `6` y `7` vale la pena reintentar: relanza el mismo comando; lo que ya está se salta.
 
 ## Errores con `--json`
 
@@ -99,6 +100,12 @@ Un archivo en partes lleva `parts` (una lista de IDs) en lugar de `id`.
 - **Para el comportamiento de la 0.x,** añade `--on-conflict duplicate`.
 - **En una app,** no pases `--on-conflict` la primera vez. Si sale el código `5`, enseña al usuario cada entrada `conflict` ("tienes a.jpg, 2,4 MB, 02/06/2024; en la nube hay 2,1 MB, 01/05/2024: ¿sobrescribir o ignorar?"). Luego relánzalo con `--on-conflict overwrite` o `--on-conflict skip`. Si las respuestas son distintas para cada archivo, puedes lanzarlo una vez por archivo.
 - **En un script** que ya usaba `--skip-existing`, no cambia nada.
+
+## `download-dir` salta lo que ya está
+
+En la 0.x, `download-dir` sin `--skip-existing` contaba como fallo un archivo local que ya estaba (y nunca lo sobrescribía). En la 1.0 siempre salta un archivo local con el mismo tamaño y reanuda una descarga cortada, como hacía `--skip-existing`. Un archivo local con otro tamaño sigue sin sobrescribirse: se avisa y cuenta como fallido.
+
+**Qué hacer:** nada; `--skip-existing` se sigue aceptando. Un script que esperaba esos fallos debería mirar las entradas `skipped`.
 
 ## Menos líneas en stderr
 
