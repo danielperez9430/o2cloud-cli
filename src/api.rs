@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::{header, Client};
@@ -1598,6 +1599,105 @@ impl O2Client {
         Ok(data.data.media)
     }
 
+    /// `get_media_by_ids`, with each file's `MediaDetails` (EXIF data and
+    /// thumbnails) too.
+    pub async fn get_media_details_by_ids(
+        &self,
+        media_ids: &[u64],
+        auth: &AuthConfig,
+    ) -> Result<Vec<(MediaItem, MediaDetails)>, O2Error> {
+        let ids: Vec<String> = media_ids.iter().map(|id| id.to_string()).collect();
+        // `mediatype` comes without asking (asking for it is rejected).
+        let body = serde_json::json!({
+            "data": {
+                "ids": ids,
+                "fields": ["name", "size", "folderid", "url", "creationdate",
+                           "modificationdate", "exif", "thumbnails"]
+            }
+        });
+        let raw = retry_while_validating(|| async {
+            let url = format!("{}/sapi/media", BASE_URL);
+            let req = self
+                .client
+                .post(&url)
+                .timeout(REQUEST_TIMEOUT)
+                .query(&[
+                    ("action", "get"),
+                    ("origin", "omh,dropbox"),
+                    ("validationkey", &auth.validationkey),
+                ])
+                .json(&body);
+            let resp = self.send_sapi(req, auth).await?;
+            let status = resp.status();
+            let raw = resp.text().await?;
+            if !status.is_success() {
+                return Err(O2Error::Api(format!(
+                    "Get media failed (status {}): {}",
+                    status,
+                    truncate_utf8(&raw, 300)
+                )));
+            }
+            if let Some(err) = sapi_error(&raw) {
+                return Err(O2Error::Api(format!("Get media failed: {}", err)));
+            }
+            Ok(raw)
+        })
+        .await?;
+        let data: RawResponse<serde_json::Value> = parse_json(&raw, "media")?;
+        detailed_items(data.data.get("media"))
+    }
+
+    /// Every file O2 files under `kind` (`audio`, `file`, `picture` or
+    /// `video`): what its website shows as Música, Documentos… Paged
+    /// `GET /sapi/media/<kind>?action=get`. O2 leaves out the folder of
+    /// some kinds: `ops::media` takes it from the full listing.
+    pub async fn get_media_of_kind(
+        &self,
+        kind: &str,
+        auth: &AuthConfig,
+    ) -> Result<Vec<(MediaItem, MediaDetails)>, O2Error> {
+        const PAGE: usize = 500;
+        let key = match kind {
+            "audio" => "audios",
+            "file" => "files",
+            "picture" => "pictures",
+            "video" => "videos",
+            other => return Err(O2Error::Invalid(format!("unknown media kind '{}'", other))),
+        };
+        let mut all = Vec::new();
+        loop {
+            let url = format!("{}/sapi/media/{}", BASE_URL, kind);
+            let offset = all.len().to_string();
+            let req = self.client.get(&url).timeout(REQUEST_TIMEOUT).query(&[
+                ("action", "get"),
+                ("limit", &PAGE.to_string()),
+                ("offset", offset.as_str()),
+                ("validationkey", &auth.validationkey),
+            ]);
+            let resp = self.send_sapi(req, auth).await?;
+            let status = resp.status();
+            let raw = resp.text().await?;
+            if !status.is_success() {
+                return Err(O2Error::Api(format!(
+                    "Get {} failed (status {}): {}",
+                    key,
+                    status,
+                    truncate_utf8(&raw, 300)
+                )));
+            }
+            if let Some(err) = sapi_error(&raw) {
+                return Err(O2Error::Api(format!("Get {} failed: {}", key, err)));
+            }
+            let data: RawResponse<serde_json::Value> = parse_json(&raw, key)?;
+            let page = detailed_items(data.data.get(key))?;
+            let done = page.len() < PAGE;
+            all.extend(page);
+            if done {
+                return Ok(all);
+            }
+        }
+    }
+
     /// The account's labels of these `origins` (see `Label`): albums,
     /// and those O2 Cloud makes by itself (places, people, moments).
     /// `POST /sapi/label?action=get`, 100 a page, as the web client asks.
@@ -2655,7 +2755,6 @@ pub struct StorageSpace {
     pub nolimit: bool,
 }
 
-/// A media item returned by `POST /sapi/media?action=get`.
 /// A label: a set of photos and videos. Albums are made by people
 /// (`origin` `omh`, or `shared_label` when shared); O2 Cloud makes the
 /// rest by itself: places (`geolocalized`), people (`face`, once face
@@ -2677,6 +2776,111 @@ pub struct Label {
     /// The photo shown as its cover.
     #[serde(default)]
     pub coverid: Option<u64>,
+}
+
+/// What O2 knows of a photo or video besides its file: its kind, its EXIF
+/// data and its thumbnails. Asked for only where it's shown.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MediaDetails {
+    /// `picture`, `video`, `audio` or `file`.
+    #[serde(default)]
+    pub mediatype: Option<String>,
+    #[serde(default)]
+    pub exif: HashMap<String, String>,
+    #[serde(default)]
+    pub thumbnails: Vec<Thumbnail>,
+    /// For music, a JSON string with its `duration` (seconds) among others.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A thumbnail of a photo or video. Its URL is signed: it opens without
+/// the session, for a while.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Thumbnail {
+    #[serde(default)]
+    pub w: u32,
+    #[serde(default)]
+    pub h: u32,
+    pub url: String,
+}
+
+impl Thumbnail {
+    /// The URL to open, with the server in front of O2's relative ones.
+    pub fn absolute_url(&self) -> String {
+        if self.url.starts_with("http") {
+            self.url.clone()
+        } else {
+            format!("{}{}", BASE_URL, self.url)
+        }
+    }
+}
+
+impl MediaDetails {
+    /// Where the photo was taken, from its EXIF GPS data: (latitude,
+    /// longitude) in degrees.
+    pub fn location(&self) -> Option<(f64, f64)> {
+        let lat = gps_degrees(
+            self.exif.get("GPS Latitude")?,
+            self.exif.get("GPS Latitude Ref"),
+        )?;
+        let lon = gps_degrees(
+            self.exif.get("GPS Longitude")?,
+            self.exif.get("GPS Longitude Ref"),
+        )?;
+        let valid = (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon);
+        // 0,0 is what some cameras write when they had no fix.
+        (valid && (lat, lon) != (0.0, 0.0)).then_some((lat, lon))
+    }
+
+    /// The smallest thumbnail and the largest one (for a list, and to
+    /// look at the photo).
+    pub fn thumbnail_and_preview(&self) -> (Option<&Thumbnail>, Option<&Thumbnail>) {
+        let area = |t: &&Thumbnail| u64::from(t.w) * u64::from(t.h);
+        (
+            self.thumbnails.iter().min_by_key(area),
+            self.thumbnails.iter().max_by_key(area),
+        )
+    }
+
+    /// A song's length in seconds (O2 gives milliseconds).
+    pub fn duration(&self) -> Option<f64> {
+        let metadata = match &self.metadata {
+            // O2 sends it as a JSON string.
+            Some(serde_json::Value::String(text)) => serde_json::from_str(text).ok()?,
+            Some(value) => value.clone(),
+            None => return None,
+        };
+        let duration = metadata.get("duration")?;
+        let ms = duration
+            .as_f64()
+            .or_else(|| duration.as_str().and_then(|d| d.parse::<f64>().ok()))?;
+        Some(ms / 1000.0)
+    }
+}
+
+/// EXIF GPS degrees as O2 gives them, `40° 25' 1.2" N` or `-3° 42' 3" W`,
+/// in signed decimal degrees. O2 writes both a minus sign and the
+/// hemisphere for the west: the sign comes from either, once.
+fn gps_degrees(value: &str, reference: Option<&String>) -> Option<f64> {
+    let numbers: Vec<f64> = value
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let (deg, min, sec) = match numbers.as_slice() {
+        [d] => (*d, 0.0, 0.0),
+        [d, m] => (*d, *m, 0.0),
+        [d, m, s, ..] => (*d, *m, *s),
+        [] => return None,
+    };
+    let magnitude = deg + min / 60.0 + sec / 3600.0;
+    let reference = reference.map(|r| r.trim().to_ascii_uppercase());
+    let south_or_west = matches!(reference.as_deref(), Some("S") | Some("W"))
+        || value.trim_end().ends_with(['S', 'W']);
+    let negative = south_or_west || value.trim_start().starts_with('-');
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2739,6 +2943,24 @@ impl MediaItem {
             modificationdate: item.modificationdate,
         }
     }
+}
+
+/// Each item of a JSON list as both a `MediaItem` and its `MediaDetails`.
+fn detailed_items(
+    list: Option<&serde_json::Value>,
+) -> Result<Vec<(MediaItem, MediaDetails)>, O2Error> {
+    let Some(serde_json::Value::Array(items)) = list else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let media = MediaItem::deserialize(item)
+                .map_err(|e| O2Error::Api(format!("Unexpected media item: {}", e)))?;
+            let details = MediaDetails::deserialize(item).unwrap_or_default();
+            Ok((media, details))
+        })
+        .collect()
 }
 
 /// Unix-millisecond timestamp. O2 sends negative values for some old
@@ -2853,6 +3075,81 @@ struct UploadResponse {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_gps_degrees() {
+        let r = |s: &str| Some(s.to_string());
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-6;
+        assert!(close(
+            gps_degrees("40° 25' 1.20\" N", r("N").as_ref()),
+            40.0 + 25.0 / 60.0 + 1.2 / 3600.0
+        ));
+        // O2 writes the west both as a minus sign and as W: west once.
+        assert!(close(
+            gps_degrees("-3° 42' 3.00\" W", r("W").as_ref()),
+            -(3.0 + 42.0 / 60.0 + 3.0 / 3600.0)
+        ));
+        assert!(close(
+            gps_degrees("3° 42' 3.00\" W", r("W").as_ref()),
+            -(3.0 + 42.0 / 60.0 + 3.0 / 3600.0)
+        ));
+        assert!(close(
+            gps_degrees("-3° 42' 3.00\"", None),
+            -(3.0 + 42.0 / 60.0 + 3.0 / 3600.0)
+        ));
+        assert!(close(
+            gps_degrees("33° 52' 4.0\" S", None),
+            -(33.0 + 52.0 / 60.0 + 4.0 / 3600.0)
+        ));
+        assert!(close(gps_degrees("12.5", None), 12.5));
+        assert_eq!(gps_degrees("", None), None);
+        assert_eq!(gps_degrees("N", r("N").as_ref()), None);
+    }
+
+    #[test]
+    fn test_media_details() {
+        let item = serde_json::json!({
+            "id": "77", "name": "a.jpg", "mediatype": "picture",
+            "exif": {"GPS Latitude": "40° 25' 1.20\" N", "GPS Latitude Ref": "N",
+                     "GPS Longitude": "-3° 42' 3.00\" W", "GPS Longitude Ref": "W", "Model": "x"},
+            "thumbnails": [
+                {"w": 1440, "h": 1080, "size": "504", "url": "/sapi/download/picture?action=get&k=big"},
+                {"w": 320, "h": 240, "size": "176", "url": "/sapi/download/picture?action=get&k=small"}
+            ]
+        });
+        let items = detailed_items(Some(&serde_json::json!([item]))).unwrap();
+        let (media, details) = &items[0];
+        assert_eq!(
+            (media.id, details.mediatype.as_deref()),
+            (77, Some("picture"))
+        );
+        let (lat, lon) = details.location().unwrap();
+        assert!(lat > 40.4 && lat < 40.5 && lon < -3.6 && lon > -3.8);
+        let (small, big) = details.thumbnail_and_preview();
+        assert!(small.unwrap().absolute_url().ends_with("k=small"));
+        assert_eq!(
+            big.unwrap().absolute_url(),
+            format!("{}/sapi/download/picture?action=get&k=big", BASE_URL)
+        );
+        // No GPS, or 0,0 (a camera without a fix): no location.
+        let none: MediaDetails = serde_json::from_value(serde_json::json!({
+            "exif": {"GPS Latitude": "0° 0' 0\" N", "GPS Longitude": "0° 0' 0\" E"}
+        }))
+        .unwrap();
+        assert_eq!(none.location(), None);
+        assert_eq!(MediaDetails::default().location(), None);
+        // A song's duration, from the JSON string O2 sends.
+        let song: MediaDetails = serde_json::from_value(serde_json::json!({
+            "mediatype": "audio",
+            "metadata": "{\"duration\":\"2240\",\"codecname\":\"mp3\"}"
+        }))
+        .unwrap();
+        assert_eq!(song.duration(), Some(2.24));
+        // An item that isn't one: an error, not a panic.
+        assert!(detailed_items(Some(&serde_json::json!([{"name": "x"}]))).is_err());
+        assert!(detailed_items(None).unwrap().is_empty());
+    }
+
     use super::*;
 
     #[test]

@@ -442,6 +442,19 @@ enum Commands {
         json: bool,
     },
 
+    /// List the account's photos, videos, music or documents, wherever
+    /// they are
+    Media {
+        /// Which kind of files
+        #[arg(value_enum)]
+        kind: ops::MediaKind,
+
+        /// Print JSON instead of a list (with each file's thumbnails and
+        /// location, and a song's duration)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show storage used, free and in the trash
     Quota {
         /// Print JSON instead of messages
@@ -1110,6 +1123,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             }
         }
 
+        Commands::Media { kind, json } => {
+            let (client, auth) = require_client_and_auth().await?;
+            ops::list_media_kind(&client, &auth, kind, json).await?;
+        }
+
         Commands::Quota { json } => {
             let (client, auth) = require_client_and_auth().await?;
             ops::show_quota(&client, &auth, json).await?;
@@ -1148,6 +1166,7 @@ async fn main() {
             | Commands::Quota { .. }
             | Commands::Shares { .. }
             | Commands::Labels { .. }
+            | Commands::Media { .. }
             | Commands::DebugReport { .. }
     );
     log::init(cli.debug, !only_looks);
