@@ -266,8 +266,22 @@ enum Commands {
         #[arg(long)]
         update: bool,
 
-        /// Only say what would be uploaded or updated; nothing is created,
-        /// uploaded or moved to the trash
+        /// With --update: also move to O2 Cloud's trash what the cloud
+        /// folder has and the local directory no longer has (files and
+        /// folders, only inside the uploaded folder), so the cloud mirrors
+        /// it. Hidden and system files are never deleted. Check first with
+        /// --dry-run -v
+        #[arg(long, requires = "update", conflicts_with = "ext")]
+        delete: bool,
+
+        /// The most files --delete may move to the trash in one run
+        /// (default 1000): a safeguard against mirroring the wrong
+        /// directory. Over it, nothing is done
+        #[arg(long, value_name = "N", requires = "delete")]
+        delete_max: Option<usize>,
+
+        /// Only say what would be uploaded, updated or deleted; nothing is
+        /// created, uploaded or moved to the trash
         #[arg(long)]
         dry_run: bool,
 
@@ -857,6 +871,8 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             jobs,
             ext,
             update,
+            delete,
+            delete_max,
             dry_run,
             json,
         } => {
@@ -888,6 +904,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 },
                 &extensions,
                 json,
+                delete.then(|| delete_max.unwrap_or(ops::DEFAULT_DELETE_MAX)),
             )
             .await?;
         }
