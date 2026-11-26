@@ -4,7 +4,7 @@
 //! The folder is recreated by name inside the output directory (the
 //! account's root goes straight into it), with every subfolder, empty
 //! ones included. Files uploaded in parts (`name.001`, `name.002`, …)
-//! are joined again. Each file is written to `<name>.o2part` and renamed
+//! are joined again. Each file is written to `.<id>.o2part` and renamed
 //! once complete, with its original modification date, so a cut download
 //! never looks finished: run the same command again with
 //! `--skip-existing` to resume it (from where it stopped, with a Range
@@ -87,7 +87,6 @@ pub async fn download_dir(
     let top = (!is_root).then(|| folder_name.get(&folder).cloned().unwrap_or_default());
     let (dirs, jobs) = plan(
         &tree,
-        &media,
         folder,
         top.as_deref(),
         &opts.extensions,
@@ -149,6 +148,7 @@ pub async fn download_dir(
         let urls = match urls {
             Ok(urls) => urls,
             Err(O2Error::SessionExpired) => {
+                eprintln!("  ✗ Stopping: {}", O2Error::SessionExpired);
                 stop.store(true, Ordering::Relaxed);
                 break;
             }
@@ -209,7 +209,9 @@ pub async fn download_dir(
                 entry["error"] = "not started: the run stopped".into();
             }
         }
-        entries.push(entry);
+        if json {
+            entries.push(entry);
+        }
     }
 
     if skipped > 0 {
@@ -247,7 +249,6 @@ pub async fn download_dir(
 /// root): local paths are made safe and unique (see `local_names`).
 fn plan<'a>(
     tree: &Tree<'a>,
-    media: &'a [MediaItem],
     folder: u64,
     top: Option<&str>,
     extensions: &[String],
@@ -277,7 +278,8 @@ fn plan<'a>(
             if names.contains(base) {
                 continue;
             }
-            if let Ok(parts) = file_parts(m, base, media) {
+            // Among this folder's files only: the account can be large.
+            if let Ok(parts) = file_parts(m, base, files.iter().copied()) {
                 in_parts.extend(parts.iter().map(|p| p.id));
                 entries.push((m.id, base.to_string(), Entry::File(parts)));
             }
@@ -492,7 +494,18 @@ async fn download_job(
     }
 }
 
-/// Download `job` to `path` by way of `<path>.o2part`.
+/// Open (or create) a partial download for writing, keeping what it has.
+/// Not in append mode: on Windows a file opened so can't be truncated,
+/// which a download that starts over needs.
+fn open_part(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+}
+
+/// Download `job` to `path` by way of `.<id>.o2part` next to it.
 async fn fetch(
     client: &O2Client,
     auth: &AuthConfig,
@@ -500,39 +513,53 @@ async fn fetch(
     path: &Path,
     urls: &HashMap<u64, String>,
 ) -> Result<u64, O2Error> {
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let part = path.with_file_name(format!("{}.o2part", file_name));
+    // Named after the cloud file's ID, so a leftover from another version
+    // of the file is never resumed into this one (and short, so a long
+    // name still fits).
+    let part = path.with_file_name(format!(".{}.o2part", job.pieces[0].id));
     let io = |e: std::io::Error| {
         O2Error::Io(std::io::Error::new(
             e.kind(),
             format!("{}: {}", part.display(), e),
         ))
     };
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&part)
-        .await
-        .map_err(io)?;
+    let mut file = tokio::fs::File::from_std(open_part(&part).map_err(io)?);
+    let mut have = file.metadata().await.map_err(io)?.len();
+    if job.size.is_some_and(|size| have > size) {
+        file.set_len(0).await.map_err(io)?;
+        have = 0;
+    }
 
-    let total = if let [piece] = job.pieces.as_slice() {
-        // One file: carry on from what an earlier run left.
+    // Each piece in turn (one, or the parts of a file uploaded in parts),
+    // carrying on from what an earlier run left: whole pieces already
+    // there are skipped, the one it stopped in is resumed with Range.
+    let mut start = 0u64;
+    for piece in &job.pieces {
+        let len = piece.size;
+        if let Some(len) = len {
+            if have >= start + len {
+                start += len;
+                continue;
+            }
+        }
         let mut attempt = 0;
         loop {
-            let offset = file.metadata().await.map_err(io)?.len();
+            have = file.metadata().await.map_err(io)?.len();
+            let offset = have.saturating_sub(start);
             let url = match (attempt, urls.get(&piece.id)) {
                 (0, Some(url)) => url.clone(),
                 _ => client.media_download_url(piece.id, auth).await?,
             };
             match client
-                .download_resuming(&url, &mut file, &part, offset, piece.size)
+                .download_resuming(&url, &mut file, &part, start, offset, len)
                 .await
             {
-                Ok(n) => break n,
-                // Once more with a fresh URL, from where it got to.
+                Ok(n) => {
+                    start += n;
+                    break;
+                }
+                // Once more with a fresh URL (they expire), from where it
+                // got to.
                 Err(e)
                     if attempt == 0 && !matches!(e, O2Error::SessionExpired | O2Error::Io(_)) =>
                 {
@@ -541,21 +568,8 @@ async fn fetch(
                 Err(e) => return Err(e),
             }
         }
-    } else {
-        // Parts: joined from the start each time.
-        file.set_len(0).await.map_err(io)?;
-        let mut total = 0;
-        for piece in &job.pieces {
-            let url = match urls.get(&piece.id) {
-                Some(url) => url.clone(),
-                None => client.media_download_url(piece.id, auth).await?,
-            };
-            total += client
-                .download_into(&url, &mut file, &part, piece.size)
-                .await?;
-        }
-        total
-    };
+    }
+    let total = start;
     if let Some(size) = job.size {
         if size != total {
             return Err(O2Error::Api(format!("got {} of {} bytes", total, size)));
@@ -647,6 +661,28 @@ mod tests {
     }
 
     #[test]
+    fn test_open_part_keeps_and_truncates() {
+        use std::io::{Read, Seek, Write};
+        let path = std::env::temp_dir().join(format!("o2cloud-test-{}.o2part", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        open_part(&path).unwrap().write_all(b"hello").unwrap();
+        // Reopened: kept, and writable at the end.
+        let mut f = open_part(&path).unwrap();
+        f.seek(std::io::SeekFrom::End(0)).unwrap();
+        f.write_all(b" world").unwrap();
+        // And it can be cut back, as a restart does.
+        f.set_len(5).unwrap();
+        drop(f);
+        let mut got = String::new();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut got)
+            .unwrap();
+        assert_eq!(got, "hello");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
     fn test_wanted() {
         let exts = vec!["jpg".to_string(), "tar.gz".to_string()];
         assert!(wanted("A.JPG", &exts));
@@ -697,7 +733,7 @@ mod tests {
         ];
         let tree = Tree::new(&folders, &folder_name, &media);
 
-        let (dirs, jobs) = plan(&tree, &media, 2, Some("Fotos"), &[], false);
+        let (dirs, jobs) = plan(&tree, 2, Some("Fotos"), &[], false);
         let mut dirs: Vec<String> = dirs.iter().map(|d| slashed(d)).collect();
         dirs.sort();
         assert_eq!(dirs, ["Fotos", "Fotos/2024", "Fotos/Vacío"]);
@@ -717,7 +753,7 @@ mod tests {
         assert!(jobs.iter().all(|j| j.mtime == Some(1_600_000_000_000)));
 
         // The root: straight into the output, phone-app files included.
-        let (_, jobs) = plan(&tree, &media, 1, None, &[], false);
+        let (_, jobs) = plan(&tree, 1, None, &[], false);
         let locals: HashSet<String> = jobs.iter().map(|j| slashed(&j.local)).collect();
         assert!(
             locals.contains("root.txt")
@@ -726,7 +762,7 @@ mod tests {
         );
 
         // --ext: only matching files, and only the folders that hold them.
-        let (dirs, jobs) = plan(&tree, &media, 2, Some("Fotos"), &["png".to_string()], false);
+        let (dirs, jobs) = plan(&tree, 2, Some("Fotos"), &["png".to_string()], false);
         let dirs: Vec<String> = dirs.iter().map(|d| slashed(d)).collect();
         assert_eq!(dirs, ["Fotos", "Fotos/2024"]);
         assert_eq!(jobs.len(), 1);

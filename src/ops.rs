@@ -791,8 +791,8 @@ enum Decision {
     New,
     /// In the cloud with the same size, and not newer locally.
     Unchanged,
-    /// In the cloud with the same size, but older locally: left alone.
-    Older,
+    /// Older locally than the cloud's copy (`cloud`: its IDs): left alone.
+    Older { cloud: Vec<u64> },
     /// Changed locally (another size, or newer): with `--update`, upload
     /// it and move these cloud files (the old version) to the trash.
     Changed { old: Vec<u64> },
@@ -806,7 +806,7 @@ impl Decision {
         match self {
             Decision::New => "upload",
             Decision::Unchanged => "unchanged",
-            Decision::Older => "older",
+            Decision::Older { .. } => "older",
             Decision::Changed { .. } => "update",
             Decision::Resume => "resume",
         }
@@ -826,8 +826,14 @@ fn mtime_ms(t: std::time::SystemTime) -> u64 {
 /// Decide what to do with the local file `name` (`size` bytes, modified
 /// at `local_ms`) for the cloud folder `folder` (`None` if it doesn't
 /// exist yet). `mdates` has the cloud files' `modificationdate` by ID.
-/// Without `update`, a changed file is left to the plain upload as before
-/// (`New` if its size differs, `Unchanged` otherwise).
+///
+/// What the cloud has under the name counts whether it is one file or in
+/// parts (`name.001`…), so a file that crossed the part size is replaced
+/// too. A file of another size counts as changed only if it isn't older
+/// locally: `--update` never puts an older version over a newer one.
+/// Without `--skip-existing` everything is uploaded, as `upload-dir` does
+/// then; without `--update`, a changed file is left to the plain upload
+/// as before (`New` if its size differs, `Unchanged` otherwise).
 fn decide(
     name: &str,
     size: u64,
@@ -840,63 +846,96 @@ fn decide(
     let Some(folder) = folder else {
         return Decision::New;
     };
-    let by_date = |id: u64, old: Vec<u64>| match mdates.get(&id) {
-        Some(&cloud) if local_ms > cloud + MODIFY_WINDOW_MS => {
-            if opts.update {
-                Decision::Changed { old }
-            } else {
-                Decision::Unchanged
-            }
-        }
-        Some(&cloud) if local_ms + MODIFY_WINDOW_MS < cloud => Decision::Older,
-        _ => Decision::Unchanged,
-    };
+    if !opts.skip_existing {
+        return Decision::New;
+    }
     let Ok(pieces) = upload_pieces(name, size, opts.part_size) else {
         return Decision::New;
     };
-    if pieces.len() == 1 {
-        let Some(found) = existing
-            .get(&(folder, name.to_string()))
-            .filter(|f| !f.is_empty())
-        else {
-            return Decision::New;
-        };
-        let all: Vec<u64> = found.iter().map(|(_, id)| *id).collect();
-        return match found
-            .iter()
-            .filter(|(s, _)| *s == size)
-            .map(|(_, id)| *id)
-            .min()
-        {
-            Some(id) => by_date(id, all),
-            None if opts.update => Decision::Changed { old: all },
-            None => Decision::New,
-        };
-    }
-    // In parts: compare the parts in the cloud with the ones it would make.
-    let mut there: Vec<(usize, &Vec<(u64, u64)>)> = existing
+    // The whole file and its parts in the cloud, by part number.
+    let whole: Vec<(u64, u64)> = existing
+        .get(&(folder, name.to_string()))
+        .cloned()
+        .unwrap_or_default();
+    let mut parts: Vec<(usize, &Vec<(u64, u64)>)> = existing
         .iter()
         .filter(|((f, _), _)| *f == folder)
         .filter_map(|((_, n), found)| part_number(name, n).map(|n| (n, found)))
         .collect();
-    if there.is_empty() {
+    parts.sort_by_key(|(n, _)| *n);
+    if whole.is_empty() && parts.is_empty() {
         return Decision::New;
     }
-    there.sort_by_key(|(n, _)| *n);
-    let all: Vec<u64> = there
-        .iter()
-        .flat_map(|(_, f)| f.iter().map(|(_, id)| *id))
-        .collect();
-    let complete = there.len() == pieces.len()
-        && there.iter().all(|(n, f)| {
+    let mut all: Vec<u64> = whole.iter().map(|(_, id)| *id).collect();
+    all.extend(parts.iter().flat_map(|(_, f)| f.iter().map(|(_, id)| *id)));
+    // The cloud copy that stands for the file: the whole one, or part 1.
+    let main_id = if pieces.len() == 1 {
+        whole.iter().map(|(_, id)| *id).min()
+    } else {
+        parts
+            .first()
+            .and_then(|(_, f)| f.first())
+            .map(|(_, id)| *id)
+    }
+    .or_else(|| whole.iter().map(|(_, id)| *id).min())
+    .or_else(|| {
+        parts
+            .first()
+            .and_then(|(_, f)| f.first())
+            .map(|(_, id)| *id)
+    });
+    let cloud_ms = main_id.and_then(|id| mdates.get(&id).copied());
+    let older = cloud_ms.is_some_and(|c| local_ms + MODIFY_WINDOW_MS < c);
+    let newer = cloud_ms.is_some_and(|c| local_ms > c + MODIFY_WINDOW_MS);
+    let older_ids = || main_id.into_iter().collect::<Vec<_>>();
+    // Another version: replaced with --update, unless older locally.
+    let other_version = || {
+        if older {
+            Decision::Older { cloud: older_ids() }
+        } else if opts.update {
+            Decision::Changed { old: all.clone() }
+        } else {
+            Decision::New
+        }
+    };
+    // The same size: by date.
+    let same_size = || {
+        if newer && opts.update {
+            Decision::Changed { old: all.clone() }
+        } else if older {
+            Decision::Older { cloud: older_ids() }
+        } else {
+            Decision::Unchanged
+        }
+    };
+
+    if pieces.len() == 1 {
+        let same = whole.iter().any(|(s, _)| *s == size);
+        return if same && parts.is_empty() {
+            same_size()
+        } else if same {
+            // Plus stray parts: only --update tidies them away.
+            match same_size() {
+                Decision::Unchanged if opts.update => Decision::Changed { old: all.clone() },
+                d => d,
+            }
+        } else {
+            other_version()
+        };
+    }
+    let complete = whole.is_empty()
+        && parts.len() == pieces.len()
+        && parts.iter().all(|(n, f)| {
             matches!((pieces.get(n - 1), f.as_slice()), (Some((_, _, len)), [(s, _)]) if s == len)
         });
     if complete {
-        by_date(there[0].1[0].1, all)
-    } else if check_existing_parts(name, &pieces, folder, existing, true).is_ok() {
+        same_size()
+    } else if whole.is_empty()
+        && check_existing_parts(name, &pieces, folder, existing, true).is_ok()
+    {
         Decision::Resume
-    } else if opts.update {
-        Decision::Changed { old: all }
+    } else if opts.update || older {
+        other_version()
     } else {
         // Left to the upload, which says the parts don't match.
         Decision::New
@@ -1061,6 +1100,7 @@ async fn upload_local_file(
     folder_id: u64,
     existing: &ExistingFiles,
     opts: &UploadOptions,
+    done: &mut Vec<u64>,
 ) -> Result<Uploaded, O2Error> {
     let pieces = upload_pieces(name, size, opts.part_size)?;
     let split = pieces.len() > 1;
@@ -1118,7 +1158,10 @@ async fn upload_local_file(
         };
         // Metadata and contents in one request, streamed from disk
         match client.upload_file(&meta, path, *offset, auth).await {
-            Ok(id) => uploaded.ids.push(id),
+            Ok(id) => {
+                uploaded.ids.push(id);
+                done.push(id);
+            }
             // Say what is already up, so the upload can be resumed.
             Err(e) if split && !uploaded.ids.is_empty() => {
                 let ids: Vec<String> = uploaded.ids.iter().map(u64::to_string).collect();
@@ -1144,8 +1187,8 @@ enum FileOutcome {
     Uploaded(Uploaded),
     /// Uploaded to replace the cloud files listed (now in the trash).
     Updated(Uploaded, Vec<u64>),
-    /// Older locally than in the cloud: left alone.
-    Older,
+    /// Older locally than in the cloud (these files): left alone.
+    Older(Vec<u64>),
     /// `--dry-run`: what would be done.
     Planned(Decision),
 }
@@ -1171,7 +1214,10 @@ async fn replace_file(
         skip_existing: false,
         ..opts.clone()
     };
-    let up = upload_local_file(
+    // What has gone up so far, to take it back if the upload fails
+    // halfway (parts of a split file): the old version stays as it was.
+    let mut done = Vec::new();
+    let up = match upload_local_file(
         client,
         auth,
         path,
@@ -1181,42 +1227,64 @@ async fn replace_file(
         folder_id,
         &ExistingFiles::new(),
         &fresh,
+        &mut done,
     )
-    .await?;
+    .await
+    {
+        Ok(up) => up,
+        Err(e) => {
+            if !done.is_empty() && !matches!(e, O2Error::SessionExpired) {
+                let _ = client.delete_files(&done, auth).await;
+            }
+            return Err(e);
+        }
+    };
     let ids: Vec<String> = up.ids.iter().map(u64::to_string).collect();
-    client.delete_files(old, auth).await.map_err(|e| {
-        O2Error::Api(format!(
-            "the new version of {} is up (ids: {}), but the old one couldn't be moved \
-             to the trash: {}",
-            name,
-            ids.join(", "),
-            e
-        ))
-    })?;
+    match client.delete_files(old, auth).await {
+        Ok(()) => {}
+        Err(O2Error::SessionExpired) => return Err(O2Error::SessionExpired),
+        // Take the new version back, so nothing is left half done.
+        Err(e) => {
+            let undone = client.delete_files(&up.ids, auth).await.is_ok();
+            return Err(O2Error::Api(format!(
+                "the old version of {} couldn't be moved to the trash ({}); {}",
+                name,
+                e,
+                if undone {
+                    "the new one was taken back, so nothing changed".to_string()
+                } else {
+                    format!("the new one is up too (ids: {})", ids.join(", "))
+                }
+            )));
+        }
+    }
     for (k, id) in up.ids.iter().enumerate() {
         let new_name = if up.parts > 0 {
             part_name(name, k + 1)
         } else {
             name.to_string()
         };
-        client
-            .update_file(
-                *id,
-                &new_name,
-                serde_json::json!({ "name": new_name }),
-                auth,
-            )
-            .await
-            .map_err(|e| {
-                O2Error::Api(format!(
+        let changes = serde_json::json!({ "name": new_name });
+        let mut result = client
+            .update_file(*id, &new_name, changes.clone(), auth)
+            .await;
+        if matches!(result, Err(ref e) if !matches!(e, O2Error::SessionExpired)) {
+            result = client.update_file(*id, &new_name, changes, auth).await;
+        }
+        match result {
+            Ok(()) => {}
+            Err(O2Error::SessionExpired) => return Err(O2Error::SessionExpired),
+            Err(e) => {
+                return Err(O2Error::Api(format!(
                     "the new version of {} is up (ids: {}) and the old one is in the trash, \
                      but it couldn't be renamed to {}: {}",
                     name,
                     ids.join(", "),
                     new_name,
                     e
-                ))
-            })?;
+                )))
+            }
+        }
     }
     Ok(up)
 }
@@ -1238,7 +1306,7 @@ fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
     });
     match err {
         O2Error::Api(msg) if is_jpeg && msg.contains("MED-1000") => {
-            match std::fs::read(path)
+            match crate::jpeg::read_header(path)
                 .ok()
                 .and_then(|b| crate::jpeg::profile_problem(&b))
             {
@@ -1282,7 +1350,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
     let (mut mislabelled, mut fixed, mut damaged, mut failed) = (0, 0, 0, 0);
     let mut results = Vec::new();
     for path in &files {
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = crate::jpeg::read_header(path) else {
             eprintln!("  ⚠ Can't read {}", path.display());
             failed += 1;
             continue;
@@ -1297,7 +1365,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                 entry["problem"] = "mislabelled".into();
                 entry["chunks"] = chunks.into();
                 if apply {
-                    match rewrite_keeping_date(path, &bytes) {
+                    // Only the header was read: the whole file now.
+                    let whole = std::fs::read(path).map_err(O2Error::Io);
+                    match whole.and_then(|whole| rewrite_keeping_date(path, &whole)) {
                         Ok(()) => {
                             fixed += 1;
                             eprintln!(
@@ -1474,6 +1544,7 @@ pub async fn upload_file(
         folder_id,
         &existing,
         opts,
+        &mut Vec::new(),
     )
     .await?;
 
@@ -1532,14 +1603,17 @@ pub async fn upload_dir(
 ) -> Result<(), O2Error> {
     use futures_util::StreamExt;
 
-    // Resolve target parent folder
+    // The folder list, asked for once: for the target and to find the
+    // folders that already exist.
+    let existing_folders = client.get_all_folders(auth).await?;
     let root_parent = match parent_folder_id {
         Some(id) => id,
-        None => root_folder_id(client, auth).await?,
+        None => existing_folders
+            .iter()
+            .find(|f| f.name == "/")
+            .map(|f| f.id)
+            .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))?,
     };
-
-    // Fetch all existing folders to check for duplicates
-    let existing_folders = client.get_all_folders(auth).await?;
 
     // Collect all files and directories to upload, skipping hidden and
     // system entries (see `is_skipped_name`).
@@ -1748,6 +1822,9 @@ pub async fn upload_dir(
                         name
                     );
                     result["empty"] = true.into();
+                    if opts.dry_run {
+                        result["dry_run"] = true.into();
+                    }
                     let empty = Uploaded {
                         ids: Vec::new(),
                         parts: 0,
@@ -1770,8 +1847,16 @@ pub async fn upload_dir(
                     }
                     result["action"] = decision.label().into();
                     result["dry_run"] = true.into();
-                    if let Decision::Changed { old } = decision {
-                        result["replaces"] = old.clone().into();
+                    match decision {
+                        Decision::Changed { old } => result["replaces"] = old.clone().into(),
+                        // The cloud's copy, as in the real run.
+                        Decision::Older { cloud } if cloud.len() > 1 => {
+                            result["parts"] = cloud.clone().into()
+                        }
+                        Decision::Older { cloud } if !cloud.is_empty() => {
+                            result["id"] = cloud[0].into()
+                        }
+                        _ => {}
                     }
                     let decision = decision.clone();
                     return (i, result, Ok(FileOutcome::Planned(decision)));
@@ -1786,15 +1871,24 @@ pub async fn upload_dir(
                         .await
                         .map(|up| FileOutcome::Updated(up, old))
                     }
-                    Some(Decision::Older) => {
+                    Some(Decision::Older { cloud }) => {
                         eprintln!(
                             "  = {} is older locally than in the cloud: left alone",
                             local
                         );
-                        Ok(FileOutcome::Older)
+                        Ok(FileOutcome::Older(cloud))
                     }
                     _ => upload_local_file(
-                        client, auth, file_path, &name, size, modified, folder, existing, opts,
+                        client,
+                        auth,
+                        file_path,
+                        &name,
+                        size,
+                        modified,
+                        folder,
+                        existing,
+                        opts,
+                        &mut Vec::new(),
                     )
                     .await
                     .map(FileOutcome::Uploaded),
@@ -1853,10 +1947,16 @@ pub async fn upload_dir(
                     result["replaced"] = old.into();
                     set_ids(&mut result, &up);
                 }
-                Ok(FileOutcome::Older) => {
+                Ok(FileOutcome::Older(cloud)) => {
                     older += 1;
                     result["skipped"] = true.into();
                     result["action"] = "older".into();
+                    // The cloud's copy, as `skipped` entries have.
+                    if cloud.len() > 1 {
+                        result["parts"] = cloud.into();
+                    } else if let Some(id) = cloud.first() {
+                        result["id"] = (*id).into();
+                    }
                 }
                 Ok(FileOutcome::Planned(d)) => {
                     *planned.entry(d.label()).or_default() += 1;
@@ -1874,20 +1974,41 @@ pub async fn upload_dir(
             }
             result
         })
+        // Kept only for --json: on a large folder they take hundreds of MB.
+        .filter(|_| json)
+        .collect();
+    let beyond_limits: Vec<serde_json::Value> = rejected
+        .iter()
+        .filter(|(_, is_dir, _)| !is_dir)
+        .map(|(path, _, reason)| {
+            let mut entry = serde_json::json!({
+                "local": local_path_in(local_dir, path),
+                "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                "error": reason,
+                "action": "failed",
+            });
+            if opts.dry_run {
+                entry["dry_run"] = true.into();
+            }
+            entry
+        })
         .collect();
     if opts.dry_run {
         let n = |k| planned.get(k).copied().unwrap_or(0);
         eprintln!(
             "Dry run: {} to upload, {} to update, {} to resume, {} unchanged, {} older locally, \
-             {} empty image(s); nothing was changed.",
+             {} empty image(s), {} beyond O2 Cloud's limits; nothing was changed.",
             n("upload"),
             n("update"),
             n("resume"),
             n("unchanged"),
             n("older"),
-            empty_images
+            empty_images,
+            beyond_limits.len()
         );
         if json {
+            let mut results = results;
+            results.extend(beyond_limits);
             print_json(&serde_json::Value::Array(results));
         }
         return Ok(());
@@ -1941,16 +2062,7 @@ pub async fn upload_dir(
     }
     if json {
         let mut results = results;
-        results.extend(rejected.iter().filter(|(_, is_dir, _)| !is_dir).map(
-            |(path, _, reason)| {
-                serde_json::json!({
-                    "local": local_path_in(local_dir, path),
-                    "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
-                    "error": reason,
-                    "action": "failed",
-                })
-            },
-        ));
+        results.extend(beyond_limits);
         print_json(&serde_json::Value::Array(results));
     }
 
@@ -2551,10 +2663,10 @@ async fn download_piece(
 fn file_parts<'a>(
     first: &'a crate::api::MediaItem,
     base: &str,
-    media: &'a [crate::api::MediaItem],
+    media: impl IntoIterator<Item = &'a crate::api::MediaItem>,
 ) -> Result<Vec<&'a crate::api::MediaItem>, O2Error> {
     let mut by_number: HashMap<usize, Vec<&crate::api::MediaItem>> = HashMap::new();
-    for m in media.iter().filter(|m| m.folderid == first.folderid) {
+    for m in media.into_iter().filter(|m| m.folderid == first.folderid) {
         if let Some(n) = m.name.as_deref().and_then(|n| part_number(base, n)) {
             by_number.entry(n).or_default().push(m);
         }
@@ -4452,7 +4564,24 @@ mod tests {
         );
         // Without --update a newer file of the same size is left alone.
         assert_eq!(d("same.txt", 10, t + 3000, false), Decision::Unchanged);
-        assert_eq!(d("same.txt", 10, t - 3000, true), Decision::Older);
+        assert_eq!(
+            d("same.txt", 10, t - 3000, true),
+            Decision::Older { cloud: vec![11] }
+        );
+        // Another size but older locally: never put over the newer copy.
+        assert_eq!(
+            d("sized.txt", 10, t - 3000, true),
+            Decision::Older { cloud: vec![31] }
+        );
+        // Without --skip-existing everything is uploaded.
+        let plain = UploadOptions {
+            skip_existing: false,
+            ..opts(false)
+        };
+        assert_eq!(
+            decide("same.txt", 10, t, Some(1), &existing, &mdates, &plain),
+            Decision::New
+        );
         assert_eq!(
             d("sized.txt", 10, t, true),
             Decision::Changed { old: vec![31] }
@@ -4473,6 +4602,22 @@ mod tests {
         assert_eq!(changed, [41, 42, 43]);
         assert!(matches!(d("big", 260, t, true), Decision::Changed { .. }));
         assert_eq!(d("half", 250, t, true), Decision::Resume);
+
+        // Crossing the part size: one file now, parts in the cloud…
+        let mut old = match d("big", 90, t, true) {
+            Decision::Changed { old } => old,
+            other => panic!("{:?}", other),
+        };
+        old.sort();
+        assert_eq!(old, [41, 42, 43]);
+        assert_eq!(d("big", 90, t, false), Decision::New);
+        // …and parts now, one file in the cloud.
+        existing.insert((1, "grown".into()), vec![(90, 61)]);
+        let mdates: HashMap<u64, u64> = mdates.into_iter().chain([(61, t)]).collect();
+        assert_eq!(
+            decide("grown", 250, t, Some(1), &existing, &mdates, &opts(true)),
+            Decision::Changed { old: vec![61] }
+        );
     }
 
     #[test]
