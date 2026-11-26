@@ -374,7 +374,10 @@ mod tests {
         assert_eq!(paths.of(&item(1, None)).as_deref(), Some("/f1.jpg"));
         assert_eq!(paths.of(&item(2, None)).as_deref(), Some("/Fotos/f2.jpg"));
         // A folder with no other file in the listing.
-        assert_eq!(paths.of(&item(9, Some(11))).as_deref(), Some("/Vacía/f9.jpg"));
+        assert_eq!(
+            paths.of(&item(9, Some(11))).as_deref(),
+            Some("/Vacía/f9.jpg")
+        );
         // A folder that isn't known, or a file not listed yet: no path.
         assert_eq!(paths.of(&item(8, Some(99))), None);
         assert_eq!(paths.of(&item(7, None)), None);
