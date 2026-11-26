@@ -293,7 +293,7 @@ and attach the `o2cloud-report-….zip` it writes to an [issue](https://github.c
 
 Every error ends with the run's ID (`… [run 3fa9c1d2]`), which finds its log. Each run keeps a small log in the cache folder (`~/Library/Caches/o2cli/logs` on macOS, `~/.cache/o2cli/logs` on Linux, `%LOCALAPPDATA%\o2cli\logs` on Windows): the last 10 runs, at most 5 MB each, removed by `o2cloud logout`. `O2CLOUD_LOG_FILE=0` turns it off.
 
-To see what a command does step by step (each request, retries, and why each file is uploaded, skipped or left alone), add `--debug`: it shows it on stderr and keeps it in the run log in full. `O2CLOUD_LOG=debug` does the same for apps and scripts, and `O2CLOUD_TRACE=1` shows only the requests. Session keys, tokens, your phone number and signed download links never appear, on screen or in the logs.
+Long transfers show a progress bar (files, bytes, speed, time left); `-v` shows a line for each file instead, and `-q` only warnings and errors. To see what a command does step by step (each request, retries, and why each file is uploaded, skipped or left alone), add `--debug`: it shows it on stderr and keeps it in the run log in full. `O2CLOUD_LOG=debug` does the same for apps and scripts, and `O2CLOUD_TRACE=1` shows only the requests. Session keys, tokens, your phone number and signed download links never appear, on screen or in the logs.
 
 ## 🖥️ Logging in without a login window
 

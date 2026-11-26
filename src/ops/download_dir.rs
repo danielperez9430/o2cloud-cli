@@ -94,7 +94,7 @@ pub async fn download_dir(
     );
 
     let total: u64 = jobs.iter().filter_map(|j| j.size).sum();
-    eprintln!(
+    crate::info!(
         "→ {} {} ({}) — {} files, {} folders, into {}",
         if opts.dry_run {
             "Would download"
@@ -132,7 +132,7 @@ pub async fn download_dir(
                 }
                 Local::InTheWay => {
                     in_the_way += 1;
-                    eprintln!(
+                    crate::warn!(
                         "  ⚠ {}: already exists locally{}; it would be left alone",
                         job.cloud,
                         if opts.skip_existing {
@@ -149,7 +149,7 @@ pub async fn download_dir(
                 entries.push(entry);
             }
         }
-        eprintln!(
+        crate::info!(
             "Dry run: {} to download, {} to resume, {} already there, {} in the way \
              ({} to transfer); nothing was changed.",
             new,
@@ -176,6 +176,7 @@ pub async fn download_dir(
         })?;
     }
 
+    let bar = crate::ui::start("Downloading", jobs.len() as u64, total);
     let stop = AtomicBool::new(false);
     // Why it stopped, if it did: the session, or else a full disk.
     let session_over = AtomicBool::new(false);
@@ -187,6 +188,11 @@ pub async fn download_dir(
         .iter()
         .map(|job| already_there(job, &out_root, opts))
         .collect();
+    for (job, outcome) in jobs.iter().zip(&outcomes) {
+        if outcome.is_some() {
+            crate::ui::file_done(job.size.unwrap_or(0), false);
+        }
+    }
     let pending: Vec<(usize, &Job)> = jobs
         .iter()
         .enumerate()
@@ -200,7 +206,7 @@ pub async fn download_dir(
         let urls = match urls {
             Ok(urls) => urls,
             Err(O2Error::SessionExpired) => {
-                eprintln!("  ✗ Stopping: {}", O2Error::SessionExpired);
+                crate::warn!("  ✗ Stopping: {}", O2Error::SessionExpired);
                 stop.store(true, Ordering::Relaxed);
                 session_over.store(true, Ordering::Relaxed);
                 break;
@@ -224,9 +230,9 @@ pub async fn download_dir(
                             session_over.store(true, Ordering::Relaxed);
                         }
                         if fatal && !stop.swap(true, Ordering::Relaxed) {
-                            eprintln!("  ✗ Stopping: {}", e);
+                            crate::warn!("  ✗ Stopping: {}", e);
                         } else if !fatal {
-                            eprintln!("  ⚠ {}: {}", job.cloud, e);
+                            crate::warn!("  ⚠ {}: {}", job.cloud, e);
                         }
                     }
                     (i, outcome)
@@ -236,9 +242,12 @@ pub async fn download_dir(
             .collect()
             .await;
         for (i, outcome) in results {
+            let moved = matches!(outcome, Outcome::Downloaded(_));
+            crate::ui::file_done(jobs[i].size.unwrap_or(0), moved);
             outcomes[i] = Some(outcome);
         }
     }
+    drop(bar);
 
     let (mut done, mut bytes, mut skipped, mut failed) = (0usize, 0u64, 0usize, 0usize);
     let mut entries = Vec::new();
@@ -279,12 +288,12 @@ pub async fn download_dir(
         }),
     );
     if skipped > 0 {
-        eprintln!("  ({} file(s) were already there)", skipped);
+        crate::info!("  ({} file(s) were already there)", skipped);
     }
     if failed > 0 {
-        eprintln!("⚠ {} file(s) not downloaded", failed);
+        crate::warn!("⚠ {} file(s) not downloaded", failed);
     }
-    eprintln!(
+    crate::info!(
         "✓ Downloaded {} files ({}) to {}",
         done,
         format_size(bytes),
@@ -568,9 +577,10 @@ fn already_there(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> O
     } else {
         " (add --skip-existing to skip it)"
     };
-    eprintln!(
+    crate::warn!(
         "  ⚠ {}: already exists locally{}; not overwriting it",
-        job.cloud, why
+        job.cloud,
+        why
     );
     Some(Outcome::Failed(O2Error::Conflict(format!(
         "{} already exists{}; not overwriting it",
@@ -589,7 +599,7 @@ async fn download_job(
     count: usize,
 ) -> Outcome {
     let path = out_root.join(&job.local);
-    eprintln!(
+    crate::detail!(
         "  [{}/{}] 📄 {} ({})",
         i + 1,
         count,

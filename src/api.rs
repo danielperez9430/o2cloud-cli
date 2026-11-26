@@ -1976,8 +1976,16 @@ impl O2Client {
                 .await
                 .map_err(open_err)?;
         }
-        let body =
-            reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(meta.size)));
+        // Counted for the progress bar as it's read to be sent.
+        let stream = futures_util::StreamExt::inspect(
+            tokio_util::io::ReaderStream::new(file.take(meta.size)),
+            |chunk| {
+                if let Ok(bytes) = chunk {
+                    crate::ui::add_bytes(bytes.len() as u64);
+                }
+            },
+        );
+        let body = reqwest::Body::wrap_stream(stream);
         let file_part = reqwest::multipart::Part::stream_with_length(body, meta.size)
             .file_name(meta.name.clone())
             .mime_str(&meta.contenttype)?;
@@ -2344,6 +2352,7 @@ impl O2Client {
                 format!("Cannot write to {}: {}", path.display(), e),
             ))
         })?;
+        crate::ui::add_bytes(bytes.len() as u64);
         file.flush().await.map_err(|e| {
             O2Error::Io(std::io::Error::new(
                 e.kind(),
@@ -2372,6 +2381,7 @@ impl O2Client {
                 ))
             })?;
             total += chunk.len() as u64;
+            crate::ui::add_bytes(chunk.len() as u64);
         }
         file.flush().await.map_err(|e| {
             O2Error::Io(std::io::Error::new(

@@ -211,7 +211,10 @@ mod tests {
         ] {
             let shown = [crate::redact::text(&e.to_string()), e.to_json().to_string()];
             for text in shown {
-                assert!(!text.contains("CANARY") && !text.contains("34600111222"), "{text}");
+                assert!(
+                    !text.contains("CANARY") && !text.contains("34600111222"),
+                    "{text}"
+                );
             }
         }
     }

@@ -8,6 +8,7 @@ mod log;
 mod ops;
 mod redact;
 mod report;
+mod ui;
 mod util;
 mod webview;
 
@@ -32,6 +33,15 @@ struct Cli {
     /// full. Session keys never appear
     #[arg(long, global = true)]
     debug: bool,
+
+    /// Show a line for each file (uploaded, skipped, each part…); by
+    /// default long transfers show a progress bar and a summary
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
+    /// Show only warnings and errors
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
 }
 
 /// Options shared by the upload commands.
@@ -962,6 +972,7 @@ async fn main() {
 
     let cli = Cli::parse();
     log::init(cli.debug);
+    ui::set_level(cli.quiet, cli.verbose);
     // A crash leaves a report next to the run logs.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

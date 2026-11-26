@@ -11,6 +11,7 @@ La 1.0 cambia algunos comportamientos por defecto para que la CLI sea más segur
 | [Códigos de salida](#códigos-de-salida) | Todo error sale con `1` | Del `2` al `7` según el tipo de error, `1` para lo demás | Tratar cualquier código distinto de cero como error, igual que antes, o usar los nuevos |
 | [Errores con `--json`](#errores-con---json) | Solo `Error: …` en stderr | También `{"error": {…}}` en stdout | Mirar el código de salida antes de leer stdout como resultado |
 | [Sesión caducada](#sesión-caducada-y-ventana-de-login) | Abre la ventana de login a mitad de cualquier comando | Solo la abre sola en un terminal; si no, código `4` | Ejecutar `o2cloud login` al recibir un `4` |
+| [Mensajes](#menos-líneas-en-stderr) | Una línea por archivo en stderr | Una barra de progreso y un resumen | `-v` para una línea por archivo; `--json` para los resultados |
 | [Un archivo que ya está en la nube](#archivos-que-ya-están-en-la-nube) | Se vuelve a subir y O2 Cloud lo llama `nombre (1)` | Mismo tamaño: se salta. Otro tamaño: conflicto (`--on-conflict`) | Añadir `--on-conflict duplicate` para el comportamiento anterior, o tratar el código `5` |
 
 Lo que no cambia:
@@ -98,6 +99,12 @@ Un archivo en partes lleva `parts` (una lista de IDs) en lugar de `id`.
 - **Para el comportamiento de la 0.x,** añade `--on-conflict duplicate`.
 - **En una app,** no pases `--on-conflict` la primera vez. Si sale el código `5`, enseña al usuario cada entrada `conflict` ("tienes a.jpg, 2,4 MB, 02/06/2024; en la nube hay 2,1 MB, 01/05/2024: ¿sobrescribir o ignorar?"). Luego relánzalo con `--on-conflict overwrite` o `--on-conflict skip`. Si las respuestas son distintas para cada archivo, puedes lanzarlo una vez por archivo.
 - **En un script** que ya usaba `--skip-existing`, no cambia nada.
+
+## Menos líneas en stderr
+
+La 0.x escribía una línea por cada archivo de `upload-dir` y `download-dir` (`[12/300] 📄 …`, `= … skipped`, cada parte…). La 1.0 muestra una barra de progreso en un terminal, o una línea de estado por minuto si stderr va a un archivo, además de los avisos y el resumen.
+
+**Qué hacer:** añade `-v` para volver a tener la línea por archivo. No leas stderr para saber el resultado: usa `--json`. `-q` deja solo los avisos y los errores.
 
 ## Los mensajes de error terminan con el ID de la ejecución
 
