@@ -20,6 +20,18 @@ All notable changes to o2cloud-cli will be documented in this file.
   login`", code `not_logged_in`).
 - `download-dir` that stops because the session expired says so (exit
   4), and one that stops because the disk is full says that.
+- Uploading never makes a second copy by default. `upload`, `upload-dir`
+  and `upload-zip` always skip what's already there with the same name
+  and size, and a file there with another size is a conflict, settled by
+  the new `--on-conflict ask|skip|overwrite|fail|duplicate`: `ask` at a
+  terminal (both copies' size and date, then overwrite / skip / all /
+  quit; `upload-dir` asks before uploading anything), `fail` otherwise
+  (not uploaded, exit code 5, and `--json` entries with
+  `"action": "conflict"` and the cloud copy's `id`/`parts`, `size` and
+  `modified`). `duplicate` is the old behaviour (O2 Cloud names the new
+  one `name (1)`). `--skip-existing` stays, as `--on-conflict skip`.
+- `upload --json` of a file replaced with `--on-conflict overwrite` has
+  `"action": "updated"` and `replaced`.
 
 ## [0.15.4] — 2026-11-26
 
