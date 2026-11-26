@@ -28,8 +28,17 @@ struct Cli {
 /// Options shared by the upload commands.
 #[derive(Args)]
 struct UploadFlags {
-    /// Skip files already in the target folder with the same name and
-    /// size (to resume an interrupted upload)
+    /// What to do when the target folder already has a file of that name
+    /// with another size: ask (the default at a terminal), skip, overwrite
+    /// (the old copy goes to the trash), fail (don't upload it and report
+    /// it with exit code 5: the default without a terminal, e.g. for
+    /// apps), or duplicate (upload everything anyway, as before 1.0: O2
+    /// Cloud names the new one `name (1)`). A file there with the same
+    /// name and size is always skipped, except with duplicate.
+    #[arg(long, value_enum, value_name = "WHAT")]
+    on_conflict: Option<ops::OnConflict>,
+
+    /// The same as --on-conflict skip
     #[arg(long)]
     skip_existing: bool,
 
@@ -41,8 +50,16 @@ struct UploadFlags {
 
 impl UploadFlags {
     fn options(&self, jobs: usize) -> ops::UploadOptions {
+        use ops::OnConflict;
+        let on_conflict = match (self.on_conflict, self.skip_existing) {
+            (Some(OnConflict::Ask), _) | (None, false) if ops::can_ask() => OnConflict::Ask,
+            (Some(OnConflict::Ask), _) | (None, false) => OnConflict::Fail,
+            (Some(policy), _) => policy,
+            (None, true) => OnConflict::Skip,
+        };
         ops::UploadOptions {
-            skip_existing: self.skip_existing,
+            skip_existing: on_conflict != OnConflict::Duplicate,
+            on_conflict,
             jobs,
             part_size: self
                 .part_size
@@ -693,11 +710,14 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 &auth,
                 &local_path,
                 folder,
-                &ops::UploadOptions {
-                    skip_existing: upload.skip_existing || update,
-                    update,
-                    dry_run,
-                    ..upload.options(jobs.into())
+                &{
+                    let base = upload.options(jobs.into());
+                    ops::UploadOptions {
+                        skip_existing: base.skip_existing || update,
+                        update,
+                        dry_run,
+                        ..base
+                    }
                 },
                 &extensions,
                 json,

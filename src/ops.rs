@@ -783,6 +783,86 @@ pub struct UploadOptions {
     pub update: bool,
     /// `upload-dir --dry-run`: only say what would be done.
     pub dry_run: bool,
+    /// What to do with a file the cloud has under the same name but with
+    /// another size (see `OnConflict`).
+    pub on_conflict: OnConflict,
+}
+
+/// What to do when the target folder already has a file of that name with
+/// another size. A file there with the same name and size is always
+/// skipped, except with `Duplicate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnConflict {
+    /// Ask for each one (at a terminal; the default there).
+    Ask,
+    /// Leave the cloud's copy alone.
+    Skip,
+    /// Replace the cloud's copy with the local file (the old one goes to
+    /// the trash once the new one is up).
+    Overwrite,
+    /// Don't upload it, and report it: exit code 5 with the details of
+    /// both copies (the default without a terminal, e.g. for apps).
+    Fail,
+    /// Upload everything anyway, as before 1.0: O2 Cloud keeps both,
+    /// naming the new one `name (1)`; files already there are uploaded
+    /// again too.
+    Duplicate,
+}
+
+/// Whether there is someone at a terminal to ask: stdin and stderr are
+/// both terminals (with stderr in a log file, the question wouldn't be
+/// seen).
+pub fn can_ask() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// An answer to `ask_conflict`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Answer {
+    Once(OnConflict),
+    All(OnConflict),
+    Quit,
+}
+
+/// Ask what to do with `local` (`size` bytes, modified at `local_ms`),
+/// which the cloud has with `cloud_size` bytes (modified at `cloud_ms`).
+fn ask_conflict(
+    local: &str,
+    size: u64,
+    local_ms: u64,
+    cloud_size: u64,
+    cloud_ms: Option<u64>,
+) -> Answer {
+    use std::io::{BufRead, Write};
+    eprintln!("  ≠ {} is already in the cloud with another size:", local);
+    eprintln!(
+        "      cloud: {:>10}  modified {}",
+        format_size(cloud_size),
+        format_date(cloud_ms)
+    );
+    eprintln!(
+        "      local: {:>10}  modified {}",
+        format_size(size),
+        format_date(Some(local_ms))
+    );
+    let stdin = std::io::stdin();
+    loop {
+        eprint!("    [o]verwrite, [s]kip, overwrite [a]ll, skip a[l]l, [q]uit? ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
+            return Answer::Quit;
+        }
+        match line.trim().to_lowercase().as_str() {
+            "o" | "overwrite" => return Answer::Once(OnConflict::Overwrite),
+            "s" | "skip" => return Answer::Once(OnConflict::Skip),
+            "a" | "all" => return Answer::All(OnConflict::Overwrite),
+            "l" => return Answer::All(OnConflict::Skip),
+            "q" | "quit" => return Answer::Quit,
+            _ => {}
+        }
+    }
 }
 
 /// How much newer a local file must be than the cloud's copy to count as
@@ -809,7 +889,11 @@ enum Decision {
     /// take, without `--update`: left alone rather than uploaded as
     /// `name (1)`. `cloud`: the cloud file's ID, or its parts' IDs in
     /// order (`parts`).
-    Differs { cloud: Vec<u64>, parts: bool },
+    Differs {
+        cloud: Vec<u64>,
+        parts: bool,
+        size: u64,
+    },
     /// Some of its parts are in the cloud: upload the rest.
     Resume,
 }
@@ -912,12 +996,19 @@ fn decide(
     let older_ids = || main_id.into_iter().collect::<Vec<_>>();
     // Another version: replaced with --update, unless older locally.
     let other_version = || {
+        if opts.on_conflict == OnConflict::Overwrite {
+            return Decision::Changed { old: all.clone() };
+        }
         if !opts.update {
             // The cloud's copy: the whole file, or its parts in order.
             return if !whole.is_empty() && (pieces.len() == 1 || parts.is_empty()) {
                 Decision::Differs {
                     cloud: whole.iter().map(|(_, id)| *id).min().into_iter().collect(),
                     parts: false,
+                    size: whole
+                        .iter()
+                        .min_by_key(|(_, id)| *id)
+                        .map_or(0, |(s, _)| *s),
                 }
             } else {
                 Decision::Differs {
@@ -926,6 +1017,11 @@ fn decide(
                         .filter_map(|(_, f)| f.iter().map(|(_, id)| *id).min())
                         .collect(),
                     parts: true,
+                    size: parts
+                        .iter()
+                        .filter_map(|(_, f)| f.iter().min_by_key(|(_, id)| *id))
+                        .map(|(s, _)| *s)
+                        .sum(),
                 }
             };
         }
@@ -1305,7 +1401,11 @@ enum FileOutcome {
     /// `true`), without `--update`: left alone.
     Differs(Vec<u64>, bool),
     /// `--dry-run`: what would be done.
-    Planned(Decision),
+    Planned(&'static str),
+    /// Another size than the cloud's copy (its ID, or its parts' IDs if
+    /// `true`; its size and modification date), with `--on-conflict fail`:
+    /// not uploaded, and reported.
+    Conflict(Vec<u64>, bool, u64, Option<u64>),
 }
 
 /// Upload a changed file and replace the cloud's copy `old` with it. The
@@ -1638,50 +1738,139 @@ pub async fn upload_file(
         Some(id) => id,
         None => root_folder_id(client, auth).await?,
     };
-    let existing = if needs_listing(opts, size) {
-        existing_files(&client.get_folder_media(folder_id, auth).await?)
+    let (existing, mdates) = if needs_listing(opts, size) {
+        let media = client.get_folder_media(folder_id, auth).await?;
+        let mdates: HashMap<u64, u64> = media
+            .iter()
+            .filter_map(|m| m.modificationdate.map(|d| (m.id, d)))
+            .collect();
+        (existing_files(&media), mdates)
     } else {
-        ExistingFiles::new()
+        (ExistingFiles::new(), HashMap::new())
     };
-    // --skip-existing never leaves a second version next to the first.
-    let decision = decide(
-        &name,
-        size,
-        0,
-        Some(folder_id),
-        &existing,
-        &HashMap::new(),
-        &HashSet::new(),
-        opts,
-    );
-    if let Decision::Differs { .. } = decision {
-        return Err(O2Error::Conflict(format!(
-            "this folder already has {} with another size: not uploaded, so as not to \
-             leave two versions (the new one as `{}`). Move the cloud's copy to the trash \
-             first (`o2cloud rm`), or upload without --skip-existing to keep both",
-            name,
-            duplicate_name(&name)
-        )));
+    let modified = metadata.modified().ok();
+    let local_ms = modified.map(mtime_ms).unwrap_or(0);
+    let decide_with = |opts: &UploadOptions| {
+        decide(
+            &name,
+            size,
+            local_ms,
+            Some(folder_id),
+            &existing,
+            &mdates,
+            &HashSet::new(),
+            opts,
+        )
+    };
+    let mut decision = decide_with(opts);
+    // The folder has it with another size: as `--on-conflict` says.
+    if let Decision::Differs {
+        cloud,
+        parts,
+        size: cloud_size,
+    } = &decision
+    {
+        let cloud_ms = cloud.first().and_then(|id| mdates.get(id).copied());
+        let policy = match opts.on_conflict {
+            OnConflict::Ask => match ask_conflict(&name, size, local_ms, *cloud_size, cloud_ms) {
+                Answer::Once(p) | Answer::All(p) => p,
+                Answer::Quit => {
+                    return Err(O2Error::Invalid(
+                        "stopped at your request; nothing was uploaded".into(),
+                    ))
+                }
+            },
+            policy => policy,
+        };
+        let mut out = serde_json::json!({
+            "name": name,
+            "folderid": folder_id,
+            "size": size,
+            "skipped": true,
+        });
+        match policy {
+            OnConflict::Overwrite => {
+                decision = decide_with(&UploadOptions {
+                    on_conflict: OnConflict::Overwrite,
+                    ..opts.clone()
+                });
+            }
+            OnConflict::Skip => {
+                eprintln!("≠ {} is already there with another size: left alone", name);
+                if json {
+                    out["action"] = "differs".into();
+                    if *parts {
+                        out["parts"] = cloud.clone().into();
+                    } else {
+                        out["id"] = cloud.first().copied().into();
+                    }
+                    print_json(&out);
+                }
+                return Ok(());
+            }
+            _ => {
+                if json {
+                    out["action"] = "conflict".into();
+                    out["modified"] = format_date_iso(Some(local_ms));
+                    let mut there = serde_json::json!({
+                        "size": cloud_size,
+                        "modified": format_date_iso(cloud_ms),
+                    });
+                    if *parts {
+                        there["parts"] = cloud.clone().into();
+                    } else {
+                        there["id"] = cloud.first().copied().into();
+                    }
+                    out["cloud"] = there;
+                    print_json(&out);
+                }
+                return Err(O2Error::Conflict(format!(
+                    "this folder already has {} with another size ({} there, {} here): not \
+                     uploaded. Use --on-conflict overwrite to replace it, or --on-conflict \
+                     duplicate to keep both (the new one as `{}`)",
+                    name,
+                    format_size(*cloud_size),
+                    format_size(size),
+                    duplicate_name(&name)
+                )));
+            }
+        }
     }
 
-    eprintln!(
-        "→ Uploading {} ({})...",
-        local_path.display(),
-        format_size(size)
-    );
-    let uploaded = upload_local_file(
-        client,
-        auth,
-        local_path,
-        &name,
-        size,
-        metadata.modified().ok(),
-        folder_id,
-        &existing,
-        opts,
-        &mut Vec::new(),
-    )
-    .await?;
+    let mut replaced = None;
+    let uploaded = if let Decision::Changed { old } = decision {
+        eprintln!(
+            "→ Replacing {} in the cloud with {} ({})...",
+            name,
+            local_path.display(),
+            format_size(size)
+        );
+        let up = replace_file(
+            client, auth, local_path, &name, size, modified, folder_id, opts, &old,
+        )
+        .await?;
+        replaced = Some(old);
+        up
+    } else {
+        eprintln!(
+            "→ Uploading {} ({})...",
+            local_path.display(),
+            format_size(size)
+        );
+        upload_local_file(
+            client,
+            auth,
+            local_path,
+            &name,
+            size,
+            modified,
+            folder_id,
+            &existing,
+            opts,
+            &mut Vec::new(),
+        )
+        .await?
+    };
 
     crate::cache::note_uploaded(&auth.msisdn, &uploaded.ids);
     let all_skipped = uploaded.skipped == uploaded.ids.len();
@@ -1713,6 +1902,10 @@ pub async fn upload_file(
             out["parts"] = uploaded.ids.clone().into();
         } else {
             out["id"] = uploaded.ids[0].into();
+        }
+        if let Some(old) = replaced {
+            out["action"] = "updated".into();
+            out["replaced"] = old.into();
         }
         print_json(&out);
     }
@@ -1931,6 +2124,64 @@ pub async fn upload_dir(
         }
     }
     let local_names = &local_names;
+    // At a terminal, ask about each file the cloud has with another size
+    // before uploading anything, so the run can then go on by itself.
+    let mut answers: HashMap<usize, OnConflict> = HashMap::new();
+    if opts.on_conflict == OnConflict::Ask && opts.skip_existing && !opts.dry_run {
+        let mut for_all: Option<OnConflict> = None;
+        for (i, file_path, parent_o2) in &files {
+            let Ok(meta) = std::fs::metadata(file_path) else {
+                continue;
+            };
+            let name = file_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if is_empty_image(&name, meta.len()) {
+                continue;
+            }
+            let local_ms = meta.modified().ok().map(mtime_ms).unwrap_or(0);
+            let none = HashSet::new();
+            let siblings = file_path
+                .parent()
+                .and_then(|p| local_names.get(p))
+                .unwrap_or(&none);
+            let decision = decide(
+                &name,
+                meta.len(),
+                local_ms,
+                *parent_o2,
+                existing,
+                mdates,
+                siblings,
+                opts,
+            );
+            let Decision::Differs { cloud, size, .. } = decision else {
+                continue;
+            };
+            let answer = match for_all {
+                Some(policy) => policy,
+                None => {
+                    let cloud_ms = cloud.first().and_then(|id| mdates.get(id).copied());
+                    let local = local_path_in(local_dir, file_path);
+                    match ask_conflict(&local, meta.len(), local_ms, size, cloud_ms) {
+                        Answer::Once(policy) => policy,
+                        Answer::All(policy) => {
+                            for_all = Some(policy);
+                            policy
+                        }
+                        Answer::Quit => {
+                            return Err(O2Error::Invalid(
+                                "stopped at your request; nothing was uploaded".into(),
+                            ))
+                        }
+                    }
+                }
+            };
+            answers.insert(*i, answer);
+        }
+    }
+    let answers = &answers;
     // Set when the session expires: the files not started yet are left
     // alone rather than each failing the same way.
     let expired = std::sync::atomic::AtomicBool::new(false);
@@ -1989,8 +2240,15 @@ pub async fn upload_dir(
                     };
                     return (i, result, Ok(FileOutcome::Uploaded(empty)));
                 }
+                // What was answered for this file, if asked.
+                let policy = answers.get(&i).copied().unwrap_or(opts.on_conflict);
+                let file_opts = UploadOptions {
+                    on_conflict: policy,
+                    ..opts.clone()
+                };
+                let opts = &file_opts;
+                let local_ms = modified.map(mtime_ms).unwrap_or(0);
                 let decision = (opts.skip_existing || opts.dry_run).then(|| {
-                    let local_ms = modified.map(mtime_ms).unwrap_or(0);
                     let siblings = file_path.parent().and_then(|p| local_names.get(p));
                     let none = HashSet::new();
                     let siblings = siblings.unwrap_or(&none);
@@ -2004,8 +2262,12 @@ pub async fn upload_dir(
                         Decision::New => eprintln!("  + {}", local),
                         Decision::Changed { .. } => eprintln!("  ↻ {} (changed locally)", local),
                         Decision::Resume => eprintln!("  … {} (parts missing)", local),
+                        Decision::Differs { .. } if policy == OnConflict::Skip => {
+                            eprintln!("  ≠ {} (another size than in the cloud: left alone)", local)
+                        }
                         Decision::Differs { .. } => eprintln!(
-                            "  ≠ {} (another size than in the cloud; --update replaces it)",
+                            "  ≠ {} (another size than in the cloud: a conflict, see \
+                             --on-conflict)",
                             local
                         ),
                         _ => {}
@@ -2018,9 +2280,9 @@ pub async fn upload_dir(
                         Decision::Older { cloud } if cloud.len() > 1 => {
                             result["parts"] = cloud.clone().into()
                         }
-                        Decision::Differs { cloud, parts: true } => {
-                            result["parts"] = cloud.clone().into()
-                        }
+                        Decision::Differs {
+                            cloud, parts: true, ..
+                        } => result["parts"] = cloud.clone().into(),
                         Decision::Older { cloud } | Decision::Differs { cloud, .. }
                             if !cloud.is_empty() =>
                         {
@@ -2028,8 +2290,14 @@ pub async fn upload_dir(
                         }
                         _ => {}
                     }
-                    let decision = decision.clone();
-                    return (i, result, Ok(FileOutcome::Planned(decision)));
+                    let label = match decision {
+                        Decision::Differs { .. } if policy != OnConflict::Skip => {
+                            result["action"] = "conflict".into();
+                            "conflict"
+                        }
+                        d => d.label(),
+                    };
+                    return (i, result, Ok(FileOutcome::Planned(label)));
                 }
                 let folder = parent_o2.unwrap_or(root_parent);
                 let uploaded = match decision {
@@ -2048,13 +2316,28 @@ pub async fn upload_dir(
                         );
                         Ok(FileOutcome::Older(cloud))
                     }
-                    Some(Decision::Differs { cloud, parts }) => {
+                    Some(Decision::Differs { cloud, parts, .. }) if policy == OnConflict::Skip => {
                         eprintln!(
-                            "  ≠ {} has another size than in the cloud: left alone \
-                             (--update replaces it)",
+                            "  ≠ {} has another size than in the cloud: left alone",
                             local
                         );
                         Ok(FileOutcome::Differs(cloud, parts))
+                    }
+                    Some(Decision::Differs {
+                        cloud,
+                        parts,
+                        size: cloud_size,
+                    }) => {
+                        eprintln!(
+                            "  ≠ {} has another size than in the cloud ({} there, {} here): \
+                             not uploaded",
+                            local,
+                            format_size(cloud_size),
+                            format_size(size)
+                        );
+                        let cloud_ms = cloud.first().and_then(|id| mdates.get(id).copied());
+                        result["modified"] = format_date_iso(Some(local_ms));
+                        Ok(FileOutcome::Conflict(cloud, parts, cloud_size, cloud_ms))
                     }
                     _ => upload_local_file(
                         client,
@@ -2090,6 +2373,7 @@ pub async fn upload_dir(
     // One entry per file for `--json`, failed uploads included.
     let (mut succeeded, mut skipped, mut failed, mut not_done) = (0usize, 0usize, 0usize, 0usize);
     let (mut empty_images, mut updated, mut older, mut differs) = (0usize, 0usize, 0usize, 0usize);
+    let mut conflicts = 0usize;
     // What this run put in the cloud, for the next listing (see below).
     let mut uploaded_ids: Vec<u64> = Vec::new();
     let mut planned: HashMap<&'static str, usize> = HashMap::new();
@@ -2151,8 +2435,23 @@ pub async fn upload_dir(
                         result["id"] = (*id).into();
                     }
                 }
-                Ok(FileOutcome::Planned(d)) => {
-                    *planned.entry(d.label()).or_default() += 1;
+                Ok(FileOutcome::Planned(label)) => {
+                    *planned.entry(label).or_default() += 1;
+                }
+                Ok(FileOutcome::Conflict(cloud, in_parts, cloud_size, cloud_ms)) => {
+                    conflicts += 1;
+                    result["skipped"] = true.into();
+                    result["action"] = "conflict".into();
+                    let mut there = serde_json::json!({
+                        "size": cloud_size,
+                        "modified": format_date_iso(cloud_ms),
+                    });
+                    if in_parts {
+                        there["parts"] = cloud.into();
+                    } else if let Some(id) = cloud.first() {
+                        there["id"] = (*id).into();
+                    }
+                    result["cloud"] = there;
                 }
                 Err(O2Error::SessionExpired) => {
                     result["error"] = O2Error::SessionExpired.to_string().into();
@@ -2196,13 +2495,10 @@ pub async fn upload_dir(
             n("resume"),
             n("unchanged"),
             n("older"),
-            if n("differs") > 0 {
-                format!(
-                    "{} of another size (left alone without --update), ",
-                    n("differs")
-                )
-            } else {
-                String::new()
+            match (n("differs"), n("conflict")) {
+                (0, 0) => String::new(),
+                (d, 0) => format!("{} of another size (left alone), ", d),
+                (_, c) => format!("{} of another size (conflicts: see --on-conflict), ", c),
             },
             empty_images,
             beyond_limits.len()
@@ -2241,10 +2537,18 @@ pub async fn upload_dir(
             older
         );
     }
+    if conflicts > 0 {
+        eprintln!(
+            "⚠ {} file(s) have another size than in the cloud and weren't uploaded; \
+             run again with --on-conflict overwrite to replace the cloud's copies, or \
+             --on-conflict skip to leave them",
+            conflicts
+        );
+    }
     if differs > 0 {
         eprintln!(
             "  ({} file(s) have another size than in the cloud; left alone. \
-             Use --update to replace the cloud's copies)",
+             --on-conflict overwrite replaces the cloud's copies)",
             differs
         );
     }
@@ -2301,6 +2605,12 @@ pub async fn upload_dir(
             "{} of {} files failed to upload",
             failed,
             file_count + too_big
+        )));
+    }
+    if conflicts > 0 {
+        return Err(O2Error::Conflict(format!(
+            "{} file(s) have another size than in the cloud and weren't uploaded",
+            conflicts
         )));
     }
     Ok(())
@@ -5119,6 +5429,7 @@ mod tests {
             part_size: 100,
             update,
             dry_run: false,
+            on_conflict: OnConflict::Skip,
         };
         let mut existing = ExistingFiles::new();
         existing.insert((1, "same.txt".into()), vec![(10, 11)]);
@@ -5199,14 +5510,16 @@ mod tests {
             d("sized.txt", 10, t, false),
             Decision::Differs {
                 cloud: vec![31],
-                parts: false
+                parts: false,
+                size: 5
             }
         );
         assert_eq!(
             d("sized.txt", 10, t - 3000, false),
             Decision::Differs {
                 cloud: vec![31],
-                parts: false
+                parts: false,
+                size: 5
             }
         );
         assert_eq!(d("same.txt", 10, t - 3000, false), Decision::Unchanged);
@@ -5238,7 +5551,8 @@ mod tests {
             d("big", 90, t, false),
             Decision::Differs {
                 cloud: vec![41, 42, 43],
-                parts: true
+                parts: true,
+                size: 250
             }
         );
         // Parts of another size: left alone, older or not, with the parts'
@@ -5247,14 +5561,16 @@ mod tests {
             d("big", 260, t, false),
             Decision::Differs {
                 cloud: vec![41, 42, 43],
-                parts: true
+                parts: true,
+                size: 250
             }
         );
         assert_eq!(
             d("big", 260, t - 5000, false),
             Decision::Differs {
                 cloud: vec![41, 42, 43],
-                parts: true
+                parts: true,
+                size: 250
             }
         );
         // Complete parts and resuming are as with --update.
@@ -5265,9 +5581,37 @@ mod tests {
             d("dup.txt", 11, t, false),
             Decision::Differs {
                 cloud: vec![21],
-                parts: false
+                parts: false,
+                size: 10
             }
         );
+        // --on-conflict overwrite: the cloud's copy is replaced, whatever
+        // the dates, and every copy under the name goes.
+        let overwrite = UploadOptions {
+            on_conflict: OnConflict::Overwrite,
+            ..opts(false)
+        };
+        let o = |name, size, local| {
+            decide(
+                name,
+                size,
+                local,
+                Some(1),
+                &existing,
+                &mdates,
+                &none,
+                &overwrite,
+            )
+        };
+        assert_eq!(
+            o("sized.txt", 10, t - 9000),
+            Decision::Changed { old: vec![31] }
+        );
+        assert_eq!(o("dup.txt", 11, t), Decision::Changed { old: vec![21, 22] });
+        assert!(matches!(o("big", 260, t), Decision::Changed { .. }));
+        // The same size is still unchanged, and a new file new.
+        assert_eq!(o("same.txt", 10, t + 9000), Decision::Unchanged);
+        assert_eq!(o("new.txt", 10, t), Decision::New);
         // Only `name.001` in the cloud: taken for old parts…
         assert!(matches!(
             d("half", 10, t, false),
@@ -5321,7 +5665,8 @@ mod tests {
             ),
             Decision::Differs {
                 cloud: vec![61],
-                parts: false
+                parts: false,
+                size: 90
             }
         );
     }
