@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::api::{O2Client, UploadMeta};
@@ -839,10 +839,12 @@ fn mtime_ms(t: std::time::SystemTime) -> u64 {
 /// locally: `--update` never puts an older version over a newer one.
 /// Without `--skip-existing` everything is uploaded, as `upload-dir` does
 /// then; without `--update`, a file of the same size is `Unchanged`
-/// whatever its date, and another version is `Differs` (left alone) only
-/// where uploading would take a name already in use and so add a
-/// `name (1)` copy: the whole file for a small one, its parts for one in
-/// parts. Otherwise it's `New`, as before.
+/// whatever its date, and another version (whole or in parts, also when
+/// the file crossed the part size) is `Differs`: left alone, since
+/// uploading it would leave two versions in the cloud, or a `name (1)`
+/// copy. `local_names` are the files next to this one locally: a
+/// `name.NNN` among them is never taken for a part of `name`.
+#[allow(clippy::too_many_arguments)]
 fn decide(
     name: &str,
     size: u64,
@@ -850,6 +852,7 @@ fn decide(
     folder: Option<u64>,
     existing: &ExistingFiles,
     mdates: &HashMap<u64, u64>,
+    local_names: &HashSet<String>,
     opts: &UploadOptions,
 ) -> Decision {
     let Some(folder) = folder else {
@@ -866,12 +869,13 @@ fn decide(
         .get(&(folder, name.to_string()))
         .cloned()
         .unwrap_or_default();
-    let mut parts: Vec<(usize, &Vec<(u64, u64)>)> = existing
-        .iter()
-        .filter(|((f, _), _)| *f == folder)
-        .filter_map(|((_, n), found)| part_number(name, n).map(|n| (n, found)))
+    // A `name.NNN` that is also a local file next to this one is that
+    // file, not a part of this one.
+    let parts: Vec<(usize, &Vec<(u64, u64)>)> = existing
+        .parts_of(folder, name)
+        .into_iter()
+        .filter(|(n, _)| !local_names.contains(&part_name(name, *n)))
         .collect();
-    parts.sort_by_key(|(n, _)| *n);
     if whole.is_empty() && parts.is_empty() {
         return Decision::New;
     }
@@ -900,12 +904,13 @@ fn decide(
     // Another version: replaced with --update, unless older locally.
     let other_version = || {
         if !opts.update {
-            return if pieces.len() == 1 && !whole.is_empty() {
+            // The cloud's copy: the whole file, or its parts in order.
+            return if !whole.is_empty() && (pieces.len() == 1 || parts.is_empty()) {
                 Decision::Differs {
                     cloud: whole.iter().map(|(_, id)| *id).min().into_iter().collect(),
                     parts: false,
                 }
-            } else if pieces.len() > 1 && !parts.is_empty() {
+            } else {
                 Decision::Differs {
                     cloud: parts
                         .iter()
@@ -913,8 +918,6 @@ fn decide(
                         .collect(),
                     parts: true,
                 }
-            } else {
-                Decision::New
             };
         }
         if older {
@@ -964,17 +967,93 @@ fn decide(
     }
 }
 
-/// Files already in the cloud, by (folder ID, name): their sizes and IDs.
-type ExistingFiles = HashMap<(u64, String), Vec<(u64, u64)>>;
+/// Files already in the cloud, by (folder ID, name): their sizes and IDs;
+/// with an index of the parts (`name.001`…) by the name they're parts
+/// of, so finding a file's parts doesn't go through every file.
+#[derive(Default)]
+struct ExistingFiles {
+    files: HashMap<(u64, String), Vec<(u64, u64)>>,
+    parts: HashMap<(u64, String), std::collections::BTreeSet<usize>>,
+}
+
+/// What the server calls a second upload of `name`: `a (1).txt`.
+fn duplicate_name(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{} (1).{}", stem, ext),
+        _ => format!("{} (1)", name),
+    }
+}
+
+/// `name.001` → (`name`, 1).
+fn split_part_name(name: &str) -> Option<(&str, usize)> {
+    let base = name.get(..name.len().checked_sub(4)?)?;
+    part_number(base, name)
+        .filter(|_| !base.is_empty())
+        .map(|n| (base, n))
+}
+
+impl ExistingFiles {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, key: &(u64, String)) -> Option<&Vec<(u64, u64)>> {
+        self.files.get(key)
+    }
+
+    fn add(&mut self, folder: u64, name: String, size: u64, id: u64) {
+        if let Some((base, n)) = split_part_name(&name) {
+            self.parts
+                .entry((folder, base.to_string()))
+                .or_default()
+                .insert(n);
+        }
+        self.files
+            .entry((folder, name))
+            .or_default()
+            .push((size, id));
+    }
+
+    #[cfg(test)]
+    fn insert(&mut self, key: (u64, String), found: Vec<(u64, u64)>) {
+        self.remove(&key);
+        for (size, id) in found {
+            self.add(key.0, key.1.clone(), size, id);
+        }
+    }
+
+    #[cfg(test)]
+    fn remove(&mut self, key: &(u64, String)) {
+        if self.files.remove(key).is_some() {
+            if let Some((base, n)) = split_part_name(&key.1) {
+                if let Some(set) = self.parts.get_mut(&(key.0, base.to_string())) {
+                    set.remove(&n);
+                }
+            }
+        }
+    }
+
+    /// The parts of `name` in `folder`, by part number.
+    fn parts_of(&self, folder: u64, name: &str) -> Vec<(usize, &Vec<(u64, u64)>)> {
+        let Some(numbers) = self.parts.get(&(folder, name.to_string())) else {
+            return Vec::new();
+        };
+        numbers
+            .iter()
+            .filter_map(|&n| {
+                self.files
+                    .get(&(folder, part_name(name, n)))
+                    .map(|f| (n, f))
+            })
+            .collect()
+    }
+}
 
 fn existing_files(media: &[crate::api::MediaItem]) -> ExistingFiles {
-    let mut existing: ExistingFiles = HashMap::new();
+    let mut existing = ExistingFiles::new();
     for m in media {
         if let (Some(folder), Some(name)) = (m.folderid, m.name.clone()) {
-            existing
-                .entry((folder, name))
-                .or_default()
-                .push((m.size.unwrap_or(0), m.id));
+            existing.add(folder, name, m.size.unwrap_or(0), m.id);
         }
     }
     existing
@@ -1044,15 +1123,10 @@ fn check_existing_parts(
     existing: &ExistingFiles,
     skip_existing: bool,
 ) -> Result<(), O2Error> {
-    let mut there: Vec<(usize, &Vec<(u64, u64)>)> = existing
-        .iter()
-        .filter(|((folder, _), _)| *folder == folder_id)
-        .filter_map(|((_, n), found)| part_number(name, n).map(|n| (n, found)))
-        .collect();
+    let there = existing.parts_of(folder_id, name);
     if there.is_empty() {
         return Ok(());
     }
-    there.sort_by_key(|(n, _)| *n);
     if !skip_existing {
         return Err(O2Error::Invalid(format!(
             "this folder already has parts of a file named {} ({}): delete them \
@@ -1553,6 +1627,26 @@ pub async fn upload_file(
     } else {
         ExistingFiles::new()
     };
+    // --skip-existing never leaves a second version next to the first.
+    let decision = decide(
+        &name,
+        size,
+        0,
+        Some(folder_id),
+        &existing,
+        &HashMap::new(),
+        &HashSet::new(),
+        opts,
+    );
+    if let Decision::Differs { .. } = decision {
+        return Err(O2Error::Invalid(format!(
+            "this folder already has {} with another size: not uploaded, so as not to \
+             leave two versions (the new one as `{}`). Move the cloud's copy to the trash \
+             first (`o2cloud rm`), or upload without --skip-existing to keep both",
+            name,
+            duplicate_name(&name)
+        )));
+    }
 
     eprintln!(
         "→ Uploading {} ({})...",
@@ -1800,6 +1894,17 @@ pub async fn upload_dir(
         })
         .collect();
     let (existing, mdates) = (&existing, &mdates);
+    // The local files of each folder, by name (see `decide`).
+    let mut local_names: HashMap<&Path, HashSet<String>> = HashMap::new();
+    for (path, is_dir) in &entries {
+        if let (false, Some(parent), Some(name)) = (*is_dir, path.parent(), path.file_name()) {
+            local_names
+                .entry(parent)
+                .or_default()
+                .insert(name.to_string_lossy().into_owned());
+        }
+    }
+    let local_names = &local_names;
     // Set when the session expires: the files not started yet are left
     // alone rather than each failing the same way.
     let expired = std::sync::atomic::AtomicBool::new(false);
@@ -1860,7 +1965,12 @@ pub async fn upload_dir(
                 }
                 let decision = (opts.skip_existing || opts.dry_run).then(|| {
                     let local_ms = modified.map(mtime_ms).unwrap_or(0);
-                    decide(&name, size, local_ms, parent_o2, existing, mdates, opts)
+                    let siblings = file_path.parent().and_then(|p| local_names.get(p));
+                    let none = HashSet::new();
+                    let siblings = siblings.unwrap_or(&none);
+                    decide(
+                        &name, size, local_ms, parent_o2, existing, mdates, siblings, opts,
+                    )
                 });
                 let local = local_path_in(local_dir, file_path);
                 if let (true, Some(decision)) = (opts.dry_run, &decision) {
@@ -2553,7 +2663,11 @@ fn add_dir_to_zip(
                     .map(|c| c.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                zip.start_file(&entry_name, options)
+                // 4 GiB or more needs ZIP64, which the zip crate only
+                // writes when told (else it aborts at the 4 GiB mark).
+                let large =
+                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= u32::MAX as u64;
+                zip.start_file(&entry_name, options.large_file(large))
                     .map_err(|e| O2Error::Io(std::io::Error::other(format!("Zip error: {}", e))))?;
                 let mut src = std::fs::File::open(&path).map_err(|e| {
                     O2Error::Io(std::io::Error::new(
@@ -4369,6 +4483,29 @@ mod tests {
     }
 
     #[test]
+    fn test_existing_parts_index() {
+        let mut existing = ExistingFiles::new();
+        existing.add(1, "f.002".into(), 10, 2);
+        existing.add(1, "f.001".into(), 10, 1);
+        existing.add(1, "f.txt".into(), 3, 3);
+        existing.add(1, "f.0001".into(), 3, 4);
+        existing.add(2, "f.003".into(), 10, 5);
+        let parts: Vec<(usize, u64)> = existing
+            .parts_of(1, "f")
+            .into_iter()
+            .map(|(n, found)| (n, found[0].1))
+            .collect();
+        assert_eq!(parts, [(1, 1), (2, 2)]);
+        assert!(existing.parts_of(1, "g").is_empty());
+        assert_eq!(split_part_name("a.b.010"), Some(("a.b", 10)));
+        assert_eq!(split_part_name(".001"), None);
+        assert_eq!(split_part_name("001"), None);
+        assert_eq!(duplicate_name("a.txt"), "a (1).txt");
+        assert_eq!(duplicate_name("README"), "README (1)");
+        assert_eq!(duplicate_name(".bashrc"), ".bashrc (1)");
+    }
+
+    #[test]
     fn test_check_existing_parts() {
         let pieces = upload_pieces("f", 25, 10).unwrap(); // 10, 10, 5
         let mut existing = ExistingFiles::new();
@@ -4602,6 +4739,7 @@ mod tests {
         existing.insert((1, "big.003".into()), vec![(50, 43)]);
         existing.insert((1, "half.001".into()), vec![(100, 51)]);
         let t = 1_600_000_000_000u64;
+        let none = HashSet::new();
         let mdates: HashMap<u64, u64> = [(11, t), (21, t), (22, t), (31, t), (41, t), (51, t)]
             .into_iter()
             .collect();
@@ -4613,13 +4751,14 @@ mod tests {
                 Some(1),
                 &existing,
                 &mdates,
+                &none,
                 &opts(update),
             )
         };
 
         assert_eq!(d("new.txt", 10, t, true), Decision::New);
         assert_eq!(
-            decide("x", 1, t, None, &existing, &mdates, &opts(true)),
+            decide("x", 1, t, None, &existing, &mdates, &none, &opts(true)),
             Decision::New
         );
         assert_eq!(d("same.txt", 10, t, true), Decision::Unchanged);
@@ -4647,7 +4786,16 @@ mod tests {
             ..opts(false)
         };
         assert_eq!(
-            decide("same.txt", 10, t, Some(1), &existing, &mdates, &plain),
+            decide(
+                "same.txt",
+                10,
+                t,
+                Some(1),
+                &existing,
+                &mdates,
+                &none,
+                &plain
+            ),
             Decision::New
         );
         assert_eq!(
@@ -4694,9 +4842,14 @@ mod tests {
         };
         old.sort();
         assert_eq!(old, [41, 42, 43]);
-        // Crossing the part size without --update: the name is free, so
-        // it's uploaded as before (no `name (1)`).
-        assert_eq!(d("big", 90, t, false), Decision::New);
+        // Crossing the part size without --update: left alone too.
+        assert_eq!(
+            d("big", 90, t, false),
+            Decision::Differs {
+                cloud: vec![41, 42, 43],
+                parts: true
+            }
+        );
         // Parts of another size: left alone, older or not, with the parts'
         // IDs in order.
         assert_eq!(
@@ -4724,20 +4877,61 @@ mod tests {
                 parts: false
             }
         );
-        // Only `name.001` in the cloud (another file, or old parts): the
-        // name is free, so a small file is uploaded.
-        assert_eq!(d("half", 10, t, false), Decision::New);
+        // Only `name.001` in the cloud: taken for old parts…
+        assert!(matches!(
+            d("half", 10, t, false),
+            Decision::Differs { parts: true, .. }
+        ));
+        // …unless `name.001` is a local file next to it: then it's that
+        // file, and `half` is new (and never trashes it with --update).
+        let siblings: HashSet<String> = ["half".to_string(), "half.001".to_string()].into();
+        for update in [false, true] {
+            assert_eq!(
+                decide(
+                    "half",
+                    10,
+                    t,
+                    Some(1),
+                    &existing,
+                    &mdates,
+                    &siblings,
+                    &opts(update)
+                ),
+                Decision::New
+            );
+        }
         // …and parts now, one file in the cloud.
         existing.insert((1, "grown".into()), vec![(90, 61)]);
         let mdates: HashMap<u64, u64> = mdates.into_iter().chain([(61, t)]).collect();
         assert_eq!(
-            decide("grown", 250, t, Some(1), &existing, &mdates, &opts(true)),
+            decide(
+                "grown",
+                250,
+                t,
+                Some(1),
+                &existing,
+                &mdates,
+                &none,
+                &opts(true)
+            ),
             Decision::Changed { old: vec![61] }
         );
-        // Without --update the parts' names are free: uploaded as before.
+        // Without --update: left alone, the whole file being the copy.
         assert_eq!(
-            decide("grown", 250, t, Some(1), &existing, &mdates, &opts(false)),
-            Decision::New
+            decide(
+                "grown",
+                250,
+                t,
+                Some(1),
+                &existing,
+                &mdates,
+                &none,
+                &opts(false)
+            ),
+            Decision::Differs {
+                cloud: vec![61],
+                parts: false
+            }
         );
     }
 

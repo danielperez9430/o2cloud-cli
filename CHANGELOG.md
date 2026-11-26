@@ -2,6 +2,25 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.15.3] — 2026-11-26
+
+### Fixed
+- `upload-dir --skip-existing` and `--update` on large accounts: finding
+  each file's parts went through every file in the cloud, so a folder of
+  hundreds of thousands of files took minutes before uploading anything.
+  The parts are now indexed by name.
+- `--skip-existing` never leaves two versions of a file: a file that
+  crossed the part size (whole in the cloud, in parts now, or the other
+  way round) is left alone as `differs` in `upload-dir` (before, both
+  versions stayed), and `--update` replaces it.
+- A local `name.001` next to `name` is that file, never a part of
+  `name`: `--update` no longer moves it to the trash as an old version.
+- `upload --skip-existing` and `upload-zip --skip-existing` stop with an
+  error when the folder has the file with another size, instead of
+  uploading it as `name (1)`.
+- `upload-zip` of a folder with a file of 4 GiB or more failed after
+  zipping it all ("Large file option has not been set").
+
 ## [0.15.2] — 2026-11-26
 
 ### Fixed
