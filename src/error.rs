@@ -41,13 +41,27 @@ pub enum O2Error {
     #[error("{0}")]
     Ambiguous(String),
 
-    /// The server answered 401 in the middle of a command: the session
-    /// expired (a web login ends after a while without use) or was revoked.
+    /// The server answered 401 in the middle of a command, or the session
+    /// is over and no login window could be opened: it expired (a web
+    /// login ends after a while without use) or was revoked.
     #[error(
-        "Session expired: run the command again to log in (with \
-         `upload-dir --skip-existing` it carries on where it stopped)"
+        "Session expired: run the command again to log in, or `o2cloud login` \
+         (with `upload-dir --skip-existing` it carries on where it stopped)"
     )]
     SessionExpired,
+
+    /// No stored session: never logged in, or logged out.
+    #[error("Not logged in: run `o2cloud login`")]
+    NotLoggedIn,
+
+    /// Something with that name is already there, and the CLI won't
+    /// overwrite it or make a second copy.
+    #[error("{0}")]
+    Conflict(String),
+
+    /// Some files of a run failed; the others were done.
+    #[error("{0}")]
+    Partial(String),
 
     /// A server response could not be parsed into the expected shape.
     #[error("Invalid response: {0}")]
@@ -63,9 +77,110 @@ impl From<reqwest::Error> for O2Error {
     }
 }
 
+impl O2Error {
+    /// A stable name for the kind of error, for `--json` and scripts.
+    pub fn code(&self) -> &'static str {
+        match self {
+            O2Error::Http(_) => "network",
+            O2Error::Auth(_) => "auth_failed",
+            O2Error::Config(_) => "config",
+            O2Error::WebView(_) => "login_window",
+            O2Error::UrlParse(_) => "invalid",
+            O2Error::Io(_) => "io",
+            O2Error::Api(_) if self.server_side() => "server_error",
+            O2Error::Api(_) => "api_error",
+            O2Error::NotFound(_) => "not_found",
+            O2Error::Invalid(_) => "invalid",
+            O2Error::Ambiguous(_) => "ambiguous",
+            O2Error::SessionExpired => "session_expired",
+            O2Error::NotLoggedIn => "not_logged_in",
+            O2Error::Conflict(_) => "conflict",
+            O2Error::Partial(_) => "partial_failure",
+            O2Error::Parse(_) => "bad_response",
+        }
+    }
+
+    /// The exit status for this error: 2 a request the CLI won't carry
+    /// out as given (as for a usage error), 3 not found, 4 not logged in
+    /// or session expired, 5 a conflict with something already there,
+    /// 6 some files of a run failed, 7 the network or the server failed
+    /// (worth trying again), 1 anything else.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            O2Error::Invalid(_) | O2Error::Ambiguous(_) | O2Error::UrlParse(_) => 2,
+            O2Error::NotFound(_) => 3,
+            O2Error::SessionExpired | O2Error::NotLoggedIn | O2Error::Auth(_) => 4,
+            O2Error::Conflict(_) => 5,
+            O2Error::Partial(_) => 6,
+            O2Error::Http(_) | O2Error::Parse(_) => 7,
+            O2Error::Api(_) if self.server_side() => 7,
+            _ => 1,
+        }
+    }
+
+    /// Whether running the same command again may well work: the network
+    /// or the server failed, or some files of a run did (it carries on).
+    pub fn retryable(&self) -> bool {
+        matches!(self.exit_code(), 6 | 7)
+    }
+
+    /// An API error the server caused (5xx, 429, or an outage answer).
+    fn server_side(&self) -> bool {
+        let O2Error::Api(msg) = self else {
+            return false;
+        };
+        msg.contains("(status 5") || msg.contains("(status 429") || msg.contains("FOL-1000")
+    }
+
+    /// The error as JSON, for `--json`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": {
+                "code": self.code(),
+                "message": self.to_string(),
+                "retryable": self.retryable(),
+                "exit_code": self.exit_code(),
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_codes() {
+        let e = O2Error::SessionExpired;
+        assert_eq!(
+            (e.code(), e.exit_code(), e.retryable()),
+            ("session_expired", 4, false)
+        );
+        // The Tauri app and scripts match these words.
+        assert!(e.to_string().starts_with("Session expired"));
+        assert!(O2Error::NotLoggedIn
+            .to_string()
+            .starts_with("Not logged in"));
+        let e = O2Error::Api("Upload failed (status 502 Bad Gateway): x".into());
+        assert_eq!(
+            (e.code(), e.exit_code(), e.retryable()),
+            ("server_error", 7, true)
+        );
+        let e = O2Error::Api("Rename failed: MED-1005".into());
+        assert_eq!(
+            (e.code(), e.exit_code(), e.retryable()),
+            ("api_error", 1, false)
+        );
+        assert_eq!(O2Error::Conflict("x".into()).exit_code(), 5);
+        assert_eq!(O2Error::Partial("x".into()).exit_code(), 6);
+        assert_eq!(O2Error::NotFound("x".into()).exit_code(), 3);
+        assert_eq!(O2Error::Invalid("x".into()).exit_code(), 2);
+        let json = O2Error::Conflict("a.txt is there".into()).to_json();
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["code"], "conflict");
+        assert_eq!(json["error"]["message"], "a.txt is there");
+        assert_eq!(json["error"]["exit_code"], 5);
+    }
 
     /// No session key or signed link in a request error's message.
     #[tokio::test]
@@ -81,15 +196,10 @@ mod tests {
             "reqwest prints it"
         );
         let e = O2Error::from(err);
-        assert!(!e.to_string().contains("SECRETKEY123"), "{e}");
+        for text in [e.to_string(), e.to_json().to_string()] {
+            assert!(!text.contains("SECRETKEY123"), "{text}");
+            assert!(!text.contains("127.0.0.1:9"), "{text}");
+        }
         assert!(e.to_string().starts_with("HTTP request failed"));
-    }
-
-    #[test]
-    fn test_session_expired_wording() {
-        // Apps match these words (the Tauri app looks for "Session expired").
-        assert!(O2Error::SessionExpired
-            .to_string()
-            .starts_with("Session expired"));
     }
 }

@@ -347,7 +347,12 @@ fn file_json(item: &crate::api::MediaItem, path: Option<String>) -> serde_json::
 }
 
 /// Print one JSON value to stdout, for `--json`.
+/// Set once a command has printed its JSON result, so an error after it
+/// isn't printed as a second JSON value (stdout holds one).
+pub static PRINTED_JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn print_json(v: &serde_json::Value) {
+    PRINTED_JSON.store(true, std::sync::atomic::Ordering::Relaxed);
     println!(
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".into())
@@ -1139,7 +1144,7 @@ fn check_existing_parts(
         return Ok(());
     }
     if !skip_existing {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "this folder already has parts of a file named {} ({}): delete them \
              first, or add --skip-existing to resume uploading the same file",
             name,
@@ -1152,7 +1157,7 @@ fn check_existing_parts(
             (Some((_, _, len)), [(size, _)]) if size == len
         );
         if !fits {
-            return Err(O2Error::Invalid(format!(
+            return Err(O2Error::Conflict(format!(
                 "the parts of {} already in this folder don't match this file \
                  ({} differs); delete them first",
                 name,
@@ -1650,7 +1655,7 @@ pub async fn upload_file(
         opts,
     );
     if let Decision::Differs { .. } = decision {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "this folder already has {} with another size: not uploaded, so as not to \
              leave two versions (the new one as `{}`). Move the cloud's copy to the trash \
              first (`o2cloud rm`), or upload without --skip-existing to keep both",
@@ -2292,7 +2297,7 @@ pub async fn upload_dir(
     }
     let failed = failed + too_big;
     if failed > 0 {
-        return Err(O2Error::Api(format!(
+        return Err(O2Error::Partial(format!(
             "{} of {} files failed to upload",
             failed,
             file_count + too_big
@@ -2812,7 +2817,7 @@ pub async fn download_file(
         match std::fs::read_to_string(&marker) {
             Ok(found) if found == mark => true,
             _ => {
-                return Err(O2Error::Invalid(format!(
+                return Err(O2Error::Conflict(format!(
                     "Refusing to overwrite existing file: {}",
                     output_path.display()
                 )))
@@ -3636,7 +3641,7 @@ pub async fn move_item(
             let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
             let there = files_in(client, auth, Some(dest_id), &media, complete).await?;
             if name_taken(&there, &name, &ids) {
-                return Err(O2Error::Invalid(format!(
+                return Err(O2Error::Conflict(format!(
                     "{} already has a file named '{}' (or parts of one)",
                     dest_path, name
                 )));
@@ -3667,7 +3672,7 @@ pub async fn move_item(
         .iter()
         .any(|m| m.name == item.name)
     {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "{} already has a file named '{}'",
             dest_path,
             item.name.as_deref().unwrap_or("?")
@@ -3720,7 +3725,7 @@ async fn move_folder(
         .iter()
         .any(|f| f.parentid == dest_id && f.name == folder.name)
     {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "{} already has a folder named '{}'",
             dest_path, folder.name
         )));
@@ -3783,7 +3788,7 @@ pub async fn rename_item(
             let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
             let there = files_in(client, auth, parts[0].folderid, &media, complete).await?;
             if name_taken(&there, new_name, &ids) {
-                return Err(O2Error::Invalid(format!(
+                return Err(O2Error::Conflict(format!(
                     "a file named '{}' (or parts of one) already exists there",
                     new_name
                 )));
@@ -3830,7 +3835,7 @@ pub async fn rename_item(
         .iter()
         .any(|m| m.id != item.id && m.name.as_deref() == Some(new_name))
     {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "a file named '{}' already exists there",
             new_name
         )));
@@ -3874,7 +3879,7 @@ async fn rename_folder(
         .iter()
         .any(|f| f.id != folder_id && f.parentid == folder.parentid && f.name == new_name)
     {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "a folder named '{}' already exists there",
             new_name
         )));
@@ -3924,7 +3929,7 @@ pub async fn copy_item(
             }
             let there = files_in(client, auth, Some(dest_id), &media, complete).await?;
             if name_taken(&there, name, &[]) {
-                return Err(O2Error::Invalid(format!(
+                return Err(O2Error::Conflict(format!(
                     "{} already has a file named '{}' (or parts of one); use --name to \
                      give the copy another name",
                     dest_path, name
@@ -3974,7 +3979,7 @@ pub async fn copy_item(
         .iter()
         .any(|m| m.name.as_deref() == Some(name))
     {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "{} already has a file named '{}' (use --name to give the copy another name)",
             dest_path, name
         )));
@@ -4038,7 +4043,7 @@ pub async fn make_folder(
             .find(|f| f.parentid == current && f.name == *part)
         {
             Some(f) if last && !parents => {
-                return Err(O2Error::Invalid(format!(
+                return Err(O2Error::Conflict(format!(
                     "{}/ already exists (id:{})",
                     shown, f.id
                 )));

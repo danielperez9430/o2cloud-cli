@@ -2,6 +2,25 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [Unreleased] — 1.0.0
+
+### Changed (breaking)
+- Exit codes say what went wrong: 2 a request it won't carry out as
+  given, 3 not found, 4 not logged in or session expired, 5 conflict
+  (something with that name is already there), 6 some files of a run
+  failed, 7 the network or O2 Cloud failed, 1 anything else. Before,
+  every error exited with 1.
+- With `--json`, an error is also printed to stdout as
+  `{"error": {"code", "message", "retryable", "exit_code"}}`, with a
+  stable `code` (unless the command's result was already printed).
+- When the session has expired, the login window only opens by itself at
+  a terminal; scripts and apps get exit code 4 ("Session expired") and
+  log in with `o2cloud login`. `O2CLOUD_LOGIN_WINDOW=1` opens it anyway.
+- Not having logged in is its own error ("Not logged in: run `o2cloud
+  login`", code `not_logged_in`).
+- `download-dir` that stops because the session expired says so (exit
+  4), and one that stops because the disk is full says that.
+
 ## [0.15.4] — 2026-11-26
 
 ### Security
