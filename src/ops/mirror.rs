@@ -35,7 +35,7 @@ pub struct CloudFile {
 }
 
 /// Something to move to the trash.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Deletion {
     /// Its path inside the mirrored folder, e.g. `fotos/a (1).jpg`.
     pub path: String,
@@ -128,6 +128,12 @@ pub fn plan(
     files: &[CloudFile],
 ) -> Result<Plan, String> {
     let mut local: HashMap<String, LocalDir> = HashMap::new();
+    // Each local directory by its key, as it is on disk: names are checked
+    // on disk under it (not under the cloud's names, which lack emoji).
+    let mut real: HashMap<String, PathBuf> = HashMap::new();
+    real.insert(String::new(), local_dir.to_path_buf());
+    // The directories with a file somewhere below them.
+    let mut with_files: HashSet<String> = HashSet::new();
     for (path, is_dir) in entries.iter().chain(left_out) {
         let rel = path
             .strip_prefix(local_dir)
@@ -139,11 +145,20 @@ pub fn plan(
         let Some((name, parent)) = raw.split_last() else {
             continue; // the directory itself
         };
-        let key = parent
-            .iter()
-            .map(|c| stored(c))
-            .collect::<Vec<_>>()
-            .join("/");
+        let keys: Vec<String> = parent.iter().map(|c| stored(c)).collect();
+        let key = keys.join("/");
+        if *is_dir {
+            let own = if key.is_empty() {
+                stored(name)
+            } else {
+                format!("{}/{}", key, stored(name))
+            };
+            real.insert(own, path.clone());
+        } else {
+            for n in 0..=keys.len() {
+                with_files.insert(keys[..n].join("/"));
+            }
+        }
         let dir = local.entry(key).or_default();
         let names = if *is_dir {
             &mut dir.dirs
@@ -197,8 +212,9 @@ pub fn plan(
         ..Plan::default()
     };
     let tree = Tree {
-        local_dir,
         local: &local,
+        real: &real,
+        with_files: &with_files,
         children: &children,
         in_folder: &in_folder,
     };
@@ -209,10 +225,19 @@ pub fn plan(
 }
 
 struct Tree<'a> {
-    local_dir: &'a Path,
     local: &'a HashMap<String, LocalDir>,
+    real: &'a HashMap<String, PathBuf>,
+    with_files: &'a HashSet<String>,
     children: &'a HashMap<u64, Vec<&'a FolderEntry>>,
     in_folder: &'a HashMap<u64, Vec<&'a CloudFile>>,
+}
+
+/// Why something not local by name is kept anyway.
+enum Keep {
+    /// Never deleted, nothing to say (hidden or system names).
+    Quietly,
+    /// Kept, and said why.
+    Saying(String),
 }
 
 impl Tree<'_> {
@@ -226,33 +251,58 @@ impl Tree<'_> {
         };
         let subfolders = self.children.get(&folder).map_or(&[][..], Vec::as_slice);
         let files = self.in_folder.get(&folder).map_or(&[][..], Vec::as_slice);
-        let Some(here) = self.local.get(rel) else {
-            // A local directory with nothing in it (not the top one: that
-            // is refused before). Its cloud contents stay.
-            if !rel.is_empty() && (!subfolders.is_empty() || !files.is_empty()) {
+        let has_content = !subfolders.is_empty() || !files.is_empty();
+        // A local directory with no file anywhere below it (not the top
+        // one: that is refused before), perhaps a disk not mounted or a
+        // copy that didn't finish: its cloud contents stay.
+        if !rel.is_empty() && !self.with_files.contains(rel) {
+            if has_content {
                 let (n, _) = count(folder, self.children, self.in_folder);
                 plan.kept.push(format!(
-                    "{}/: empty locally, so its {} file(s) in the cloud were kept (delete the \
-                     local folder itself to have it removed)",
+                    "{}/: no files in it locally, so its {} file(s) in the cloud were kept \
+                     (delete the local folder itself to have it removed)",
                     rel, n
                 ));
             }
             return;
-        };
+        }
+        let empty = LocalDir::default();
+        let here = self.local.get(rel).unwrap_or(&empty);
         let loose_here = here.loose_names();
-        // Kept although not local by name: `Some(why)` (`why` said to the
-        // user, if anything), or `None` to delete.
-        let keep = |name: &str, path: &str| -> Option<Option<String>> {
-            if is_skipped_name(name) || is_aside_copy(name) {
-                return Some(None);
+        let real_dir = self.real.get(rel);
+        // Kept although not local by name, or `None` to delete.
+        let keep = |name: &str, path: &str| -> Option<Keep> {
+            if is_skipped_name(name) {
+                return Some(Keep::Quietly);
             }
-            match self.local_dir.join(path).symlink_metadata() {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                // On disk (a symlink, a name beyond limits) or unreadable.
-                _ => return Some(None),
+            if is_aside_copy(name) {
+                return Some(Keep::Saying(format!(
+                    "{}: kept, a replacement's copy of the old version",
+                    path
+                )));
+            }
+            // On disk under the real local directory, one component at
+            // a time (a `\\?\` path takes no `/`).
+            if let Some(dir) = real_dir {
+                match dir.join(name).symlink_metadata() {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Some(Keep::Saying(format!(
+                            "{}: kept, couldn't check it locally ({})",
+                            path, e
+                        )))
+                    }
+                    Ok(_) => {
+                        return Some(Keep::Saying(format!(
+                            "{}: kept, something of that name is on the local disk (a \
+                             link, another case, a name beyond O2 Cloud's limits)",
+                            path
+                        )))
+                    }
+                }
             }
             if loose_here.contains(&loose(name)) {
-                return Some(Some(format!(
+                return Some(Keep::Saying(format!(
                     "{}: kept, its name is almost that of a local one (case, spaces or emoji)",
                     path
                 )));
@@ -263,17 +313,30 @@ impl Tree<'_> {
             let path = join(&sub.name);
             if here.dirs.contains_key(&sub.name) {
                 self.visit(sub.id, &path, plan);
-            } else if let Some(why) = keep(&sub.name, &path) {
-                plan.kept.extend(why);
-            } else {
-                let (files, folders) = count(sub.id, self.children, self.in_folder);
-                plan.deletions.push(Deletion {
-                    path,
-                    id: sub.id,
-                    is_folder: true,
-                    files,
-                    folders: folders + 1,
-                });
+                continue;
+            }
+            match keep(&sub.name, &path) {
+                Some(Keep::Quietly) => {}
+                Some(Keep::Saying(why)) => plan.kept.push(why),
+                None => {
+                    // A folder holding what is never deleted (hidden or
+                    // system names, a replacement's copy) stays whole.
+                    if let Some(inside) = self.protected_inside(sub.id) {
+                        plan.kept.push(format!(
+                            "{}/: kept, it holds {}; delete it yourself if you're sure",
+                            path, inside
+                        ));
+                        continue;
+                    }
+                    let (files, folders) = count(sub.id, self.children, self.in_folder);
+                    plan.deletions.push(Deletion {
+                        path,
+                        id: sub.id,
+                        is_folder: true,
+                        files,
+                        folders: folders + 1,
+                    });
+                }
             }
         }
         for file in files {
@@ -285,18 +348,36 @@ impl Tree<'_> {
                 continue;
             }
             let path = join(&file.name);
-            if let Some(why) = keep(&file.name, &path) {
-                plan.kept.extend(why);
-            } else {
-                plan.deletions.push(Deletion {
+            match keep(&file.name, &path) {
+                Some(Keep::Quietly) => {}
+                Some(Keep::Saying(why)) => plan.kept.push(why),
+                None => plan.deletions.push(Deletion {
                     path,
                     id: file.id,
                     is_folder: false,
                     files: 1,
                     folders: 0,
-                });
+                }),
             }
         }
+    }
+
+    /// A name in folder `id` or below that is never deleted, if any.
+    fn protected_inside(&self, id: u64) -> Option<String> {
+        for f in self.in_folder.get(&id).into_iter().flatten() {
+            if is_skipped_name(&f.name) || is_aside_copy(&f.name) {
+                return Some(f.name.clone());
+            }
+        }
+        for sub in self.children.get(&id).into_iter().flatten() {
+            if is_skipped_name(&sub.name) {
+                return Some(format!("{}/", sub.name));
+            }
+            if let Some(found) = self.protected_inside(sub.id) {
+                return Some(found);
+            }
+        }
+        None
     }
 }
 
@@ -446,7 +527,7 @@ mod tests {
         let plan = plan(&local, &entries, &[], 10, &folders, &files).unwrap();
         assert!(plan.deletions.is_empty());
         assert!(
-            plan.kept[0].starts_with("2019/: empty locally"),
+            plan.kept[0].starts_with("2019/: no files in it locally"),
             "{:?}",
             plan.kept
         );
@@ -504,5 +585,81 @@ mod tests {
         let plan = plan(&local, &entries, &[], 10, &folders, &[file(1, 10, "a.txt")]).unwrap();
         assert_eq!(paths(&plan), vec![("old", 0, 3)]);
         assert_eq!(plan.items(), 3);
+    }
+
+    #[test]
+    fn test_on_disk_under_an_emoji_directory() {
+        // `viaje😀/enlazada` is on disk but not walked (a symlink, say);
+        // in the cloud it's `viaje/enlazada/`: kept, checked under the
+        // real `viaje😀`.
+        let (local, entries) = local_tree("emojidir", &["viaje😀/a.txt"], &["viaje😀"]);
+        std::fs::create_dir_all(local.join("viaje😀/enlazada")).unwrap();
+        let folders = vec![
+            folder(10, "ALBUM", 1),
+            folder(11, "viaje", 10),
+            folder(12, "enlazada", 11),
+        ];
+        let files = vec![file(1, 11, "a.txt"), file(2, 12, "z.jpg")];
+        let plan = plan(&local, &entries, &[], 10, &folders, &files).unwrap();
+        assert!(plan.deletions.is_empty(), "{:?}", plan.deletions);
+    }
+
+    #[test]
+    fn test_a_skeleton_with_no_files_keeps_the_cloud_one() {
+        // `2019/` holds only an empty `jan/`: no file below it, so the
+        // cloud's `2019` stays whole.
+        let (local, entries) = local_tree("skeleton", &["a.txt"], &["2019", "2019/jan"]);
+        let folders = vec![
+            folder(10, "ALBUM", 1),
+            folder(11, "2019", 10),
+            folder(12, "jan", 11),
+        ];
+        let files = vec![
+            file(1, 10, "a.txt"),
+            file(2, 11, "x.jpg"),
+            file(3, 11, "y.jpg"),
+            file(4, 12, "z.jpg"),
+        ];
+        let plan = plan(&local, &entries, &[], 10, &folders, &files).unwrap();
+        assert!(plan.deletions.is_empty(), "{:?}", plan.deletions);
+        assert!(plan.kept[0].starts_with("2019/"), "{:?}", plan.kept);
+    }
+
+    #[test]
+    fn test_a_folder_holding_protected_names_stays() {
+        // `old/` is gone locally but holds `.git/` and a replacement's
+        // copy: kept whole and said; `older/` goes.
+        let (local, entries) = local_tree("protected", &["a.txt"], &[]);
+        let folders = vec![
+            folder(10, "ALBUM", 1),
+            folder(11, "old", 10),
+            folder(12, ".git", 11),
+            folder(13, "older", 10),
+        ];
+        let files = vec![
+            file(1, 10, "a.txt"),
+            file(2, 12, "config"),
+            file(3, 11, "v.o2-replacing-7.mp4"),
+            file(4, 13, "w.txt"),
+        ];
+        let plan = plan(&local, &entries, &[], 10, &folders, &files).unwrap();
+        assert_eq!(paths(&plan), vec![("older", 1, 1)]);
+        assert!(
+            plan.kept.iter().any(|k| k.starts_with("old/: kept")),
+            "{:?}",
+            plan.kept
+        );
+    }
+
+    #[test]
+    fn test_clashing_folder_names_stop_the_plan() {
+        let (local, entries) = local_tree(
+            "clashdir",
+            &["viaje😀/a.txt", "viaje/b.txt"],
+            &["viaje😀", "viaje"],
+        );
+        let folders = vec![folder(10, "ALBUM", 1), folder(11, "viaje", 10)];
+        let err = plan(&local, &entries, &[], 10, &folders, &[]).unwrap_err();
+        assert!(err.contains("viaje and viaje😀"), "{err}");
     }
 }

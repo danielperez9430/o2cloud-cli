@@ -2,6 +2,30 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.3.1] — 2026-11-27
+
+### Fixed (`upload-dir --update --delete`, from a second independent review)
+- A folder renamed or moved locally to a name or depth beyond O2 Cloud's
+  limits wasn't uploaded, yet its old cloud copy was deleted. Nothing is
+  deleted now if anything was left out for those limits.
+- Inside a local folder named with emoji, the check for something still
+  on the local disk looked at the wrong path; it uses the real one now.
+- A local folder with only empty subfolders had its cloud files deleted;
+  a folder with no file anywhere in it now keeps its cloud contents.
+- A cloud folder to delete holding hidden or system files or a
+  replacement's copy went whole; it is kept now, and said.
+- A file moved or renamed on the web during the run could be deleted
+  on the old plan, or go with a folder it was moved into: what the change
+  log shows changed (besides this run's uploads) isn't deleted, and if
+  anything changed no folder is.
+- Deletions held back (changes meanwhile, limits, failed uploads, local
+  names O2 Cloud stores as one) end the run as partial (exit 6), with the
+  reasons in the summary's `delete_withheld`; they ended with exit 0.
+  Names O2 Cloud stores as one no longer stop the uploads, only the
+  deletions.
+- Deleting in batches reports each batch as it goes, so a failure or an
+  expired session partway no longer reports done deletions as failed.
+
 ## [1.3.0] — 2026-11-26
 
 ### Added
