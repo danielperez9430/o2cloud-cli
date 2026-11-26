@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 
-use super::{format_date, format_date_iso, print_json, resolve_path};
-use crate::api::{Label, MediaItem, O2Client};
+use super::{format_date, format_date_iso, print_json, Tree};
+use crate::api::{Label, MediaDetails, MediaItem, O2Client};
 use crate::config::AuthConfig;
 use crate::error::O2Error;
 use crate::util::format_size;
@@ -55,7 +55,28 @@ fn kind_of(label: &Label) -> &'static str {
     }
 }
 
-fn label_json(label: &Label) -> serde_json::Value {
+/// `{"lat", "lon"}`, or null.
+pub(crate) fn location_json(location: Option<(f64, f64)>) -> serde_json::Value {
+    match location {
+        Some((lat, lon)) => serde_json::json!({ "lat": lat, "lon": lon }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// A photo or video's own fields for `--json`: its kind, where it was
+/// taken and its thumbnails (signed URLs that open without the session,
+/// for a while: a small one for lists, a large one to look at it).
+pub(crate) fn details_json(details: &MediaDetails) -> serde_json::Value {
+    let (thumbnail, preview) = details.thumbnail_and_preview();
+    serde_json::json!({
+        "type": details.mediatype,
+        "location": location_json(details.location()),
+        "thumbnail": thumbnail.map(|t| t.absolute_url()),
+        "preview": preview.map(|t| t.absolute_url()),
+    })
+}
+
+fn label_json(label: &Label, location: Option<(f64, f64)>) -> serde_json::Value {
     serde_json::json!({
         "id": label.id,
         "name": label.name,
@@ -64,8 +85,36 @@ fn label_json(label: &Label) -> serde_json::Value {
         "count": label.items.len(),
         "date": format_date_iso(label.date),
         "cover": label.coverid,
+        "location": location_json(location),
         "items": label.items,
     })
+}
+
+/// Where each place (`geolocalized` label) is: where its cover was taken,
+/// or its first photo if it has no cover. One request for all of them.
+async fn place_locations(
+    client: &O2Client,
+    auth: &AuthConfig,
+    labels: &[Label],
+) -> Result<HashMap<u64, (f64, f64)>, O2Error> {
+    let photo_of: Vec<(u64, u64)> = labels
+        .iter()
+        .filter(|l| l.origin.as_deref() == Some("geolocalized"))
+        .filter_map(|l| Some((l.id, l.coverid.or_else(|| l.items.first().copied())?)))
+        .collect();
+    let mut location_of_photo = HashMap::new();
+    let photos: Vec<u64> = photo_of.iter().map(|(_, photo)| *photo).collect();
+    for chunk in photos.chunks(1000) {
+        for (media, details) in client.get_media_details_by_ids(chunk, auth).await? {
+            if let Some(location) = details.location() {
+                location_of_photo.insert(media.id, location);
+            }
+        }
+    }
+    Ok(photo_of
+        .into_iter()
+        .filter_map(|(label, photo)| Some((label, *location_of_photo.get(&photo)?)))
+        .collect())
 }
 
 /// List the labels of `kind`, newest first.
@@ -78,8 +127,12 @@ pub async fn list_labels(
     let mut labels = client.get_labels(kind.origins(), auth).await?;
     labels.sort_by_key(|l| std::cmp::Reverse(l.date.unwrap_or(0)));
     if json {
+        let locations = place_locations(client, auth, &labels).await?;
         print_json(&serde_json::Value::Array(
-            labels.iter().map(label_json).collect(),
+            labels
+                .iter()
+                .map(|l| label_json(l, locations.get(&l.id).copied()))
+                .collect(),
         ));
         return Ok(());
     }
@@ -173,40 +226,39 @@ pub async fn show_label(
     json: bool,
 ) -> Result<(), O2Error> {
     let label = find_label(client, auth, target).await?;
-    let mut media = label_media(client, auth, &label).await?;
-    media.sort_by_key(|m| m.creationdate.unwrap_or(0));
-    let folders = client.get_all_folders(auth).await?;
-    let folder_name: HashMap<u64, String> =
-        folders.iter().map(|f| (f.id, f.name.clone())).collect();
-    let path_of = |m: &MediaItem| -> Option<String> {
-        let dir = m
-            .folderid
-            .map(|f| resolve_path(f, &folder_name, &folders))?;
-        let name = m.name.as_deref().unwrap_or("?");
-        Some(if dir == "/" {
-            format!("/{}", name)
-        } else {
-            format!("{}/{}", dir, name)
-        })
-    };
+    let mut media = Vec::with_capacity(label.items.len());
+    for chunk in label.items.chunks(1000) {
+        media.extend(client.get_media_details_by_ids(chunk, auth).await?);
+    }
+    media.sort_by_key(|(m, _)| m.creationdate.unwrap_or(0));
+    let paths = Paths::new(client, auth).await?;
     if json {
         let files: Vec<serde_json::Value> = media
             .iter()
-            .map(|m| {
-                serde_json::json!({
+            .map(|(m, details)| {
+                let mut file = serde_json::json!({
                     "id": m.id,
                     "name": m.name,
                     "size": m.size,
                     "date": format_date_iso(m.creationdate),
-                    "path": path_of(m),
-                })
+                    "path": paths.of(m),
+                });
+                merge(&mut file, details_json(details));
+                file
             })
             .collect();
-        let mut out = label_json(&label);
+        // The cover's location, or the first photo's that has one.
+        let location = media
+            .iter()
+            .find(|(m, _)| Some(m.id) == label.coverid)
+            .and_then(|(_, d)| d.location())
+            .or_else(|| media.iter().find_map(|(_, d)| d.location()));
+        let mut out = label_json(&label, location);
         out["files"] = files.into();
         print_json(&out);
         return Ok(());
     }
+    let media: Vec<MediaItem> = media.into_iter().map(|(m, _)| m).collect();
     eprintln!(
         "{} ({}, {})",
         label.name.as_deref().unwrap_or("-"),
@@ -221,7 +273,9 @@ pub async fn show_label(
             m.id,
             m.size.map(format_size).unwrap_or_default(),
             format_date(m.creationdate),
-            path_of(m).unwrap_or_else(|| m.name.clone().unwrap_or_default())
+            paths
+                .of(m)
+                .unwrap_or_else(|| m.name.clone().unwrap_or_default())
         );
     }
     eprintln!(
@@ -230,6 +284,59 @@ pub async fn show_label(
         format_size(total)
     );
     Ok(())
+}
+
+/// `extra`'s fields added to the object `into`.
+pub(crate) fn merge(into: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(into), serde_json::Value::Object(extra)) = (into.as_object_mut(), extra) {
+        into.extend(extra);
+    }
+}
+
+/// Files' paths in O2. Asked for by ID or by kind, O2 leaves out their
+/// folder: it comes from the account's listing (cached between runs).
+pub(crate) struct Paths {
+    /// Each listed file's folder; `None` for the root (O2 sends no folder
+    /// for files there).
+    folder_of: HashMap<u64, Option<u64>>,
+    dirs: HashMap<u64, String>,
+}
+
+impl Paths {
+    pub(crate) async fn new(client: &O2Client, auth: &AuthConfig) -> Result<Self, O2Error> {
+        let folders = client.get_all_folders(auth).await?;
+        let media = client.get_all_media(auth).await?;
+        let folder_name: HashMap<u64, String> =
+            folders.iter().map(|f| (f.id, f.name.clone())).collect();
+        let tree = Tree::new(&folders, &folder_name, &[]);
+        let folder_of: HashMap<u64, Option<u64>> =
+            media.iter().map(|m| (m.id, m.folderid)).collect();
+        let dirs = folder_of
+            .values()
+            .flatten()
+            .map(|f| (*f, tree.path(*f)))
+            .collect();
+        Ok(Paths { folder_of, dirs })
+    }
+
+    /// `m`'s path, if it is in the listing (a file uploaded moments ago
+    /// may not be yet).
+    pub(crate) fn of(&self, m: &MediaItem) -> Option<String> {
+        let folder = match m.folderid {
+            Some(folder) => Some(folder),
+            None => *self.folder_of.get(&m.id)?,
+        };
+        let dir = match folder {
+            Some(folder) => self.dirs.get(&folder).map(String::as_str).unwrap_or("/"),
+            None => "/",
+        };
+        let name = m.name.as_deref().unwrap_or("?");
+        Some(if dir == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", dir, name)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +369,7 @@ mod tests {
                 assert!(LabelKind::All.origins().contains(origin));
             }
         }
-        let json = label_json(&label("flashback"));
+        let json = label_json(&label("flashback"), None);
         assert_eq!(
             (json["kind"].as_str(), json["count"].as_u64()),
             (Some("moment"), Some(2))

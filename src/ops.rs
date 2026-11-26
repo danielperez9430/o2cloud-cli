@@ -10,6 +10,8 @@ mod download_dir;
 pub use download_dir::{download_dir, download_label, DownloadDirOptions};
 mod labels;
 pub use labels::{find_label, label_media, list_labels, show_label, LabelKind};
+mod media;
+pub use media::{list_media_kind, MediaKind};
 
 // ------------------------------------------------------------------
 // List
