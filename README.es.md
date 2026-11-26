@@ -109,6 +109,7 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 📑 `cp <archivo> <carpeta>` | Copia un archivo en el servidor (`--name` para darle otro nombre) |
 | ✏️ `rename <archivo o carpeta> <nombre>` | Renombra un archivo o una carpeta |
 | 🩹 `fix-jpeg <archivo o carpeta>` | Busca los JPEG cuyo perfil de color O2 Cloud no puede leer (`MED-1000`); `--apply` los repara sin tocar la imagen |
+| 🏷️ `labels [etiqueta]` | Lista los momentos, lugares, personas y álbumes en que O2 Cloud agrupa las fotos (`--kind moments\|places\|people\|albums`), o las fotos de uno; `download-dir --label <id o nombre>` las descarga |
 | 📊 `quota` | Muestra el almacenamiento usado, libre y en la papelera |
 
 Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
@@ -158,6 +159,7 @@ $ o2cloud mkdir -p /Copias --json 2>/dev/null
 - `upload-dir`: un array con un objeto por archivo: `local` (su ruta dentro del directorio), `name`, `folderid`, `size`, `skipped`, e `id` (o `parts`), o `error` si ese archivo falló. Un `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacío no se envía, porque O2 Cloud rechaza las imágenes vacías: lleva `"skipped": true, "empty": true` y no tiene `id`. Cada entrada lleva además `ids` (siempre una lista) y `action`: `uploaded`, `skipped`, `empty`, `failed`, `differs` (otro tamaño que en la nube; con `--on-conflict skip` no se toca), `conflict` (otro tamaño, no se sube: mira Archivos que ya están), `updated` (más `replaced`, los IDs de la versión antigua, ahora en la papelera) o, con `--update`, `older`. Una entrada `older` lleva el `id` de la copia de la nube, y una `differs` su `id`, o `parts` si está en partes. Con `--dry-run` las entradas llevan `"dry_run": true`, no llevan `skipped`, y `action` es lo que haría: `upload`, `update` (más `replaces`), `resume`, `unchanged`, `differs`, `conflict`, `older`, `empty`, o `failed` para un archivo que supera los límites de O2 Cloud; `folderid` es `null` para una carpeta que aún no existe.
 - `download`: `id` (o `parts`, para un archivo subido en partes), `ids`, `name`, `path` (dónde se guardó, ruta absoluta), `size` y `"action": "downloaded"`.
 - `download-dir`: un array con un objeto por archivo: `id` (o `parts`), `name`, `cloud` (su ruta en la nube), `local` (su ruta dentro de la carpeta de destino, con `/`), `path` (dónde se guardó), `folderid`, `size`, `action` (`downloaded`, `skipped` o `failed`), `error` si falló, y `renamed: true` si su nombre local es distinto del de la nube. `path` es relativa si `-o` lo era. Con `--dry-run`, las entradas llevan `"dry_run": true` y `action` es lo que haría con lo que hay en disco: `download`, `resume` (una descarga cortada que continuaría), `skipped` (ya está) o `failed` (un archivo local con ese nombre que no sobrescribirá).
+- `labels`: un array de etiquetas: `id`, `name`, `kind` (`moment`, `place`, `person`, `album`), `origin` (el de O2 Cloud: `flashback`, `event`, `geolocalized`, `face`, `omh`, `shared_label`), `count`, `date`, `cover` (el ID de su foto de portada) e `items` (los IDs de sus fotos y vídeos). `labels <etiqueta> --json` es una etiqueta con `files` (`id`, `name`, `size`, `date`, `path`, que es `null` para las fotos de la app del móvil, que no tienen carpeta).
 - `fix-jpeg`: un array con un objeto por JPEG con problemas: `path`, `problem` (`mislabelled` o `damaged`), `chunks`, `fixed`, y `error` si no se pudo reparar.
 - `mkdir`: `id`, `path` y `created` (`false` cuando `-p` la encontró ya creada).
 - `cp`: `id` de la copia, `name`, `folderid`, `path` y `source` (el ID del original); para un archivo en partes, `parts` y `source_parts` en lugar de `id` y `source`.
@@ -229,6 +231,8 @@ o2cloud download /disco.iso                       # une disco.iso.001, .002, …
 o2cloud download-dir /Fotos -o ~/copia            # ~/copia/Fotos con todas sus subcarpetas
 o2cloud download-dir / -o ~/cuenta-o2             # toda la cuenta (p. ej. antes de darte de baja)
 o2cloud download-dir / -o ~/cuenta-o2                   # otra vez: reanuda tras un corte
+o2cloud labels --kind moments                    # los momentos de O2 Cloud («Un día como hoy…»)
+o2cloud download-dir --label 78778466 -o ~/Momentos   # las fotos de un momento, por ID o nombre
 ```
 
 </details>

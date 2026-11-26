@@ -1,0 +1,5 @@
+[trace #1] POST cloud.o2online.es/sapi/media/folder?action=get → 200 in 154 ms
+[trace #2] POST cloud.o2online.es/sapi/label?action=get → 200 in 100 ms
+
+  80 label(s). `o2cloud labels <id or name>` lists one's photos; `o2cloud download-dir --label <id or name> -o <dir>` downloads them.
+[trace] 2 requests
