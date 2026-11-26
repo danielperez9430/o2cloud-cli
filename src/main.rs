@@ -1064,7 +1064,18 @@ async fn main() {
     }
 
     let cli = Cli::parse();
-    log::init(cli.debug);
+    // Commands that only look don't keep a log (unless --debug): they'd
+    // push the logs of transfers out of the last ten.
+    let only_looks = matches!(
+        cli.command,
+        Commands::Ls { .. }
+            | Commands::Find { .. }
+            | Commands::Status { .. }
+            | Commands::Quota { .. }
+            | Commands::Shares { .. }
+            | Commands::DebugReport { .. }
+    );
+    log::init(cli.debug, !only_looks);
     ui::set_level(cli.quiet, cli.verbose);
     if cli.json_lines {
         events::enable();

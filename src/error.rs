@@ -46,7 +46,7 @@ pub enum O2Error {
     /// login ends after a while without use) or was revoked.
     #[error(
         "Session expired: run the command again to log in, or `o2cloud login` \
-         (with `upload-dir --skip-existing` it carries on where it stopped)"
+         (an upload or download carries on where it stopped)"
     )]
     SessionExpired,
 

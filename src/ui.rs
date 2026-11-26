@@ -27,6 +27,18 @@ static LEVEL: AtomicU8 = AtomicU8::new(1);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 /// Whether the bar is on the screen now (so a line must clear it first).
 static DRAWN: AtomicBool = AtomicBool::new(false);
+/// How many characters the bar took when last drawn, to clear it with
+/// spaces: no ANSI codes, which older Windows consoles print as they are.
+static DRAWN_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The bar's widest: one line on an 80-column terminal, so it never wraps
+/// (a wrapped line can't be redrawn in place).
+const BAR_WIDTH: usize = 70;
+
+/// Blank the bar's line and go back to its start.
+fn clear(err: &mut impl Write) {
+    let len = DRAWN_LEN.load(Ordering::Relaxed);
+    let _ = write!(err, "\r{}\r", " ".repeat(len));
+}
 /// Serialises writes to stderr between lines and the bar.
 static OUT: Mutex<()> = Mutex::new(());
 
@@ -67,7 +79,7 @@ pub fn line(text: &str) {
     let _guard = OUT.lock().unwrap_or_else(|e| e.into_inner());
     let mut err = std::io::stderr().lock();
     if DRAWN.swap(false, Ordering::Relaxed) {
-        let _ = write!(err, "\r\x1b[2K");
+        clear(&mut err);
     }
     let _ = writeln!(err, "{}", text);
 }
@@ -123,7 +135,7 @@ impl Drop for Bar {
         *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _guard = OUT.lock().unwrap_or_else(|e| e.into_inner());
         if DRAWN.swap(false, Ordering::Relaxed) {
-            let _ = write!(std::io::stderr(), "\r\x1b[2K");
+            clear(&mut std::io::stderr());
         }
     }
 }
@@ -161,7 +173,12 @@ pub fn start(label: &'static str, files: u64, bytes: u64) -> Bar {
                 if stopped.load(Ordering::Relaxed) {
                     break;
                 }
-                let _ = write!(std::io::stderr(), "\r\x1b[2K{}", text);
+                // Over the last one, padded with spaces where it was longer.
+                let len = text.chars().count();
+                let pad = DRAWN_LEN.load(Ordering::Relaxed).saturating_sub(len);
+                let _ = write!(std::io::stderr(), "\r{}{}", text, " ".repeat(pad));
+                let _ = std::io::stderr().flush();
+                DRAWN_LEN.store(len.max(len + pad), Ordering::Relaxed);
                 DRAWN.store(true, Ordering::Relaxed);
             } else if last_plain.elapsed() >= PLAIN_EVERY {
                 last_plain = Instant::now();
@@ -191,6 +208,8 @@ fn render(t: &Totals, short: bool) -> String {
     let skipped = t.bytes_skipped.load(Ordering::Relaxed);
     let secs = t.start.elapsed().as_secs_f64().max(0.001);
     let speed = moved as f64 / secs;
+    // A piece sent again counts twice; never past the total.
+    let moved = moved.min(t.bytes.saturating_sub(skipped));
     let left = t.bytes.saturating_sub(moved + skipped);
     let eta = if speed > 1.0 && moved > 0 {
         format!(" · {} left", duration((left as f64 / speed) as u64))
@@ -210,7 +229,7 @@ fn render(t: &Totals, short: bool) -> String {
     if short {
         // One line on any terminal: no wrapping, which would break the
         // redraw.
-        text.chars().take(78).collect()
+        text.chars().take(BAR_WIDTH).collect()
     } else {
         format!("  … {}", text)
     }
@@ -252,6 +271,7 @@ mod tests {
             r.starts_with("  … Uploading 3/10 files · 200 B of 1000 B"),
             "{r}"
         );
-        assert!(render(&t, true).chars().count() <= 78);
+        assert!(render(&t, true).chars().count() <= BAR_WIDTH);
+        assert!(!render(&t, true).contains('\x1b'));
     }
 }

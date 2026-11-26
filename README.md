@@ -115,7 +115,7 @@ Run `o2cloud <command> --help` for all the options.
 `ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `fix-jpeg`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr. An error is `Error: …` on stderr and, with `--json`, also a JSON value on stdout in place of the result (unless the result was already printed, as `upload-dir` and `download-dir` do before saying some files failed):
 
 ```json
-{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
+{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4, "run": "3fa9c1d2" } }
 ```
 
 **For apps: `--json-lines`.** `upload`, `upload-dir`, `upload-zip`, `download` and `download-dir` can print events as they happen instead, one JSON object per line on stdout:
@@ -130,7 +130,7 @@ Run `o2cloud <command> --help` for all the options.
 - `start` opens the run, with `files`, `bytes` and the format's version, `schema`.
 - `progress` comes at most four times a second per file, with the bytes moved so far.
 - `file` is the same entry `--json` gives. It has `ids` (always a list) and, for a file uploaded whole in this run, its `sha256`, computed while it's read to be sent.
-- `retry` says the server was busy or failing and the request goes again.
+- `retry` says the server was busy, failing or still processing a file, and the request (or an upload) goes again.
 - `summary` gives the counts.
 - `error` closes a run that failed, as in `--json`.
 
@@ -290,7 +290,7 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
   - `overwrite`: uploads the new version, and once that worked moves the old one to the trash and gives the new one its name (`"action": "updated"`, with `replaced`).
   - `duplicate`: uploads everything anyway, as before 1.0: O2 Cloud keeps both, naming the new one `name (1)`, and files already there are uploaded again.
 
-  `upload-dir --update` also replaces files of the same size that are newer locally, and never puts an older version over a newer one. A `name.001` that is itself a local file next to `name` is never taken for a part of it. New uploads take up to a minute to show up in listings; `upload-dir` remembers what this computer uploaded and waits (up to 2 minutes) for it to be listed before deciding, so running it again right away, for example after the session expired, doesn't upload those files twice. Files uploaded from elsewhere moments ago may still not be seen.
+  `overwrite` and `upload-dir --update` also replace a file of the same size that is newer locally (a container or database that changed in place); with `--update` the other policies don't apply, and an older version is never put over a newer one. A `name.001` that is itself a local file next to `name` is never taken for a part of it. New uploads take up to a minute to show up in listings; `upload-dir` remembers what this computer uploaded and waits (up to 2 minutes) for it to be listed before deciding, so running it again right away, for example after the session expired, doesn't upload those files twice. Files uploaded from elsewhere moments ago may still not be seen.
 - **O2 Cloud checks what it stores:** files that are empty or damaged, or whose content doesn't match their extension (a HEIC photo named `.jpg`), are rejected with `MED-1050` or `MED-1000`, every time, so retrying won't help. `upload-dir` doesn't send empty `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` or `.heic` files at all (it lists them as skipped); other empty files are uploaded.
 - **JPEGs rejected with `MED-1000`:** some software splits a large colour profile into chunks all labelled "1 of 1"; viewers cope, O2 Cloud doesn't. `o2cloud fix-jpeg ./photos` lists them and `--apply` relabels the chunks in place (about 12 bytes; the image and the file's date are kept). When an upload fails this way, the error says so.
 - **O2 Cloud's limits:** a file name can be up to 255 bytes in UTF-8 (255 plain letters, but only 129 `ñ` or 87 `日`), a folder name up to 255 characters, and folders can go 20 levels below the root. There is no limit on the whole path, since O2 Cloud stores names, not paths. `upload-dir` leaves out (and reports) what doesn't fit instead of stopping halfway, and `mkdir`, `rename` and `upload` say which limit was hit.
@@ -309,9 +309,9 @@ o2cloud debug-report
 
 and attach the `o2cloud-report-….zip` it writes to an [issue](https://github.com/danielperez9430/o2cloud-cli/issues). It has the version, your system, your settings (never the session keys) and the logs of the last 3 runs, with every file and folder name replaced by a stand-in that keeps what name bugs need (extension, length, accents, trailing dots). Nothing is sent anywhere; look it over before attaching it. `--stdout` prints it instead, and `--include-names` keeps the names.
 
-Every error ends with the run's ID (`… [run 3fa9c1d2]`), which finds its log. Each run keeps a small log in the cache folder (`~/Library/Caches/o2cli/logs` on macOS, `~/.cache/o2cli/logs` on Linux, `%LOCALAPPDATA%\o2cli\logs` on Windows): the last 10 runs, at most 5 MB each, removed by `o2cloud logout`. `O2CLOUD_LOG_FILE=0` turns it off.
+Every error ends with the run's ID (`… [run 3fa9c1d2]`), which finds its log. Each run keeps a small log in the cache folder (`~/Library/Caches/o2cli/logs` on macOS, `~/.cache/o2cli/logs` on Linux, `%LOCALAPPDATA%\o2cli\logs` on Windows): the last 10 runs of commands that change or transfer something (`ls`, `find`, `status` and the like keep none), at most 5 MB each (50 MB with `--debug`; past that, only warnings and errors), removed by `o2cloud logout`. `O2CLOUD_LOG_FILE=0` turns it off.
 
-Long transfers show a progress bar (files, bytes, speed, time left); `-v` shows a line for each file instead, and `-q` only warnings and errors. To see what a command does step by step (each request, retries, and why each file is uploaded, skipped or left alone), add `--debug`: it shows it on stderr and keeps it in the run log in full. `O2CLOUD_LOG=debug` does the same for apps and scripts, and `O2CLOUD_TRACE=1` shows only the requests. Session keys, tokens, your phone number and signed download links never appear, on screen or in the logs.
+Long transfers show a progress bar (files, bytes, speed, time left); `-v` adds a line for each file, and `-q` shows only warnings and errors. To see what a command does step by step (each request, retries, and why each file is uploaded, skipped or left alone), add `--debug`: it shows it on stderr and keeps it in the run log in full. `O2CLOUD_LOG=debug` does the same for apps and scripts, and `O2CLOUD_TRACE=1` shows only the requests. Session keys, tokens and signed download links never appear, on screen or in the logs; nor does your phone number in logs, reports or error messages (`status` and `login` show it, as they're meant to).
 
 ## 🖥️ Logging in without a login window
 

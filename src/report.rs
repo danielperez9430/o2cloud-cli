@@ -21,12 +21,15 @@ pub fn debug_report(
     to_stdout: bool,
     include_names: bool,
 ) -> Result<(), O2Error> {
-    let salt = format!(
-        "{:x}",
-        std::process::id() as u64 ^ crate::config::now_unix()
-    );
+    // Random, so a report's stand-ins can't be worked back from its date.
+    let salt = {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(crate::config::now_unix());
+        format!("{:016x}", h.finish())
+    };
     let summary = summary();
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut raw: Vec<(String, String)> = Vec::new();
     if let Some(dir) = crate::log::dir() {
         for path in newest(&dir, "run-", RUNS + 1)
             .into_iter()
@@ -34,19 +37,36 @@ pub fn debug_report(
             .filter(|p| Some(p) != crate::log::path())
             .take(RUNS)
         {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let text = if include_names {
-                home_to_tilde(&text)
-            } else {
-                pseudonymise_log(&text, &salt)
-            };
-            files.push((name_of(&path), text));
+            raw.push((
+                name_of(&path),
+                std::fs::read_to_string(&path).unwrap_or_default(),
+            ));
         }
         for path in newest(&dir, "crash-", 2) {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            files.push((name_of(&path), home_to_tilde(&text)));
+            raw.push((
+                name_of(&path),
+                std::fs::read_to_string(&path).unwrap_or_default(),
+            ));
         }
     }
+    let files: Vec<(String, String)> = if include_names {
+        raw.into_iter()
+            .map(|(name, text)| (name, home_to_tilde(&text)))
+            .collect()
+    } else {
+        // Every name seen anywhere, replaced everywhere.
+        let names = Names::collect(raw.iter().map(|(_, t)| t.as_str()), &salt);
+        raw.into_iter()
+            .map(|(name, text)| {
+                let text = if name.starts_with("run-") {
+                    names.log(&text)
+                } else {
+                    names.text(&text)
+                };
+                (name, text)
+            })
+            .collect()
+    };
 
     if to_stdout {
         println!("{}", summary);
@@ -223,75 +243,132 @@ fn name_of(path: &Path) -> String {
 /// The home folder as `~`, so the user's account name doesn't show.
 fn home_to_tilde(text: &str) -> String {
     match dirs::home_dir().map(|h| h.display().to_string()) {
-        Some(home) if home.len() > 1 => text.replace(&home, "~"),
+        // Also as JSON writes it, with `\` doubled (Windows paths).
+        Some(home) if home.len() > 1 => text
+            .replace(&home, "~")
+            .replace(&home.replace('\\', "\\\\"), "~"),
         _ => text.to_string(),
     }
 }
 
-/// A run log (JSON lines) with every name replaced: the values of
-/// `NAME_FIELDS`, the command's arguments, and wherever those values
-/// appear in the messages.
-fn pseudonymise_log(text: &str, salt: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let mut names: Vec<(String, String)> = Vec::new();
-        if let Some(fields) = record.get_mut("fields") {
-            pseudonymise_fields(fields, salt, &mut names);
-        }
-        if let Some(serde_json::Value::String(msg)) = record.get_mut("msg") {
-            names.sort_by_key(|(original, _)| std::cmp::Reverse(original.len()));
-            for (original, stand_in) in &names {
-                if original.len() > 2 {
-                    *msg = msg.replace(original.as_str(), stand_in);
-                }
-            }
-            *msg = home_to_tilde(msg);
-        }
-        out.push_str(&record.to_string());
-        out.push('\n');
-    }
-    out
+/// The names of files and folders in a set of logs, each with its
+/// stand-in: the values of `NAME_FIELDS`, the command's arguments (and
+/// `--option=value` values), and each part of those paths. They're
+/// replaced longest first in every string of every record (messages and
+/// errors too), and in crash reports.
+struct Names {
+    pairs: Vec<(String, String)>,
 }
 
-fn pseudonymise_fields(
-    value: &mut serde_json::Value,
-    salt: &str,
-    names: &mut Vec<(String, String)>,
-) {
-    let serde_json::Value::Object(map) = value else {
-        return;
-    };
-    for (key, v) in map.iter_mut() {
-        match v {
-            serde_json::Value::String(s) if NAME_FIELDS.contains(&key.as_str()) => {
-                let stand_in = crate::redact::pseudonym(&home_to_tilde(s), salt);
-                names.push((s.clone(), stand_in.clone()));
-                *s = stand_in;
-            }
-            // The arguments: the command and options stay, the rest
-            // (paths, names) don't.
-            serde_json::Value::Array(args) if key == "args" => {
-                let mut first = true;
-                for arg in args.iter_mut() {
-                    if let serde_json::Value::String(a) = arg {
-                        let keep = a.starts_with('-')
-                            || a.parse::<f64>().is_ok()
-                            || a.starts_with('<')
-                            || std::mem::take(&mut first);
-                        if !keep {
-                            let stand_in = crate::redact::pseudonym(&home_to_tilde(a), salt);
-                            names.push((a.clone(), stand_in.clone()));
-                            *a = stand_in;
-                        }
+impl Names {
+    fn collect<'a>(texts: impl Iterator<Item = &'a str>, salt: &str) -> Names {
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        for text in texts {
+            for line in text.lines() {
+                if let Ok(record) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(fields) = record.get("fields") {
+                        names_in(fields, &mut found);
+                    }
+                } else if let Some(args) = line.strip_prefix("args: ") {
+                    // A crash report's command line.
+                    for arg in args.split_whitespace().skip(1) {
+                        add_arg(arg, &mut found);
                     }
                 }
             }
-            serde_json::Value::Object(_) => pseudonymise_fields(v, salt, names),
+        }
+        // Each part of a path, so a message naming only that part is
+        // caught too.
+        let parts: Vec<String> = found
+            .iter()
+            .flat_map(|p| p.split(['/', '\\']).map(str::to_string).collect::<Vec<_>>())
+            .collect();
+        found.extend(parts);
+        let mut pairs: Vec<(String, String)> = found
+            .into_iter()
+            .filter(|n| n.chars().count() > 2 && n != ".." && n.parse::<f64>().is_err())
+            .map(|n| {
+                let stand_in = crate::redact::pseudonym(&home_to_tilde(&n), salt);
+                (n, stand_in)
+            })
+            .collect();
+        pairs.sort_by_key(|(original, _)| std::cmp::Reverse(original.len()));
+        Names { pairs }
+    }
+
+    /// `text` with every name replaced (and the home folder as `~`).
+    fn text(&self, text: &str) -> String {
+        let mut out = home_to_tilde(text);
+        for (original, stand_in) in &self.pairs {
+            if out.contains(original.as_str()) {
+                out = out.replace(original.as_str(), stand_in);
+            }
+            // As JSON writes it (`\\` for `\`).
+            let escaped = original.replace('\\', "\\\\");
+            if escaped != *original && out.contains(&escaped) {
+                out = out.replace(&escaped, stand_in);
+            }
+        }
+        out
+    }
+
+    /// A run log (JSON lines) with every name replaced in every string.
+    fn log(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            self.value(&mut record);
+            out.push_str(&record.to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    fn value(&self, v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => *s = self.text(s),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|v| self.value(v)),
+            serde_json::Value::Object(m) => m.values_mut().for_each(|v| self.value(v)),
             _ => {}
         }
+    }
+}
+
+/// The names in a record's `fields`.
+fn names_in(value: &serde_json::Value, found: &mut std::collections::BTreeSet<String>) {
+    let serde_json::Value::Object(map) = value else {
+        return;
+    };
+    for (key, v) in map {
+        match v {
+            serde_json::Value::String(s) if NAME_FIELDS.contains(&key.as_str()) => {
+                found.insert(s.clone());
+            }
+            serde_json::Value::Array(args) if key == "args" => {
+                // The first is the command; the rest that aren't options
+                // or numbers are paths and names.
+                for arg in args.iter().skip(1).filter_map(|a| a.as_str()) {
+                    add_arg(arg, found);
+                }
+            }
+            serde_json::Value::Object(_) => names_in(v, found),
+            _ => {}
+        }
+    }
+}
+
+/// A command-line argument's name, if it holds one: a value, or the value
+/// of `--option=value`; not options, numbers or redacted secrets.
+fn add_arg(arg: &str, found: &mut std::collections::BTreeSet<String>) {
+    let value = match arg.split_once('=') {
+        Some((flag, value)) if flag.starts_with('-') => value,
+        _ if arg.starts_with('-') => return,
+        _ => arg,
+    };
+    if !value.is_empty() && !value.starts_with('<') && value.parse::<f64>().is_err() {
+        found.insert(value.to_string());
     }
 }
 
@@ -300,23 +377,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pseudonymise_log() {
+    fn test_names_replaced_everywhere() {
         let log = concat!(
-            r#"{"lvl":"info","target":"run","msg":"start","fields":{"args":["upload-dir","./Fotos Ana","-j","4"]}}"#,
+            r#"{"lvl":"info","target":"run","msg":"start","fields":{"args":["upload-dir","./Fotos Ana","-j","4","--output=/x/Nóminas Ana"]}}"#,
             "\n",
-            r#"{"lvl":"debug","target":"decide","msg":"Ana.jpg: differs","fields":{"name":"Ana.jpg","size":10}}"#,
+            r#"{"lvl":"debug","target":"decide","msg":"Boda.jpg: differs","fields":{"local":"2019.Boda Luis/Boda.jpg","size":10}}"#,
             "\n",
-            r#"{"lvl":"error","target":"run","msg":"Not found: x","fields":{"code":"not_found"}}"#,
+            r#"{"lvl":"error","target":"run","msg":"Not found: /Fotos Ana/2019.Boda Luis","fields":{"code":"not_found"}}"#,
             "\n",
         );
-        let out = pseudonymise_log(log, "salt");
-        assert!(!out.contains("Ana"), "{out}");
+        let crash =
+            "o2cloud 1.0.0\nargs: upload-dir ./Fotos Ana --phone <redacted>\n\npanicked at x";
+        let names = Names::collect([log, crash].into_iter(), "salt");
+        let out = names.log(log) + &names.text(crash);
+        for name in ["Ana", "Boda", "Luis", "Nóminas"] {
+            assert!(!out.contains(name), "{name} in {out}");
+        }
         assert!(
             out.contains("upload-dir") && out.contains("\"-j\",\"4\""),
             "{out}"
         );
-        assert!(out.contains(".jpg[7b]"), "{out}");
-        assert!(out.contains("not_found"), "{out}");
-        assert_eq!(out.lines().count(), 3);
+        assert!(
+            out.contains("not_found") && out.contains("Not found:"),
+            "{out}"
+        );
+        assert_eq!(names.log(log).lines().count(), 3);
     }
 }

@@ -47,7 +47,7 @@ En la 0.x todo error salía con `1`. En la 1.0 el código dice qué falló:
 La línea `Error: …` en stderr es la misma que en la 0.x. Con `--json`, la 1.0 además escribe el error en stdout como un único valor JSON, en lugar del resultado:
 
 ```json
-{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
+{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4, "run": "3fa9c1d2" } }
 ```
 
 `upload-dir` y `download-dir` escriben su resultado (una entrada por archivo) antes de decir que fallaron algunos archivos. En ese caso el error ya no se escribe también en stdout, así que stdout siempre tiene un solo valor JSON.

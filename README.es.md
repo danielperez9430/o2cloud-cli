@@ -120,7 +120,7 @@ Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 `ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `fix-jpeg`, `mkdir`, `cp`, `share`, `shares`, `status` y `quota` aceptan `--json` e imprimen un único valor JSON en stdout, para scripts y otras apps. Los mensajes de progreso siguen saliendo por stderr. Un error es `Error: …` en stderr y, con `--json`, también un valor JSON en stdout en lugar del resultado (salvo que el resultado ya se hubiera impreso, como hacen `upload-dir` y `download-dir` antes de decir que algunos archivos fallaron):
 
 ```json
-{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
+{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4, "run": "3fa9c1d2" } }
 ```
 
 **Para apps: `--json-lines`.** `upload`, `upload-dir`, `upload-zip`, `download` y `download-dir` pueden escribir eventos según ocurren, un objeto JSON por línea en stdout:
@@ -135,7 +135,7 @@ Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 - `start` abre la ejecución, con `files`, `bytes` y la versión del formato, `schema`.
 - `progress` sale como mucho cuatro veces por segundo por archivo, con los bytes movidos hasta ese momento.
 - `file` es la misma entrada que da `--json`. Lleva `ids` (siempre una lista) y, si el archivo se subió entero en esta ejecución, su `sha256`, calculado mientras se lee para enviarlo.
-- `retry` avisa de que el servidor estaba ocupado o fallando y la petición se repite.
+- `retry` avisa de que el servidor estaba ocupado, fallando o aún procesando un archivo, y la petición (o una subida) se repite.
 - `summary` da los totales.
 - `error` cierra una ejecución que falló, igual que con `--json`.
 
@@ -295,7 +295,7 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
   - `overwrite`: sube la versión nueva y, solo si ha ido bien, manda la antigua a la papelera y le da a la nueva su nombre (`"action": "updated"`, con `replaced`).
   - `duplicate`: lo sube todo igualmente, como antes de la 1.0: O2 Cloud guarda las dos, la nueva como `nombre (1)`, y vuelve a subir los que ya estaban.
 
-  `upload-dir --update` además reemplaza los archivos del mismo tamaño que son más nuevos en local, y nunca pone una versión más antigua encima de una más nueva. Un `nombre.001` que es un archivo local junto a `nombre` nunca se toma por una parte suya. Las subidas nuevas tardan hasta un minuto en aparecer en los listados; `upload-dir` recuerda lo que se subió desde este ordenador y espera (hasta 2 minutos) a que aparezca antes de decidir, así que relanzarlo enseguida, por ejemplo tras caducar la sesión, no vuelve a subir esos archivos. Lo subido desde otro sitio hace unos instantes puede no verlo todavía.
+  `overwrite` y `upload-dir --update` también reemplazan un archivo del mismo tamaño que es más nuevo en local (un contenedor o una base de datos que cambió por dentro); con `--update` las demás opciones no se aplican, y nunca se pone una versión más antigua encima de una más nueva. Un `nombre.001` que es un archivo local junto a `nombre` nunca se toma por una parte suya. Las subidas nuevas tardan hasta un minuto en aparecer en los listados; `upload-dir` recuerda lo que se subió desde este ordenador y espera (hasta 2 minutos) a que aparezca antes de decidir, así que relanzarlo enseguida, por ejemplo tras caducar la sesión, no vuelve a subir esos archivos. Lo subido desde otro sitio hace unos instantes puede no verlo todavía.
 - **O2 Cloud revisa lo que guarda:** los archivos vacíos o dañados, o cuyo contenido no coincide con la extensión (una foto HEIC llamada `.jpg`), se rechazan con `MED-1050` o `MED-1000`, siempre, así que reintentar no sirve. `upload-dir` ni siquiera envía los `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp` o `.heic` vacíos (los muestra como omitidos); el resto de archivos vacíos sí se suben.
 - **JPEG rechazados con `MED-1000`:** algunos programas parten un perfil de color grande en trozos numerados todos como "1 de 1"; los visores lo toleran, O2 Cloud no. `o2cloud fix-jpeg ./fotos` los lista y `--apply` renumera los trozos en el sitio (unos 12 bytes; se conservan la imagen y la fecha del archivo). Cuando una subida falla por esto, el error lo dice.
 - **Límites de O2 Cloud:** un nombre de archivo puede tener hasta 255 bytes en UTF-8 (255 letras sin acentos, pero solo 129 `ñ` o 87 `日`), un nombre de carpeta hasta 255 caracteres, y las carpetas pueden anidarse hasta 20 niveles por debajo de la raíz. No hay límite para la ruta completa, porque O2 Cloud guarda nombres, no rutas. `upload-dir` deja fuera (y avisa de) lo que no cabe en vez de pararse a medias, y `mkdir`, `rename` y `upload` dicen qué límite se ha superado.
@@ -314,9 +314,9 @@ o2cloud debug-report
 
 y adjunta el `o2cloud-report-….zip` que genera a un [issue](https://github.com/danielperez9430/o2cloud-cli/issues). Lleva la versión, tu sistema, tu configuración (nunca las claves de sesión) y los logs de las 3 últimas ejecuciones, con cada nombre de archivo y carpeta sustituido por uno que conserva lo que hace falta para depurar nombres (extensión, longitud, acentos, puntos finales). No se envía nada; revísalo antes de adjuntarlo. `--stdout` lo muestra en pantalla, y `--include-names` mantiene los nombres.
 
-Cada error termina con el ID de la ejecución (`… [run 3fa9c1d2]`), que identifica su log. Cada ejecución guarda un log pequeño en la carpeta de caché (`~/Library/Caches/o2cli/logs` en macOS, `~/.cache/o2cli/logs` en Linux, `%LOCALAPPDATA%\o2cli\logs` en Windows): las 10 últimas, de 5 MB como mucho cada una, y `o2cloud logout` las borra. `O2CLOUD_LOG_FILE=0` lo desactiva.
+Cada error termina con el ID de la ejecución (`… [run 3fa9c1d2]`), que identifica su log. Cada ejecución guarda un log pequeño en la carpeta de caché (`~/Library/Caches/o2cli/logs` en macOS, `~/.cache/o2cli/logs` en Linux, `%LOCALAPPDATA%\o2cli\logs` en Windows): las 10 últimas de los comandos que cambian o transfieren algo (`ls`, `find`, `status` y similares no guardan), de 5 MB como mucho cada una (50 MB con `--debug`; a partir de ahí, solo avisos y errores), y `o2cloud logout` las borra. `O2CLOUD_LOG_FILE=0` lo desactiva.
 
-Las transferencias largas muestran una barra de progreso (archivos, bytes, velocidad, tiempo restante); `-v` muestra una línea por archivo, y `-q` solo avisos y errores. Para ver qué hace un comando paso a paso (cada petición, los reintentos y por qué cada archivo se sube, se salta o se deja), añade `--debug`: lo muestra en stderr y lo guarda entero en el log de la ejecución. `O2CLOUD_LOG=debug` hace lo mismo para apps y scripts, y `O2CLOUD_TRACE=1` muestra solo las peticiones. Las claves de sesión, los tokens, tu teléfono y los enlaces de descarga firmados nunca aparecen, ni en pantalla ni en los logs.
+Las transferencias largas muestran una barra de progreso (archivos, bytes, velocidad, tiempo restante); `-v` añade una línea por archivo, y `-q` muestra solo avisos y errores. Para ver qué hace un comando paso a paso (cada petición, los reintentos y por qué cada archivo se sube, se salta o se deja), añade `--debug`: lo muestra en stderr y lo guarda entero en el log de la ejecución. `O2CLOUD_LOG=debug` hace lo mismo para apps y scripts, y `O2CLOUD_TRACE=1` muestra solo las peticiones. Las claves de sesión, los tokens y los enlaces de descarga firmados nunca aparecen, ni en pantalla ni en los logs; tu teléfono tampoco en logs, informes ni mensajes de error (`status` y `login` sí lo muestran, es su función).
 
 ## 🖥️ Login sin ventana de acceso
 

@@ -200,10 +200,12 @@ where
         match call().await {
             Err(e) if is_validating(&e) && attempt < VALIDATION_RETRIES => {
                 attempt += 1;
+                let fields = serde_json::json!({ "code": "MED-1017", "attempt": attempt });
+                crate::events::emit("retry", fields.clone());
                 crate::log::debug(
                     "retry",
                     "file still being validated (MED-1017); trying again",
-                    serde_json::json!({ "attempt": attempt }),
+                    fields,
                 );
                 tokio::time::sleep(VALIDATION_RETRY_DELAY).await;
             }
@@ -1228,10 +1230,12 @@ impl O2Client {
             if !outage || retry >= READ_RETRIES {
                 return Ok((status, raw));
             }
+            let fields = serde_json::json!({ "code": "FOL-1000", "attempt": retry + 1 });
+            crate::events::emit("retry", fields.clone());
             crate::log::info(
                 "retry",
                 "folder list: FOL-1000 (outage); trying again",
-                serde_json::json!({ "attempt": retry + 1 }),
+                fields,
             );
             tokio::time::sleep(Duration::from_secs(1 << retry)).await;
             retry += 1;
@@ -1928,6 +1932,16 @@ impl O2Client {
             }
             let wait = busy_wait(&resp, retry);
             retry += 1;
+            let fields = serde_json::json!({
+                "status": resp.status().as_u16(), "attempt": retry,
+                "wait_ms": wait.as_millis() as u64, "name": meta.name,
+            });
+            crate::events::emit("retry", fields.clone());
+            crate::log::info(
+                "retry",
+                "upload turned away (busy); sending it again",
+                fields,
+            );
             tokio::time::sleep(wait).await;
         };
 
