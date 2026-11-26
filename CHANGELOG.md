@@ -10,12 +10,22 @@ All notable changes to o2cloud-cli will be documented in this file.
   (files and whole folders: copies named `name (1)`, folders moved or
   deleted locally, files uploaded from the web) goes to O2 Cloud's trash.
   Only inside the uploaded folder. Never deleted: hidden and system
-  names, the parts of a file uploaded in parts, anything whose local path
-  still exists, and uploads not listed yet. Safeguards: worked out before
-  anything is uploaded; over 1,000 files stops the run with nothing
-  changed unless `--delete-max <n>`; a directory with no files is
-  refused; not with `--ext`. `--dry-run -v` lists what it would delete;
-  `--json` / `--json-lines` have `deleted` entries and counts.
+  names, the parts of a file uploaded in parts, a replacement's temporary
+  copy, anything whose local path still exists, names that only differ
+  from a local one in case, spaces or emoji, and what an empty local
+  folder holds. Safeguards: planned on the server's own listing before
+  anything is uploaded and again just before deleting (only what both
+  agree on goes); nothing deleted if an upload failed or was a conflict;
+  folders deleted like `rm -r` and only if the change log shows nothing
+  unlisted added moments ago; over 1,000 files and folders, or without
+  `--delete-max` over half the folder's files, stops the run with nothing
+  changed; local names O2 Cloud would store as one, an empty directory or
+  one named with emoji are refused; not with `--ext`. `--dry-run -v` lists
+  what it would delete; `--json` / `--json-lines` have `deleted` entries
+  and counts. Reviewed by an independent pass and tested live (23 checks:
+  nested folders, emoji and NFD names, parts, same-run changes, failed
+  uploads, empty folders, `--folder`, limits, dry run against real run, a
+  file uploaded elsewhere during the run).
 
 ## [1.2.2] — 2026-11-26
 

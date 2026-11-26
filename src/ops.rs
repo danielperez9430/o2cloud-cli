@@ -2299,8 +2299,8 @@ fn output_entry(entries: &mut Vec<serde_json::Value>, entry: serde_json::Value) 
 /// with matching subfolders, then all files are uploaded, `opts.jobs` at
 /// a time. With `extensions` (see `normalize_extensions`), only files
 /// with one of them, and only the subfolders that hold some.
-/// `mirror`: with `--delete`, the most files it may move to the trash
-/// (see `mirror`).
+/// `mirror`: with `--delete`, the most files and folders it may move to
+/// the trash, and whether `--delete-max` said so (see `mirror`).
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_dir(
     client: &O2Client,
@@ -2310,7 +2310,7 @@ pub async fn upload_dir(
     opts: &UploadOptions,
     extensions: &[String],
     json: bool,
-    mirror: Option<usize>,
+    mirror: Option<(usize, bool)>,
 ) -> Result<(), O2Error> {
     use futures_util::StreamExt;
 
@@ -2359,21 +2359,10 @@ pub async fn upload_dir(
         // them rather than upload them again as `name (1)`.
         let (media, unsettled) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
         if mirror.is_some() {
-            // Files with no folder are in the root.
-            let root = existing_folders
-                .iter()
-                .find(|f| f.name == "/")
-                .map(|f| f.id);
-            cloud_files = media
-                .iter()
-                .filter_map(|m| {
-                    Some(mirror::CloudFile {
-                        id: m.id,
-                        folder: m.folderid.or(root)?,
-                        name: m.name.clone()?,
-                    })
-                })
-                .collect();
+            // What is deleted is decided on the server's own listing, not
+            // the local cache.
+            let fresh = client.get_all_media_uncached(auth).await?;
+            cloud_files = cloud_files_of(&fresh, &existing_folders);
         }
         if unsettled > 0 {
             crate::warn!(
@@ -2451,12 +2440,20 @@ pub async fn upload_dir(
     // --delete: what the cloud folder has that the directory doesn't,
     // worked out before anything is uploaded, so a plan beyond the limit
     // stops the run with nothing changed.
-    let deletions: Vec<mirror::Deletion> = match (mirror, &top_name) {
-        (None, _) => Vec::new(),
+    let mut mirror_top: Option<u64> = None;
+    let plan: mirror::Plan = match (mirror, &top_name) {
+        (None, _) => mirror::Plan::default(),
         (Some(_), None) => {
             return Err(O2Error::Invalid(
                 "--delete needs a named directory to mirror (not /)".into(),
             ))
+        }
+        (Some(_), Some(name)) if crate::util::o2_name(name) != name.as_str() => {
+            return Err(O2Error::Invalid(format!(
+                "--delete: O2 Cloud would store {} without its emoji, so it could match \
+                 another folder; rename it first",
+                name
+            )))
         }
         (Some(_), Some(_)) if file_count == 0 => {
             return Err(O2Error::Invalid(format!(
@@ -2467,9 +2464,11 @@ pub async fn upload_dir(
         }
         (Some(_), Some(name)) => match find_folder(&existing_folders, name, root_parent) {
             // Not in the cloud yet: nothing there to delete.
-            None => Vec::new(),
+            None => mirror::Plan::default(),
             Some(top) => {
-                let left_out: Vec<PathBuf> = rejected.iter().map(|(p, _, _)| p.clone()).collect();
+                mirror_top = Some(top);
+                let left_out: Vec<(PathBuf, bool)> =
+                    rejected.iter().map(|(p, d, _)| (p.clone(), *d)).collect();
                 mirror::plan(
                     local_dir,
                     &entries,
@@ -2478,20 +2477,24 @@ pub async fn upload_dir(
                     &existing_folders,
                     &cloud_files,
                 )
+                .map_err(O2Error::Invalid)?
             }
         },
     };
+    for note in &plan.kept {
+        crate::warn!("  ⚠ --delete: {}", note);
+    }
+    // Where the change log stands now: before deleting, what was added
+    // since (from the web, another device) and isn't listed yet is known.
+    let change_cursor = match (mirror_top, opts.dry_run) {
+        (Some(_), false) if !plan.deletions.is_empty() => Some(client.change_cursor(auth).await?),
+        _ => None,
+    };
     // Files, counting those inside folders; and folders.
-    let to_delete: usize = deletions.iter().map(|d| d.files).sum();
-    let folders_to_delete = deletions.iter().filter(|d| d.is_folder).count();
-    if let Some(max) = mirror {
-        if to_delete > max {
-            let message = format!(
-                "--delete would move {} file(s) to the trash, more than {} (--delete-max): \
-                 check the list with --dry-run -v, and if it is right run again with \
-                 --delete-max {}",
-                to_delete, max, to_delete
-            );
+    let to_delete: usize = plan.deletions.iter().map(|d| d.files).sum();
+    let folders_to_delete: usize = plan.deletions.iter().map(|d| d.folders).sum();
+    if let Some((max, explicit)) = mirror {
+        if let Some(message) = mirror_limit(&plan, max, explicit) {
             if !opts.dry_run {
                 return Err(O2Error::Invalid(message));
             }
@@ -2963,7 +2966,7 @@ pub async fn upload_dir(
     }
     let mut results = results;
     if opts.dry_run {
-        for d in &deletions {
+        for d in &plan.deletions {
             crate::detail!("  − {}{}", d.path, if d.is_folder { "/" } else { "" });
             let entry = deletion_entry(d, "delete", true);
             crate::events::emit("file", entry.clone());
@@ -3006,7 +3009,7 @@ pub async fn upload_dir(
                 to_delete,
                 folders_to_delete,
                 local_dir.display(),
-                if deletions.is_empty() || crate::ui::level() >= 2 {
+                if plan.deletions.is_empty() || crate::ui::level() >= 2 {
                     ""
                 } else {
                     "; -v lists them"
@@ -3020,36 +3023,128 @@ pub async fn upload_dir(
         return Ok(());
     }
 
-    // --delete, once the uploads are done (not if the session expired:
-    // the run carries on next time).
+    // --delete, once the uploads are done: not if one failed or was a
+    // conflict (a renamed folder whose upload failed would lose both
+    // copies), nor if the session expired (the run carries on next time).
+    // Planned again first, on fresh listings and a fresh look at the
+    // directory: only what both plans agree on goes, so nothing changed
+    // meanwhile (on the web, locally) is deleted on an old plan.
     let (mut deleted, mut deleted_folders, mut delete_failed) = (0usize, 0usize, 0usize);
-    if mirror.is_some() && not_done == 0 && !deletions.is_empty() {
-        for d in &deletions {
-            let outcome = if d.is_folder {
-                client.delete_folder(d.id, auth).await
-            } else {
-                client.delete_files(&[d.id], auth).await
-            };
-            match outcome {
-                Ok(()) => {
-                    deleted += d.files;
-                    deleted_folders += usize::from(d.is_folder);
-                    crate::detail!("  − {}{}", d.path, if d.is_folder { "/" } else { "" });
-                    let entry = deletion_entry(d, "deleted", false);
-                    crate::events::emit("file", entry.clone());
-                    if json {
-                        results.push(entry);
-                    }
-                }
-                Err(O2Error::SessionExpired) => return Err(O2Error::SessionExpired),
+    let mut session_lost = false;
+    if let (Some((max, explicit)), Some(top)) = (mirror, mirror_top) {
+        if plan.deletions.is_empty() || not_done > 0 {
+        } else if failed > 0 || conflicts > 0 {
+            crate::warn!(
+                "⚠ --delete: nothing moved to the trash, as {} file(s) failed to upload or \
+                 were conflicts; fix those and run again",
+                failed + conflicts
+            );
+        } else {
+            match replan(client, auth, local_dir, top).await {
+                Err(O2Error::SessionExpired) => session_lost = true,
                 Err(e) => {
                     delete_failed += 1;
-                    crate::warn!("  ⚠ Couldn't move {} to the trash: {}", d.path, e);
-                    let mut entry = deletion_entry(d, "failed", false);
-                    entry["error"] = e.to_string().into();
-                    crate::events::emit("file", entry.clone());
-                    if json {
-                        results.push(entry);
+                    crate::warn!(
+                        "⚠ --delete: nothing moved to the trash, couldn't check again: {}",
+                        e
+                    );
+                }
+                Ok((fresh, folders_now, media_now)) => {
+                    let mut agreed: Vec<&mirror::Deletion> = plan
+                        .deletions
+                        .iter()
+                        .filter(|d| fresh.deletions.contains(d))
+                        .collect();
+                    // Files added in the account since the plan that the
+                    // listing doesn't show yet (not this run's uploads)
+                    // could be inside a folder to delete: folders stay.
+                    // The change log takes a few seconds to show a new
+                    // upload (2–5 s, seen live): give it 10 before asking.
+                    if change_cursor.is_some() && agreed.iter().any(|d| d.is_folder) {
+                        crate::detail!(
+                            "  … checking the account for changes before deleting folders"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                    let unseen = match change_cursor {
+                        Some(cursor) => match client.changed_since(cursor, auth).await {
+                            Ok((changed, unknown)) => {
+                                let listed: HashSet<u64> = media_now.iter().map(|m| m.id).collect();
+                                let ours: HashSet<u64> =
+                                    uploaded_ids.iter().map(|u| u.id).collect();
+                                let n = changed
+                                    .iter()
+                                    .filter(|id| !listed.contains(id) && !ours.contains(id))
+                                    .count();
+                                n + usize::from(unknown)
+                            }
+                            Err(O2Error::SessionExpired) => {
+                                session_lost = true;
+                                usize::MAX
+                            }
+                            Err(_) => usize::MAX,
+                        },
+                        None => 0,
+                    };
+                    if unseen > 0 && agreed.iter().any(|d| d.is_folder) {
+                        crate::warn!(
+                            "⚠ --delete: files were added in the account moments ago and aren't \
+                             listed yet; as they could be inside them, folders were kept. Run \
+                             again in a minute"
+                        );
+                        agreed.retain(|d| !d.is_folder);
+                    }
+                    if agreed.len() < plan.deletions.len() {
+                        crate::warn!(
+                            "⚠ --delete: {} planned deletion(s) changed meanwhile and were kept; \
+                             run again to see them",
+                            plan.deletions.len() - agreed.len()
+                        );
+                    }
+                    if let Some(message) = mirror_limit(&fresh, max, explicit) {
+                        crate::warn!("⚠ {}; nothing moved to the trash", message);
+                    } else {
+                        // Folders first, as `rm -r` does (their files, then
+                        // them), then the files, in batches.
+                        for d in agreed.iter().filter(|d| d.is_folder) {
+                            match delete_folder(client, auth, d.id, &folders_now, &media_now, true)
+                                .await
+                            {
+                                Ok(()) => {
+                                    deleted += d.files;
+                                    deleted_folders += d.folders;
+                                    report_deletion(d, "deleted", None, json, &mut results);
+                                }
+                                Err(O2Error::SessionExpired) => {
+                                    session_lost = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    delete_failed += 1;
+                                    report_deletion(d, "failed", Some(&e), json, &mut results);
+                                }
+                            }
+                        }
+                        let files: Vec<&&mirror::Deletion> =
+                            agreed.iter().filter(|d| !d.is_folder).collect();
+                        let ids: Vec<u64> = files.iter().map(|d| d.id).collect();
+                        if !session_lost && !ids.is_empty() {
+                            match delete_files_batched(client, auth, &ids).await {
+                                Ok(()) => {
+                                    deleted += ids.len();
+                                    for d in &files {
+                                        report_deletion(d, "deleted", None, json, &mut results);
+                                    }
+                                }
+                                Err(O2Error::SessionExpired) => session_lost = true,
+                                Err(e) => {
+                                    delete_failed += ids.len();
+                                    for d in &files {
+                                        report_deletion(d, "failed", Some(&e), json, &mut results);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3175,7 +3270,7 @@ pub async fn upload_dir(
         print_json(&serde_json::Value::Array(results));
     }
 
-    if not_done > 0 {
+    if not_done > 0 || session_lost {
         return Err(O2Error::SessionExpired);
     }
     let failed = failed + too_big;
@@ -3201,6 +3296,104 @@ pub async fn upload_dir(
     Ok(())
 }
 
+/// The account's files as `mirror::plan` takes them (those with no
+/// folder are in the root).
+fn cloud_files_of(
+    media: &[crate::api::MediaItem],
+    folders: &[crate::api::FolderEntry],
+) -> Vec<mirror::CloudFile> {
+    let root = folders.iter().find(|f| f.name == "/").map(|f| f.id);
+    media
+        .iter()
+        .filter_map(|m| {
+            Some(mirror::CloudFile {
+                id: m.id,
+                folder: m.folderid.or(root)?,
+                name: m.name.clone()?,
+            })
+        })
+        .collect()
+}
+
+/// Why `plan` is beyond what `--delete` may do: more than `max` files and
+/// folders, or, unless `--delete-max` was given (`explicit`), more than
+/// half the cloud folder's files.
+fn mirror_limit(plan: &mirror::Plan, max: usize, explicit: bool) -> Option<String> {
+    let items = plan.items();
+    let files: usize = plan.deletions.iter().map(|d| d.files).sum();
+    if items > max {
+        return Some(format!(
+            "--delete would move {} files and folders to the trash, more than {} \
+             (--delete-max): check the list with --dry-run -v, and if it is right run again \
+             with --delete-max {}",
+            items, max, items
+        ));
+    }
+    if !explicit && items > 20 && files * 2 > plan.cloud_files {
+        return Some(format!(
+            "--delete would move {} of the cloud folder's {} files to the trash, more than \
+             half: check the list with --dry-run -v, and if it is right run again with \
+             --delete-max {}",
+            files, plan.cloud_files, items
+        ));
+    }
+    None
+}
+
+/// `mirror::plan` again, on the directory as it is now and the account
+/// as the server lists it now (no cache), with those listings.
+async fn replan(
+    client: &O2Client,
+    auth: &AuthConfig,
+    local_dir: &Path,
+    top: u64,
+) -> Result<
+    (
+        mirror::Plan,
+        Vec<crate::api::FolderEntry>,
+        Vec<crate::api::MediaItem>,
+    ),
+    O2Error,
+> {
+    let dir = local_dir.to_path_buf();
+    let entries = spawn_blocking_io(move || {
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        walk_dir(&dir, &mut entries, &mut skipped)?;
+        Ok(entries)
+    })
+    .await?;
+    let folders = client.get_all_folders(auth).await?;
+    let media = client.get_all_media_uncached(auth).await?;
+    let files = cloud_files_of(&media, &folders);
+    let plan =
+        mirror::plan(local_dir, &entries, &[], top, &folders, &files).map_err(O2Error::Invalid)?;
+    Ok((plan, folders, media))
+}
+
+/// Say, and add to `--json`, what became of a `--delete`.
+fn report_deletion(
+    d: &mirror::Deletion,
+    action: &str,
+    error: Option<&O2Error>,
+    json: bool,
+    results: &mut Vec<serde_json::Value>,
+) {
+    let shown = format!("{}{}", d.path, if d.is_folder { "/" } else { "" });
+    let mut entry = deletion_entry(d, action, false);
+    match error {
+        None => crate::info!("  🗑 {}", shown),
+        Some(e) => {
+            crate::warn!("  ⚠ Couldn't move {} to the trash: {}", shown, e);
+            entry["error"] = e.to_string().into();
+        }
+    }
+    crate::events::emit("file", entry.clone());
+    if json {
+        results.push(entry);
+    }
+}
+
 /// A `--delete` entry for `--json` and `--json-lines`.
 fn deletion_entry(d: &mirror::Deletion, action: &str, dry_run: bool) -> serde_json::Value {
     let mut entry = serde_json::json!({
@@ -3209,6 +3402,7 @@ fn deletion_entry(d: &mirror::Deletion, action: &str, dry_run: bool) -> serde_js
         "id": d.id,
         "folder": d.is_folder,
         "files": d.files,
+        "folders": d.folders,
     });
     if dry_run {
         entry["dry_run"] = true.into();
