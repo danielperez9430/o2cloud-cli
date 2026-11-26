@@ -2801,39 +2801,70 @@ pub async fn download_file(
         },
     };
 
-    if output_path.exists() {
-        return Err(O2Error::Invalid(format!(
-            "Refusing to overwrite existing file: {}",
-            output_path.display()
-        )));
-    }
-
-    let mut file = crate::api::create_new_file(&output_path).await?;
-    let mut bytes_written = 0;
-    for (i, item) in pieces.iter().enumerate() {
-        if pieces.len() > 1 {
-            eprintln!(
-                "→ Downloading part {}/{} (media {})...",
-                i + 1,
-                pieces.len(),
-                item.id
-            );
-        } else {
-            eprintln!("→ Downloading media {}...", item.id);
-        }
-        // The listing's signed URLs may expire during a long join, so
-        // each part gets a fresh one.
-        let fresh_url = pieces.len() > 1;
-        let result = download_piece(client, auth, item, fresh_url, &mut file, &output_path).await;
-        match result {
-            Ok(n) => bytes_written += n,
-            Err(e) => {
-                drop(file);
-                let _ = tokio::fs::remove_file(&output_path).await;
-                return Err(e);
+    // The file is written in place (an app may follow its size as the
+    // progress), with a hidden marker next to it saying which download
+    // it is until it's complete: a cut download is resumed by running
+    // the same command again, and anything else there is never touched.
+    let size = pieces.iter().map(|m| m.size).sum::<Option<u64>>();
+    let marker = download_marker(&output_path);
+    let mark = serde_json::json!({ "ids": ids, "size": size }).to_string();
+    let resuming = if output_path.exists() {
+        match std::fs::read_to_string(&marker) {
+            Ok(found) if found == mark => true,
+            _ => {
+                return Err(O2Error::Invalid(format!(
+                    "Refusing to overwrite existing file: {}",
+                    output_path.display()
+                )))
             }
         }
+    } else {
+        false
+    };
+    crate::config::write_private(&marker, mark.as_bytes()).map_err(|e| {
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {}", marker.display(), e),
+        ))
+    })?;
+    let mut file = if resuming {
+        tokio::fs::File::from_std(download_dir::open_part(&output_path)?)
+    } else {
+        crate::api::create_new_file(&output_path).await?
+    };
+    let have = file.metadata().await?.len();
+    match (resuming, pieces.len()) {
+        (true, _) => eprintln!(
+            "→ Resuming {} from {}...",
+            output_path.display(),
+            format_size(have)
+        ),
+        (false, 1) => eprintln!("→ Downloading media {}...", ids[0]),
+        (false, n) => eprintln!("→ Downloading {} parts ({})...", n, ids[0]),
     }
+    // The listing's URL for a single file; parts get a fresh one each,
+    // as they may expire during a long join.
+    let urls: HashMap<u64, String> = match pieces.as_slice() {
+        [item] => item
+            .url
+            .clone()
+            .map(|url| (item.id, url))
+            .into_iter()
+            .collect(),
+        _ => HashMap::new(),
+    };
+    let bytes_written =
+        download_dir::fetch_pieces(client, auth, &pieces, size, &mut file, &output_path, &urls)
+            .await
+            .inspect_err(|_| {
+                eprintln!(
+                    "  (the part downloaded stays in {}: run the same command again to resume)",
+                    output_path.display()
+                );
+            })?;
+    let mtime = pieces[0].modificationdate.or(pieces[0].creationdate);
+    download_dir::finish(file, mtime, &output_path).await?;
+    let _ = std::fs::remove_file(&marker);
 
     eprintln!(
         "✓ Downloaded {} to {}",
@@ -2857,25 +2888,14 @@ pub async fn download_file(
     Ok(())
 }
 
-/// Download one media item and append it to `file`; with `fresh_url`, by
-/// a download URL asked for now rather than the listing's.
-async fn download_piece(
-    client: &O2Client,
-    auth: &AuthConfig,
-    item: &crate::api::MediaItem,
-    fresh_url: bool,
-    file: &mut tokio::fs::File,
-    path: &Path,
-) -> Result<u64, O2Error> {
-    // A file uploaded a moment ago is listed without a URL until the
-    // server has processed it; ask for it by ID then, or when `fresh_url`.
-    let download_url = match item.url.clone() {
-        Some(url) if !fresh_url => url,
-        _ => client.media_download_url(item.id, auth).await?,
-    };
-    client
-        .download_into(&download_url, file, path, item.size)
-        .await
+/// The hidden file that marks `path` as a download in progress:
+/// `.<name>.o2dl` next to it.
+fn download_marker(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{}.o2dl", name))
 }
 
 /// The parts of the file `base` uploaded in parts, in order, starting
@@ -2932,6 +2952,32 @@ fn file_parts<'a>(
         )));
     }
     Ok(parts)
+}
+
+/// How much smaller than the part size a part can be: `upload_pieces`
+/// shrinks it a byte at a time while the size is a multiple of it.
+const PART_SHRINK_MAX: u64 = 64;
+
+/// The part size given in `O2CLOUD_PART_SIZE`, for tests: with it, files
+/// go up in parts of that size, and parts of that size are taken for the
+/// CLI's (see `made_by_cli`).
+pub fn test_part_size() -> Option<u64> {
+    std::env::var("O2CLOUD_PART_SIZE").ok()?.parse().ok()
+}
+
+/// Whether a complete set of parts (see `file_parts`) was made by this
+/// CLI (or an app using it) rather than being someone's own `x.001`,
+/// `x.002`… volumes, uploaded as files of their own: every part but the
+/// last is the CLI's part size, which has always been `DEFAULT_PART_SIZE`
+/// (at most a few bytes less: see `upload_pieces`).
+pub(crate) fn made_by_cli(parts: &[&crate::api::MediaItem]) -> bool {
+    let Some(full) = parts.first().and_then(|p| p.size) else {
+        return false;
+    };
+    parts.len() > 1
+        && std::iter::once(DEFAULT_PART_SIZE)
+            .chain(test_part_size())
+            .any(|size| full <= size && full + PART_SHRINK_MAX >= size)
 }
 
 // ------------------------------------------------------------------
@@ -3040,6 +3086,13 @@ pub async fn delete_target(
             .await
         }
         Item::File(item) => delete_file(client, auth, item).await,
+        Item::Parts(name, parts) => {
+            let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
+            eprintln!("→ Deleting {} ({} parts)...", name, ids.len());
+            delete_files_batched(client, auth, &ids).await?;
+            eprintln!("✓ Deleted {} ({} parts)", name, ids.len());
+            Ok(())
+        }
     }
 }
 
@@ -3047,6 +3100,80 @@ pub async fn delete_target(
 enum Item<'a> {
     Folder(u64),
     File(&'a crate::api::MediaItem),
+    /// A file uploaded in parts, named by its own name (`big.iso` for
+    /// `big.iso.001`…): the name and its parts in order.
+    Parts(String, Vec<&'a crate::api::MediaItem>),
+}
+
+/// Refuse a part of a file the CLI uploaded in parts named on its own
+/// (by name or path, not by ID): acting on it alone breaks the file.
+fn refuse_lone_part(
+    item: &crate::api::MediaItem,
+    media: &[crate::api::MediaItem],
+) -> Result<(), O2Error> {
+    let Some((base, n)) = item.name.as_deref().and_then(split_part_name) else {
+        return Ok(());
+    };
+    let siblings = || media.iter().filter(|m| m.folderid == item.folderid);
+    // A file of its own named `base` makes `base.NNN` plain files.
+    if siblings().any(|m| m.name.as_deref() == Some(base)) {
+        return Ok(());
+    }
+    let first_name = part_name(base, 1);
+    let Some(first) = siblings().find(|m| m.name.as_deref() == Some(first_name.as_str())) else {
+        return Ok(());
+    };
+    match file_parts(first, base, siblings()) {
+        Ok(parts) if made_by_cli(&parts) && parts.iter().any(|p| p.id == item.id) => {
+            Err(O2Error::Invalid(format!(
+                "{} is part {} of {} of {}, which was uploaded in parts: on its own \
+                 it would break {}. Name `{}` to act on the whole file, or use this \
+                 part's ID ({}) for this part only",
+                item.name.as_deref().unwrap_or("?"),
+                n,
+                parts.len(),
+                base,
+                base,
+                base,
+                item.id
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Apply a change to each part in turn: `change` gives the part's name
+/// then and the change. If one fails, the ones done are put back as
+/// `undo` says (as far as possible), so the file isn't left split.
+async fn update_parts(
+    client: &O2Client,
+    auth: &AuthConfig,
+    parts: &[&crate::api::MediaItem],
+    change: impl Fn(&crate::api::MediaItem) -> (String, serde_json::Value),
+    undo: impl Fn(&crate::api::MediaItem) -> (String, serde_json::Value),
+) -> Result<(), O2Error> {
+    for (i, part) in parts.iter().enumerate() {
+        let (name, changes) = change(part);
+        if let Err(e) = client.update_file(part.id, &name, changes, auth).await {
+            for done in &parts[..i] {
+                let (name, changes) = undo(done);
+                let _ = client.update_file(done.id, &name, changes, auth).await;
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `files` has a file named `name`, or a part of one (`name.NNN`),
+/// other than the files `own`.
+fn name_taken(files: &[crate::api::MediaItem], name: &str, own: &[u64]) -> bool {
+    files.iter().any(|m| {
+        !own.contains(&m.id)
+            && m.name
+                .as_deref()
+                .is_some_and(|n| n == name || part_number(name, n).is_some())
+    })
 }
 
 /// What a command can be given, which decides how much of the account
@@ -3261,7 +3388,26 @@ fn resolve_item<'a>(
     if let Ok(folder_id) = resolve_target(Some(target.to_string()), folders, folder_name) {
         return Ok(Item::Folder(folder_id));
     }
-    find_file(target, folders, folder_name, media).map(Item::File)
+    match find_file(target, folders, folder_name, media) {
+        Ok(item) => {
+            refuse_lone_part(item, media)?;
+            Ok(Item::File(item))
+        }
+        // No such file, but maybe it went up in parts.
+        Err(O2Error::NotFound(msg)) => {
+            let first = match find_file(&part_name(target, 1), folders, folder_name, media) {
+                Ok(first) => first,
+                Err(O2Error::NotFound(_)) => return Err(O2Error::NotFound(msg)),
+                Err(e) => return Err(e),
+            };
+            let base = target.rsplit('/').next().unwrap_or(target);
+            Ok(Item::Parts(
+                base.to_string(),
+                file_parts(first, base, media)?,
+            ))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Full cloud path of a file, e.g. `/docs/a.txt`.
@@ -3321,6 +3467,20 @@ pub async fn share(
             file_path(item, &folders, &folder_name),
             false,
         ),
+        Item::Parts(name, parts) => {
+            let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
+            let path = file_path(parts[0], &folders, &folder_name);
+            let path = path.strip_suffix(".001").unwrap_or(&path).to_string();
+            eprintln!(
+                "  {} is in {} parts: the link has them all, to download and join \
+                 (`cat {}.0* > {}`, or 7-Zip)",
+                name,
+                ids.len(),
+                name,
+                name
+            );
+            (client.share_files(&ids, auth).await?, path, false)
+        }
     };
 
     eprintln!(
@@ -3438,7 +3598,7 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
             eprintln!("✓ {} is no longer shared", path);
             Ok(())
         }
-        Item::File(_) => Err(O2Error::Invalid(
+        Item::File(_) | Item::Parts(..) => Err(O2Error::Invalid(
             "unsharing files isn't supported yet; remove the link from the O2 Cloud website".into(),
         )),
     }
@@ -3465,6 +3625,33 @@ pub async fn move_item(
         Item::File(item) => item,
         Item::Folder(id) => {
             return move_folder(client, auth, id, destination, &folders, &folder_name).await
+        }
+        Item::Parts(name, parts) => {
+            let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
+            let dest_path = resolve_path(dest_id, &folder_name, &folders);
+            if parts[0].folderid == Some(dest_id) {
+                eprintln!("{} is already in {}", name, dest_path);
+                return Ok(());
+            }
+            let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
+            let there = files_in(client, auth, Some(dest_id), &media, complete).await?;
+            if name_taken(&there, &name, &ids) {
+                return Err(O2Error::Invalid(format!(
+                    "{} already has a file named '{}' (or parts of one)",
+                    dest_path, name
+                )));
+            }
+            let part = |p: &crate::api::MediaItem| p.name.clone().unwrap_or_default();
+            update_parts(
+                client,
+                auth,
+                &parts,
+                |p| (part(p), serde_json::json!({ "folderid": dest_id })),
+                |p| (part(p), serde_json::json!({ "folderid": p.folderid })),
+            )
+            .await?;
+            eprintln!("✓ Moved {} ({} parts) → {}", name, parts.len(), dest_path);
+            return Ok(());
         }
     };
     let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
@@ -3584,6 +3771,48 @@ pub async fn rename_item(
         Item::Folder(id) => {
             return rename_folder(client, auth, id, new_name, &folders, &folder_name).await
         }
+        Item::Parts(name, parts) => {
+            // Each part keeps its `.NNN`, which is the extension the
+            // server keeps: only the name before it changes.
+            if let Some(problem) = crate::api::file_name_problem(&part_name(new_name, 1)) {
+                return Err(O2Error::Invalid(format!(
+                    "its parts can't be named so ({}.001): {}",
+                    new_name, problem
+                )));
+            }
+            let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
+            let there = files_in(client, auth, parts[0].folderid, &media, complete).await?;
+            if name_taken(&there, new_name, &ids) {
+                return Err(O2Error::Invalid(format!(
+                    "a file named '{}' (or parts of one) already exists there",
+                    new_name
+                )));
+            }
+            let numbered = |p: &crate::api::MediaItem, base: &str| {
+                let n = p
+                    .name
+                    .as_deref()
+                    .and_then(|n| part_number(&name, n))
+                    .unwrap_or(0);
+                part_name(base, n)
+            };
+            update_parts(
+                client,
+                auth,
+                &parts,
+                |p| {
+                    let new = numbered(p, new_name);
+                    (numbered(p, &name), serde_json::json!({ "name": new }))
+                },
+                |p| {
+                    let old = numbered(p, &name);
+                    (numbered(p, new_name), serde_json::json!({ "name": old }))
+                },
+            )
+            .await?;
+            eprintln!("✓ Renamed {} → {} ({} parts)", name, new_name, parts.len());
+            return Ok(());
+        }
     };
     let from = file_path(item, &folders, &folder_name);
     // The server keeps a file's extension: it accepts a rename to
@@ -3683,6 +3912,57 @@ pub async fn copy_item(
     let item = match resolve_item(source, &folders, &folder_name, &media)? {
         Item::File(item) => item,
         Item::Folder(_) => return Err(folder_unsupported("Copying")),
+        Item::Parts(base, parts) => {
+            let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
+            let dest_path = resolve_path(dest_id, &folder_name, &folders);
+            let name = new_name.unwrap_or(&base);
+            if let Some(problem) = crate::api::file_name_problem(&part_name(name, 1)) {
+                return Err(O2Error::Invalid(format!(
+                    "its parts can't be named so ({}.001): {}",
+                    name, problem
+                )));
+            }
+            let there = files_in(client, auth, Some(dest_id), &media, complete).await?;
+            if name_taken(&there, name, &[]) {
+                return Err(O2Error::Invalid(format!(
+                    "{} already has a file named '{}' (or parts of one); use --name to \
+                     give the copy another name",
+                    dest_path, name
+                )));
+            }
+            let mut ids = Vec::new();
+            for (i, part) in parts.iter().enumerate() {
+                match client
+                    .copy_file(part.id, dest_id, Some(&part_name(name, i + 1)), auth)
+                    .await
+                {
+                    Ok(id) => ids.push(id),
+                    Err(e) => {
+                        // Half a copy is no copy.
+                        if !ids.is_empty() {
+                            let _ = delete_files_batched(client, auth, &ids).await;
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            let to = if dest_path == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", dest_path, name)
+            };
+            eprintln!("✓ Copied {} ({} parts) → {}", base, parts.len(), to);
+            if json {
+                print_json(&serde_json::json!({
+                    "parts": ids,
+                    "name": name,
+                    "folderid": dest_id,
+                    "path": to,
+                    "source_parts": parts.iter().map(|p| p.id).collect::<Vec<_>>(),
+                }));
+            }
+            return Ok(());
+        }
     };
     let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
     let dest_path = resolve_path(dest_id, &folder_name, &folders);
@@ -4342,6 +4622,7 @@ mod tests {
         let kind = |t: &str| match resolve_item(t, &folders, &folder_name, &media) {
             Ok(Item::Folder(id)) => format!("folder {id}"),
             Ok(Item::File(m)) => format!("file {}", m.id),
+            Ok(Item::Parts(name, parts)) => format!("parts {} {}", name, parts.len()),
             Err(_) => "error".into(),
         };
         assert_eq!(kind("2"), "folder 2"); // folder ID
@@ -4352,6 +4633,58 @@ mod tests {
         assert_eq!(kind("root.txt"), "file 103");
         assert_eq!(kind("dup.txt"), "error"); // ambiguous
         assert_eq!(kind("/nope"), "error");
+    }
+
+    #[test]
+    fn test_files_in_parts() {
+        let m = |id: u64, name: &str, size: u64| -> crate::api::MediaItem {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "folder": 2, "size": size
+            }))
+            .unwrap()
+        };
+        let (folders, folder_name, _) = sample_tree();
+        let p = DEFAULT_PART_SIZE;
+        let media = vec![
+            m(501, "big.iso.001", p),
+            m(502, "big.iso.002", p),
+            m(503, "big.iso.003", 7),
+            m(504, "vol.7z.001", 100),
+            m(505, "vol.7z.002", 50),
+            m(506, "half.bin.001", p),
+            m(507, "own", 5),
+            m(508, "own.001", p),
+            m(509, "own.002", 3),
+        ];
+        let refs: Vec<&crate::api::MediaItem> = media[..3].iter().collect();
+        assert!(made_by_cli(&refs));
+        assert!(made_by_cli(&[&m(501, "x.001", p - 3), &m(502, "x.002", 1)]));
+        assert!(!made_by_cli(&[&media[3], &media[4]]));
+        assert!(!made_by_cli(&refs[..1]));
+
+        let kind = |t: &str| match resolve_item(t, &folders, &folder_name, &media) {
+            Ok(Item::File(m)) => format!("file {}", m.id),
+            Ok(Item::Parts(name, parts)) => format!("parts {} {}", name, parts.len()),
+            Ok(Item::Folder(id)) => format!("folder {id}"),
+            Err(e) => format!("error {}", e),
+        };
+        // By its own name: all its parts.
+        assert_eq!(kind("/docs/big.iso"), "parts big.iso 3");
+        assert_eq!(kind("/docs/vol.7z"), "parts vol.7z 2");
+        // A CLI part on its own, by path: refused; by ID: fine.
+        assert!(kind("/docs/big.iso.002").contains("part 2 of 3 of big.iso"));
+        assert_eq!(kind("502"), "file 502");
+        // Someone's own volumes, an incomplete set, and parts next to a
+        // file of the same name are plain files.
+        assert_eq!(kind("/docs/vol.7z.001"), "file 504");
+        assert_eq!(kind("/docs/half.bin.001"), "file 506");
+        assert_eq!(kind("/docs/own.001"), "file 508");
+        assert!(kind("/docs/half.bin").starts_with("error"));
+
+        assert!(name_taken(&media, "big.iso", &[]));
+        assert!(!name_taken(&media, "big.iso", &[501, 502, 503]));
+        assert!(name_taken(&media, "own", &[507]));
+        assert!(!name_taken(&media, "other", &[]));
     }
 
     #[test]

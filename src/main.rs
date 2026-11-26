@@ -44,7 +44,11 @@ impl UploadFlags {
         ops::UploadOptions {
             skip_existing: self.skip_existing,
             jobs,
-            part_size: self.part_size.unwrap_or(ops::DEFAULT_PART_SIZE).max(2),
+            part_size: self
+                .part_size
+                .or_else(ops::test_part_size)
+                .unwrap_or(ops::DEFAULT_PART_SIZE)
+                .max(2),
             update: false,
             dry_run: false,
         }
