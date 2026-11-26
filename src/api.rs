@@ -170,6 +170,11 @@ const PENDING_FOR_SECS: u64 = 600;
 const MEDIA_PAGES_AT_ONCE: usize = 4;
 
 const BUSY_RETRIES: u32 = 3;
+/// Retries for a request that only reads (`action=get`) on any server
+/// error (5xx): safe to repeat, and O2 Cloud has short outages (one of
+/// about a minute and a half answered 500, or 200 with `FOL-1000`). With
+/// the backoff, about 30 s in all.
+const READ_RETRIES: u32 = 5;
 /// Longest `Retry-After` honoured, so a bad header can't stall the CLI.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
@@ -210,6 +215,19 @@ fn creates_something(req: &reqwest::Request) -> bool {
     req.url()
         .query_pairs()
         .any(|(k, v)| k == "action" && (v == "save" || v == "copy"))
+}
+
+/// Whether a request only reads (`action=get`), so repeating it is safe.
+fn only_reads(req: &reqwest::Request) -> bool {
+    req.url()
+        .query_pairs()
+        .any(|(k, v)| k == "action" && v == "get")
+}
+
+/// Whether to try a request again after `status`: when busy (see
+/// `is_busy`), or on any server error if it only reads.
+fn worth_retrying(status: reqwest::StatusCode, creates: bool, reads: bool) -> bool {
+    is_busy(status, creates) || (reads && status.is_server_error())
 }
 
 /// Whether `status` means "busy, try again": 429 (the request was
@@ -764,17 +782,17 @@ impl O2Client {
         auth: &AuthConfig,
     ) -> Result<reqwest::Response, O2Error> {
         let builder = self.with_sapi_headers(builder, auth);
-        let creates = builder
-            .try_clone()
-            .and_then(|b| b.build().ok())
-            .is_some_and(|req| creates_something(&req));
+        let built = builder.try_clone().and_then(|b| b.build().ok());
+        let creates = built.as_ref().is_some_and(creates_something);
+        let reads = built.as_ref().is_some_and(only_reads);
+        let retries = if reads { READ_RETRIES } else { BUSY_RETRIES };
         let mut retry = 0;
         loop {
             let Some(attempt) = builder.try_clone() else {
                 return Ok(builder.send_traced().await?);
             };
             let resp = attempt.send_traced().await?;
-            if !is_busy(resp.status(), creates) || retry >= BUSY_RETRIES {
+            if !worth_retrying(resp.status(), creates, reads) || retry >= retries {
                 return Ok(resp);
             }
             let wait = busy_wait(&resp, retry);
@@ -1158,14 +1176,26 @@ impl O2Client {
         auth: &AuthConfig,
     ) -> Result<(reqwest::StatusCode, String), O2Error> {
         let url = format!("{}/sapi/media/folder", BASE_URL);
-        let req = self
-            .client
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
-        let resp = self.send_sapi_any_status(req, auth).await?;
-        let status = resp.status();
-        Ok((status, resp.text().await?))
+        // A short outage can also answer 200 with `FOL-1000` ("Unknown
+        // exception in folder handling"): tried again like a 500.
+        let mut retry = 0;
+        loop {
+            let req = self
+                .client
+                .post(&url)
+                .timeout(REQUEST_TIMEOUT)
+                .query(&[("action", "get"), ("validationkey", &auth.validationkey)]);
+            let resp = self.send_sapi_any_status(req, auth).await?;
+            let status = resp.status();
+            let raw = resp.text().await?;
+            let outage =
+                status.is_success() && sapi_error(&raw).is_some_and(|e| e.contains("FOL-1000"));
+            if !outage || retry >= READ_RETRIES {
+                return Ok((status, raw));
+            }
+            tokio::time::sleep(Duration::from_secs(1 << retry)).await;
+            retry += 1;
+        }
     }
 
     /// Every file in the account. Listing them all takes one request per
@@ -2833,6 +2863,11 @@ mod tests {
         assert!(is_busy(unavailable, false));
         assert!(!is_busy(unavailable, true));
         assert!(!is_busy(reqwest::StatusCode::OK, false));
+        let error = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        assert!(worth_retrying(error, false, true));
+        assert!(!worth_retrying(error, false, false));
+        assert!(!worth_retrying(reqwest::StatusCode::NOT_FOUND, false, true));
+        assert!(worth_retrying(busy, false, false));
     }
 
     #[test]

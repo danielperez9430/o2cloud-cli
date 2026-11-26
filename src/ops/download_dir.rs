@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{file_parts, print_json, resolve_target, Tree};
+use super::{file_parts, made_by_cli, print_json, resolve_target, Tree};
 use crate::api::{MediaItem, O2Client};
 use crate::config::AuthConfig;
 use crate::error::O2Error;
@@ -108,8 +108,57 @@ pub async fn download_dir(
         out_root.display()
     );
     if opts.dry_run {
+        // What the real run would do with what's on disk now.
+        let (mut new, mut resume, mut there, mut in_the_way) = (0usize, 0usize, 0usize, 0usize);
+        let (mut to_get, mut entries) = (0u64, Vec::new());
+        for job in &jobs {
+            let mut entry = job_json(job, &out_root);
+            entry["dry_run"] = true.into();
+            let size = job.size.unwrap_or(0);
+            let action = match local_state(job, &out_root, opts) {
+                Local::Missing => {
+                    new += 1;
+                    to_get += size;
+                    "download"
+                }
+                Local::Partial(have) => {
+                    resume += 1;
+                    to_get += size.saturating_sub(have);
+                    "resume"
+                }
+                Local::Same => {
+                    there += 1;
+                    "skipped"
+                }
+                Local::InTheWay => {
+                    in_the_way += 1;
+                    eprintln!(
+                        "  ⚠ {}: already exists locally{}; it would be left alone",
+                        job.cloud,
+                        if opts.skip_existing {
+                            " with another size"
+                        } else {
+                            " (add --skip-existing to skip it)"
+                        }
+                    );
+                    "failed"
+                }
+            };
+            entry["action"] = action.into();
+            if json {
+                entries.push(entry);
+            }
+        }
+        eprintln!(
+            "Dry run: {} to download, {} to resume, {} already there, {} in the way \
+             ({} to transfer); nothing was changed.",
+            new,
+            resume,
+            there,
+            in_the_way,
+            format_size(to_get)
+        );
         if json {
-            let entries: Vec<_> = jobs.iter().map(|j| job_json(j, &out_root)).collect();
             print_json(&serde_json::Value::Array(entries));
         }
         return Ok(());
@@ -279,7 +328,12 @@ fn plan<'a>(
                 continue;
             }
             // Among this folder's files only: the account can be large.
-            if let Ok(parts) = file_parts(m, base, files.iter().copied()) {
+            // Only the CLI's parts: someone's own `x.001`, `x.002`…
+            // volumes come down as they are, as they were uploaded.
+            if let Ok(parts) = file_parts(m, base, files.iter().copied())
+                .map_err(|_| ())
+                .and_then(|p| if made_by_cli(&p) { Ok(p) } else { Err(()) })
+            {
                 in_parts.extend(parts.iter().map(|p| p.id));
                 entries.push((m.id, base.to_string(), Entry::File(parts)));
             }
@@ -446,15 +500,47 @@ async fn batch_urls<'a, 'b: 'a>(
     Ok(urls)
 }
 
+/// What is on disk for a job.
+#[derive(Debug, PartialEq)]
+enum Local {
+    /// Nothing: downloaded from the start.
+    Missing,
+    /// A cut download (`.<id>.o2part`) with these bytes: resumed.
+    Partial(u64),
+    /// The file, with the same size, and `--skip-existing`: skipped.
+    Same,
+    /// The file, of another size or without `--skip-existing`: left alone.
+    InTheWay,
+}
+
+fn local_state(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> Local {
+    let path = out_root.join(&job.local);
+    if let Ok(meta) = std::fs::metadata(&path) {
+        return if opts.skip_existing && Some(meta.len()) == job.size {
+            Local::Same
+        } else {
+            Local::InTheWay
+        };
+    }
+    let part = path.with_file_name(format!(".{}.o2part", job.pieces[0].id));
+    match std::fs::metadata(&part) {
+        Ok(meta) if meta.len() > 0 && job.size.is_none_or(|size| meta.len() <= size) => {
+            Local::Partial(meta.len())
+        }
+        _ => Local::Missing,
+    }
+}
+
 /// `Some` if the local file is already there: skipped if it has the
 /// same size and `--skip-existing` was given, otherwise refused (nothing
 /// is overwritten).
 fn already_there(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> Option<Outcome> {
-    let path = out_root.join(&job.local);
-    let meta = std::fs::metadata(&path).ok()?;
-    if opts.skip_existing && Some(meta.len()) == job.size {
-        return Some(Outcome::Skipped);
+    match local_state(job, out_root, opts) {
+        Local::Same => return Some(Outcome::Skipped),
+        Local::InTheWay => {}
+        Local::Missing | Local::Partial(_) => return None,
     }
+    let path = out_root.join(&job.local);
     let why = if opts.skip_existing {
         " with another size"
     } else {
@@ -497,7 +583,7 @@ async fn download_job(
 /// Open (or create) a partial download for writing, keeping what it has.
 /// Not in append mode: on Windows a file opened so can't be truncated,
 /// which a download that starts over needs.
-fn open_part(path: &Path) -> std::io::Result<std::fs::File> {
+pub(super) fn open_part(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -524,17 +610,46 @@ async fn fetch(
         ))
     };
     let mut file = tokio::fs::File::from_std(open_part(&part).map_err(io)?);
+    let total = fetch_pieces(client, auth, &job.pieces, job.size, &mut file, &part, urls).await?;
+    finish(file, job.mtime, &part).await?;
+    if path.exists() {
+        return Err(O2Error::Invalid(format!(
+            "{} appeared meanwhile; not overwriting it",
+            path.display()
+        )));
+    }
+    std::fs::rename(&part, path).map_err(io)?;
+    Ok(total)
+}
+
+/// Write `pieces` (one file, or the parts of a file uploaded in parts;
+/// `size` bytes in all, if known) into `file` (at `path`, for messages),
+/// carrying on from what is already in it: whole pieces already there
+/// are skipped and the one it stopped in is resumed with Range. Each is
+/// retried once, with a fresh URL (they expire), from where it got to.
+/// `urls` are download URLs already at hand. Returns the file's size.
+pub(super) async fn fetch_pieces(
+    client: &O2Client,
+    auth: &AuthConfig,
+    pieces: &[&MediaItem],
+    size: Option<u64>,
+    file: &mut tokio::fs::File,
+    path: &Path,
+    urls: &HashMap<u64, String>,
+) -> Result<u64, O2Error> {
+    let io = |e: std::io::Error| {
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {}", path.display(), e),
+        ))
+    };
     let mut have = file.metadata().await.map_err(io)?.len();
-    if job.size.is_some_and(|size| have > size) {
+    if size.is_some_and(|size| have > size) {
         file.set_len(0).await.map_err(io)?;
         have = 0;
     }
-
-    // Each piece in turn (one, or the parts of a file uploaded in parts),
-    // carrying on from what an earlier run left: whole pieces already
-    // there are skipped, the one it stopped in is resumed with Range.
     let mut start = 0u64;
-    for piece in &job.pieces {
+    for piece in pieces {
         let len = piece.size;
         if let Some(len) = len {
             if have >= start + len {
@@ -551,15 +666,13 @@ async fn fetch(
                 _ => client.media_download_url(piece.id, auth).await?,
             };
             match client
-                .download_resuming(&url, &mut file, &part, start, offset, len)
+                .download_resuming(&url, file, path, start, offset, len)
                 .await
             {
                 Ok(n) => {
                     start += n;
                     break;
                 }
-                // Once more with a fresh URL (they expire), from where it
-                // got to.
                 Err(e)
                     if attempt == 0 && !matches!(e, O2Error::SessionExpired | O2Error::Io(_)) =>
                 {
@@ -569,26 +682,32 @@ async fn fetch(
             }
         }
     }
-    let total = start;
-    if let Some(size) = job.size {
-        if size != total {
-            return Err(O2Error::Api(format!("got {} of {} bytes", total, size)));
+    if let Some(size) = size {
+        if size != start {
+            return Err(O2Error::Api(format!("got {} of {} bytes", start, size)));
         }
     }
-    file.sync_all().await.map_err(io)?;
+    Ok(start)
+}
+
+/// Flush a finished download to disk and give it its date (`mtime`,
+/// Unix ms).
+pub(super) async fn finish(
+    file: tokio::fs::File,
+    mtime: Option<u64>,
+    path: &Path,
+) -> Result<(), O2Error> {
+    file.sync_all().await.map_err(|e| {
+        O2Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {}", path.display(), e),
+        ))
+    })?;
     let file = file.into_std().await;
-    if let Some(ms) = job.mtime {
+    if let Some(ms) = mtime {
         let _ = file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
     }
-    drop(file);
-    if path.exists() {
-        return Err(O2Error::Invalid(format!(
-            "{} appeared meanwhile; not overwriting it",
-            path.display()
-        )));
-    }
-    std::fs::rename(&part, path).map_err(io)?;
-    Ok(total)
+    Ok(())
 }
 
 fn job_json(job: &Job<'_>, out_root: &Path) -> serde_json::Value {
@@ -683,6 +802,39 @@ mod tests {
     }
 
     #[test]
+    fn test_local_state() {
+        let dir = std::env::temp_dir().join(format!("o2cli_local_state_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let piece = item(7, "f.bin", 2, 10);
+        let job = Job {
+            pieces: vec![&piece],
+            cloud: "/f.bin".into(),
+            local: PathBuf::from("f.bin"),
+            size: Some(10),
+            mtime: None,
+            renamed: false,
+        };
+        let opts = |skip_existing| DownloadDirOptions {
+            jobs: 1,
+            skip_existing,
+            extensions: Vec::new(),
+            dry_run: true,
+        };
+        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Missing);
+        std::fs::write(dir.join(".7.o2part"), b"1234").unwrap();
+        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Partial(4));
+        // Bigger than the file: started over, as the real run does.
+        std::fs::write(dir.join(".7.o2part"), b"12345678901").unwrap();
+        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Missing);
+        std::fs::write(dir.join("f.bin"), b"0123456789").unwrap();
+        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Same);
+        assert_eq!(local_state(&job, &dir, &opts(false)), Local::InTheWay);
+        std::fs::write(dir.join("f.bin"), b"012").unwrap();
+        assert_eq!(local_state(&job, &dir, &opts(true)), Local::InTheWay);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_wanted() {
         let exts = vec!["jpg".to_string(), "tar.gz".to_string()];
         assert!(wanted("A.JPG", &exts));
@@ -724,8 +876,12 @@ mod tests {
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
         let media = vec![
             item(100, "a.jpg", 2, 10),
-            item(101, "big.iso.001", 2, 100),
+            // The CLI's parts: joined.
+            item(101, "big.iso.001", 2, super::super::DEFAULT_PART_SIZE),
             item(102, "big.iso.002", 2, 30),
+            // Someone's own volumes, uploaded as files: left as they are.
+            item(106, "backup.7z.001", 2, 100),
+            item(107, "backup.7z.002", 2, 40),
             item(103, "b.png", 4, 5),
             item(104, "root.txt", 1, 1),
             serde_json::from_value(serde_json::json!({"id": 105, "name": "phone.jpg", "size": 7}))
@@ -747,7 +903,13 @@ mod tests {
             [
                 ("Fotos/2024/b.png".to_string(), Some(5), 1),
                 ("Fotos/a.jpg".to_string(), Some(10), 1),
-                ("Fotos/big.iso".to_string(), Some(130), 2),
+                ("Fotos/backup.7z.001".to_string(), Some(100), 1),
+                ("Fotos/backup.7z.002".to_string(), Some(40), 1),
+                (
+                    "Fotos/big.iso".to_string(),
+                    Some(super::super::DEFAULT_PART_SIZE + 30),
+                    2
+                ),
             ]
         );
         assert!(jobs.iter().all(|j| j.mtime == Some(1_600_000_000_000)));

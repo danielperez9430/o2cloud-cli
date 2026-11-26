@@ -31,6 +31,28 @@ All notable changes to o2cloud-cli will be documented in this file.
   Cloud's limit.
 - The last line of `upload-dir` says "⚠" when files failed, names the
   local folder as "from", and counts updated files.
+- `download` wrote straight to the final name, so a cut download left a
+  file that looked complete, which the next run refused to overwrite. It
+  still writes in place (an app may follow the file's size as progress),
+  with a hidden `.<name>.o2dl` marker while incomplete: the same command
+  now resumes it (by the part it stopped in, for a file in parts), and
+  the finished file gets its original date.
+- `download-dir --dry-run` now looks at the disk: it says what it would
+  download, resume, skip or leave alone, and `--json` entries have
+  `action` (`download`, `resume`, `skipped`, `failed`).
+- `download-dir` joined any `x.001`, `x.002`… set, including someone's
+  own volumes uploaded as files. It now joins only the parts this CLI
+  makes (recognised by their size).
+- `rm`, `mv`, `rename`, `cp` and `share` didn't know files in parts:
+  the file's own name gave "not found", and a part's name acted on that
+  part alone, breaking the file. They now take the file by its name and
+  act on all its parts (put back as they were if one fails), and refuse
+  a single part by name (its ID still works). `cp --json` of a file in
+  parts has `parts` and `source_parts`.
+- Requests that only read (`action=get`: listings, the change log) are
+  tried again on any server error, and the folder list on `FOL-1000`,
+  for about 30 s: a short O2 Cloud outage (500s for about a minute and a
+  half) made any command fail.
 
 ## [0.15.2] — 2026-11-26
 
