@@ -34,6 +34,12 @@ pub struct MediaCache {
     /// with when they were first reported (Unix seconds).
     #[serde(default)]
     pub pending: Vec<(u64, u64)>,
+    /// What this CLI knows of files it uploaded that are still pending
+    /// (name, folder, size, dates: what it sent). Listings show them
+    /// until the server returns them, so a file shows up as soon as it's
+    /// uploaded rather than 10–60 s later.
+    #[serde(default)]
+    pub provisional: Vec<CachedItem>,
     pub media: Vec<CachedItem>,
 }
 
@@ -58,6 +64,7 @@ impl MediaCache {
             cursor,
             listed_at: crate::config::now_unix(),
             pending: Vec::new(),
+            provisional: Vec::new(),
             media,
         }
     }
@@ -82,42 +89,72 @@ pub fn load(account: &str) -> Option<MediaCache> {
     (cache.version == VERSION && cache.account == account && fresh).then_some(cache)
 }
 
-/// Note files just uploaded to `account`: listings can take a minute to
-/// include them, so the next update of the cache asks for them by ID
-/// (see `pending`), and `pending_count` says when they're all in.
-/// Nothing is noted without a cache; the next full listing will do.
-pub fn note_uploaded(account: &str, ids: &[u64]) {
-    if !enabled() || account.is_empty() || ids.is_empty() {
+/// Note files just uploaded to `account` (as sent): listings can take a
+/// minute to include them, so the next update of the cache asks for them
+/// by ID (see `pending`) and lists them meanwhile as uploaded (see
+/// `provisional`). Nothing is noted without a cache; the next full
+/// listing will do.
+pub fn note_uploaded(account: &str, items: &[CachedItem]) {
+    if !enabled() || account.is_empty() || items.is_empty() {
         return;
     }
     let Some(mut cache) = load(account) else {
         return;
     };
+    if note(&mut cache, items, crate::config::now_unix()) {
+        save(&cache);
+    }
+}
+
+/// `note_uploaded` on a loaded cache; whether anything was added.
+fn note(cache: &mut MediaCache, items: &[CachedItem], now: u64) -> bool {
     let mut known: std::collections::HashSet<u64> = cache
         .media
         .iter()
         .map(|m| m.id)
         .chain(cache.pending.iter().map(|(id, _)| *id))
         .collect();
-    let now = crate::config::now_unix();
-    let before = cache.pending.len();
-    for &id in ids {
-        if known.insert(id) {
-            cache.pending.push((id, now));
+    let mut added = false;
+    for item in items {
+        if known.insert(item.id) {
+            cache.pending.push((item.id, now));
+            cache.provisional.push(item.clone());
+            added = true;
         }
     }
-    if cache.pending.len() > before {
-        save(&cache);
-    }
+    added
 }
 
 /// How many files the cache of `account` is still waiting for the server
-/// to return (0 without a cache).
+/// to return without knowing what they are (0 without a cache). Files
+/// this CLI uploaded aren't counted: it lists them as uploaded.
 pub fn pending_count(account: &str) -> usize {
     if !enabled() || account.is_empty() {
         return 0;
     }
-    load(account).map_or(0, |c| c.pending.len())
+    load(account).map_or(0, |c| unknown_pending(&c))
+}
+
+fn unknown_pending(cache: &MediaCache) -> usize {
+    cache
+        .pending
+        .iter()
+        .filter(|(id, _)| !cache.provisional.iter().any(|p| p.id == *id))
+        .count()
+}
+
+/// The IDs of files uploaded by this CLI that the server doesn't list yet.
+pub fn provisional_ids(account: &str) -> Vec<u64> {
+    if !enabled() || account.is_empty() {
+        return Vec::new();
+    }
+    load(account).map_or_else(Vec::new, |c| {
+        c.provisional
+            .iter()
+            .filter(|p| c.pending.iter().any(|(id, _)| *id == p.id))
+            .map(|p| p.id)
+            .collect()
+    })
 }
 
 /// Save the cache. It is only a speed-up, so failing to save it isn't an
@@ -144,5 +181,38 @@ pub fn clear() -> std::io::Result<()> {
     match path() {
         Some(path) if path.exists() => std::fs::remove_file(path),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: u64) -> CachedItem {
+        CachedItem {
+            id,
+            name: Some(format!("f{id}.txt")),
+            folderid: Some(9),
+            size: Some(3),
+            date: Some(1),
+            creationdate: Some(1),
+            modificationdate: Some(1),
+        }
+    }
+
+    #[test]
+    fn test_note_uploaded_is_provisional() {
+        let mut cache = MediaCache::new("600", 0, vec![item(1)]);
+        // A file already listed isn't noted again; a new one is, both as
+        // pending and as what was sent.
+        assert!(note(&mut cache, &[item(1), item(2)], 50));
+        assert_eq!(cache.pending, vec![(2, 50)]);
+        assert_eq!(cache.provisional, vec![item(2)]);
+        assert!(!note(&mut cache, &[item(2)], 60));
+        // Uploaded here: not waited for. Reported by the change log only:
+        // waited for.
+        assert_eq!(unknown_pending(&cache), 0);
+        cache.pending.push((3, 70));
+        assert_eq!(unknown_pending(&cache), 1);
     }
 }

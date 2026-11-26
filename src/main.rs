@@ -449,8 +449,9 @@ enum Commands {
         #[arg(value_enum)]
         kind: ops::MediaKind,
 
-        /// Print JSON instead of a list (with each file's thumbnails and
-        /// location, and a song's duration)
+        /// Print JSON instead of a list (with each file's thumbnails,
+        /// location, a song's duration, and a signed URL that opens the
+        /// file without the session for a while: keep the output private)
         #[arg(long)]
         json: bool,
     },
