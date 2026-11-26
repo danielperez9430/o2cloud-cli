@@ -2,6 +2,22 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.15.4] — 2026-11-26
+
+### Security
+- A failed request (a timeout, a cut connection) printed its full URL in
+  the error message, and with `O2CLOUD_TRACE=1` in the trace: for SAPI
+  requests that includes the session's `validationkey`, and for
+  downloads a signed link to the file. Those messages end up in logs
+  people attach to bug reports. Errors no longer carry the URL. If you
+  posted such a log, log out and in again (`o2cloud logout`, then
+  `o2cloud login`) to end that session.
+
+### Changed
+- The message when a session expires in the middle of a command now
+  starts with "Session expired", the words apps look for (the Tauri app
+  didn't notice it and didn't ask to log in again).
+
 ## [0.15.3] — 2026-11-26
 
 ### Fixed
