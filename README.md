@@ -90,12 +90,12 @@ $ o2cloud upload-dir ./holidays --folder 12345678
 | 🚪 `logout` | Remove the stored session |
 | 📂 `ls [folder]` | List a folder (`-t` tree, `-a` every file, `-l` dates, `-s` sort, `-n` filter, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <text>` | Search files and folders by name |
-| ⬆️ `upload <file>` | Upload a file (`--folder <id>` to choose where, `--on-conflict` for a file already there with another size) |
+| ⬆️ `upload <file>… [/folder]` | Upload files (the last argument, or `--folder`, says where: an ID or a path like `/Photos/2024`; `--on-conflict` for a file already there with another size) |
 | 📁 `upload-dir <dir>` | Upload a folder and everything in it (`-j <n>` files at a time, default 2; `--ext jpg,mp4` for only those extensions; `--update` to also replace files changed locally; `--dry-run` to only see what it would do) |
 | 🗜️ `upload-zip <dir>` | Zip a folder and upload the `.zip` |
 | ⬇️ `download <file>` | Download a file (`-o` to choose the local path) |
-| 📥 `download-dir <folder>` | Download a folder and everything in it, or `/` for the whole account (`-o <dir>`, `-j <n>`, `--skip-existing` to resume, `--ext`, `--dry-run`) |
-| 🗑️ `rm <file or folder>` | Move to the trash (`-r` for folders, `-y` to skip confirmation) |
+| 📥 `download-dir <folder>` | Download a folder and everything in it, or `/` for the whole account (`-o <dir>`, `-j <n>`, `--ext`, `--dry-run`) |
+| 🗑️ `rm <file or folder>…` | Move to the trash (one or more; `-r` for folders, `-y` to skip confirmation) |
 | 🔗 `share <file or folder>` | Create a public link and print its URL |
 | 📋 `shares` | List shared folders |
 | 🚫 `unshare <folder>` | Remove a folder's public link |

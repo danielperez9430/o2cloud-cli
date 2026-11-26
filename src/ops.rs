@@ -1696,6 +1696,25 @@ fn needs_listing(opts: &UploadOptions, largest_file: u64) -> bool {
     opts.skip_existing || opts.update || opts.dry_run || largest_file > opts.part_size
 }
 
+/// The folder `--folder` (or a destination argument) names: an ID as
+/// given, or a path (`/Photos/2024`) looked up. `None` for none given.
+pub async fn folder_arg(
+    client: &O2Client,
+    auth: &AuthConfig,
+    arg: Option<&str>,
+) -> Result<Option<u64>, O2Error> {
+    let Some(arg) = arg else {
+        return Ok(None);
+    };
+    if let Ok(id) = arg.parse::<u64>() {
+        return Ok(Some(id));
+    }
+    let folders = client.get_all_folders(auth).await?;
+    let folder_name: HashMap<u64, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    resolve_target(Some(arg.to_string()), &folders, &folder_name).map(Some)
+}
+
 /// The root folder's ID.
 async fn root_folder_id(client: &O2Client, auth: &AuthConfig) -> Result<u64, O2Error> {
     let folders = client.get_all_folders(auth).await?;
@@ -1706,14 +1725,16 @@ async fn root_folder_id(client: &O2Client, auth: &AuthConfig) -> Result<u64, O2E
         .ok_or_else(|| O2Error::NotFound("Root folder not found".into()))
 }
 
-/// Upload a local file to O2 Cloud.
+/// Upload a local file to O2 Cloud. Its `--json` entry (also a `file`
+/// event with `--json-lines`) goes to `entries`, also when it ends in a
+/// conflict (then with the error after it).
 pub async fn upload_file(
     client: &O2Client,
     auth: &AuthConfig,
     local_path: &Path,
     folder_id: Option<u64>,
     opts: &UploadOptions,
-    json: bool,
+    entries: &mut Vec<serde_json::Value>,
 ) -> Result<(), O2Error> {
     // Read file metadata
     let metadata = tokio::fs::metadata(local_path).await.map_err(|e| {
@@ -1740,15 +1761,18 @@ pub async fn upload_file(
         Some(id) => id,
         None => root_folder_id(client, auth).await?,
     };
-    crate::events::emit(
-        "start",
-        serde_json::json!({
-            "command": "upload", "files": 1, "bytes": size,
-            "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
-        }),
-    );
     let (existing, mdates) = if needs_listing(opts, size) {
-        let media = client.get_folder_media(folder_id, auth).await?;
+        // Uploads of the last minutes may not be in the folder's listing
+        // yet: then the account's (from the cache), once they show up, so
+        // a file sent a moment ago isn't sent again as `name (1)`.
+        let media = if crate::cache::pending_count(&auth.msisdn) > 0 {
+            let (all, _) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
+            all.into_iter()
+                .filter(|m| m.folderid == Some(folder_id))
+                .collect()
+        } else {
+            client.get_folder_media(folder_id, auth).await?
+        };
         let mdates: HashMap<u64, u64> = media
             .iter()
             .filter_map(|m| m.modificationdate.map(|d| (m.id, d)))
@@ -1806,19 +1830,19 @@ pub async fn upload_file(
             }
             OnConflict::Skip => {
                 crate::info!("≠ {} is already there with another size: left alone", name);
-                if json || crate::events::on() {
+                {
                     out["action"] = "differs".into();
                     if *parts {
                         out["parts"] = cloud.clone().into();
                     } else {
                         out["id"] = cloud.first().copied().into();
                     }
-                    output_entry(json, &out);
+                    output_entry(entries, out);
                 }
                 return Ok(());
             }
             _ => {
-                if json || crate::events::on() {
+                {
                     out["action"] = "conflict".into();
                     out["modified"] = format_date_iso(Some(local_ms));
                     let mut there = serde_json::json!({
@@ -1831,7 +1855,7 @@ pub async fn upload_file(
                         there["id"] = cloud.first().copied().into();
                     }
                     out["cloud"] = there;
-                    output_entry(json, &out);
+                    output_entry(entries, out);
                 }
                 return Err(O2Error::Conflict(format!(
                     "this folder already has {} with another size ({} there, {} here): not \
@@ -1907,7 +1931,7 @@ pub async fn upload_file(
             );
         }
     }
-    if json || crate::events::on() {
+    {
         let mut out = serde_json::json!({
             "name": name,
             "folderid": folder_id,
@@ -1923,26 +1947,22 @@ pub async fn upload_file(
         if let Some(old) = replaced {
             out["action"] = "updated".into();
             out["replaced"] = old.into();
-        } else if crate::events::on() {
+        } else {
             out["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
         }
         if let Some(sha) = sha256 {
             out["sha256"] = sha.into();
         }
-        output_entry(json, &out);
-        crate::events::emit("summary", serde_json::json!({ "files": 1 }));
+        output_entry(entries, out);
     }
     Ok(())
 }
 
-/// A single command's result: printed with `--json`, or as a `file`
-/// event with `--json-lines`.
-fn output_entry(json: bool, entry: &serde_json::Value) {
-    if crate::events::on() {
-        crate::events::emit("file", entry.clone());
-    } else if json {
-        print_json(entry);
-    }
+/// A file's result: a `file` event with `--json-lines`, and kept for
+/// `--json`.
+fn output_entry(entries: &mut Vec<serde_json::Value>, entry: serde_json::Value) {
+    crate::events::emit("file", entry.clone());
+    entries.push(entry);
 }
 
 // ------------------------------------------------------------------
@@ -3099,7 +3119,101 @@ async fn zip_and_upload(
         format_size(total_size)
     );
 
-    upload_file(client, auth, tmp_zip, folder_id, opts, json).await
+    upload_files(
+        client,
+        auth,
+        &[tmp_zip.to_path_buf()],
+        folder_id,
+        opts,
+        json,
+        "upload-zip",
+    )
+    .await
+}
+
+/// Upload `files` to `folder_id` one after another (`upload`, and the zip
+/// of `upload-zip`), going on past a failure. With `--json` the result is
+/// one entry for one file, a list for more; with `--json-lines`, events.
+/// Ends with the first conflict or failure's error if there were any:
+/// a failure as `Partial` when some files went up.
+pub async fn upload_files(
+    client: &O2Client,
+    auth: &AuthConfig,
+    files: &[PathBuf],
+    folder_id: Option<u64>,
+    opts: &UploadOptions,
+    json: bool,
+    command: &str,
+) -> Result<(), O2Error> {
+    let bytes: u64 = files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .sum();
+    crate::events::emit(
+        "start",
+        serde_json::json!({
+            "command": command, "files": files.len(), "bytes": bytes,
+            "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
+        }),
+    );
+    let mut entries = Vec::new();
+    let (mut failed, mut conflicts, mut first_error) = (0usize, 0usize, None);
+    for file in files {
+        let before = entries.len();
+        match upload_file(client, auth, file, folder_id, opts, &mut entries).await {
+            Ok(()) => {}
+            Err(O2Error::SessionExpired) => {
+                first_error = Some(O2Error::SessionExpired);
+                break;
+            }
+            Err(e) => {
+                if matches!(e, O2Error::Conflict(_)) {
+                    conflicts += 1;
+                } else {
+                    failed += 1;
+                    if files.len() > 1 {
+                        crate::warn!("  ⚠ {}: {}", file.display(), e);
+                    }
+                }
+                // A failure says so in its entry; a conflict already has one.
+                if entries.len() == before {
+                    let entry = serde_json::json!({
+                        "local": file.display().to_string(),
+                        "name": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "action": "failed",
+                        "error": e.to_string(),
+                    });
+                    crate::events::emit("file", entry.clone());
+                    entries.push(entry);
+                }
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    if json && !crate::events::on() {
+        match entries.as_slice() {
+            [one] if files.len() == 1 => print_json(one),
+            all => print_json(&serde_json::Value::Array(all.to_vec())),
+        }
+    }
+    crate::events::emit(
+        "summary",
+        serde_json::json!({ "files": files.len(), "conflicts": conflicts, "failed": failed }),
+    );
+    match first_error {
+        None => Ok(()),
+        Some(e) if files.len() == 1 || matches!(e, O2Error::SessionExpired) => Err(e),
+        Some(_) if failed > 0 => Err(O2Error::Partial(format!(
+            "{} of {} files failed to upload",
+            failed,
+            files.len()
+        ))),
+        Some(_) => Err(O2Error::Conflict(format!(
+            "{} file(s) have another size than in the cloud and weren't uploaded",
+            conflicts
+        ))),
+    }
 }
 
 /// Write a complete zip archive of `local_dir` to `zip_path`, returning
@@ -3349,11 +3463,13 @@ pub async fn download_file(
         } else {
             out["id"] = ids[0].into();
         }
+        out["action"] = "downloaded".into();
         if crate::events::on() {
-            out["action"] = "downloaded".into();
+            crate::events::emit("file", out);
+            crate::events::emit("summary", serde_json::json!({ "files": 1 }));
+        } else {
+            print_json(&out);
         }
-        output_entry(json, &out);
-        crate::events::emit("summary", serde_json::json!({ "files": 1 }));
     }
     Ok(())
 }
