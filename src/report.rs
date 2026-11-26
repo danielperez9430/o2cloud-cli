@@ -292,7 +292,7 @@ impl Names {
                     // A crash report's command line.
                     let args: Vec<&str> = args.split_whitespace().collect();
                     add_args(&args, &mut found);
-                } else {
+                } else if !is_backtrace_line(line) {
                     paths_in_message(line, &mut found);
                 }
             }
@@ -411,15 +411,8 @@ fn add_args(args: &[&str], found: &mut std::collections::BTreeSet<String>) {
 /// quotes ('…' or "…"), and from a `/` that starts a word to the end of
 /// the line or a quote (paths can have spaces). Not URLs (`https://…`).
 fn paths_in_message(msg: &str, found: &mut std::collections::BTreeSet<String>) {
-    for quote in ['\'', '"'] {
-        let mut parts = msg.split(quote);
-        parts.next();
-        while let Some(inside) = parts.next() {
-            if !inside.is_empty() && inside.len() < 300 {
-                found.insert(inside.to_string());
-            }
-            parts.next();
-        }
+    for quoted in quoted_parts(msg) {
+        found.insert(quoted);
     }
     for line in msg.lines() {
         let mut start = None;
@@ -439,6 +432,46 @@ fn paths_in_message(msg: &str, found: &mut std::collections::BTreeSet<String>) {
             }
         }
     }
+}
+
+/// A crash report's backtrace line (`  12: std::panicking::…` or
+/// `at /rustc/…/panicking.rs:57`): code paths, not the user's names.
+fn is_backtrace_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("at ")
+        || t.split_once(": ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// What's between quotes in `msg` ('…' or "…"). A quote opens only at
+/// the start, after a space or `(`, and closes only before something
+/// that isn't a letter or digit, so an apostrophe (`couldn't`,
+/// `Ana's photos`) doesn't open or close one.
+fn quoted_parts(msg: &str) -> Vec<String> {
+    let chars: Vec<char> = msg.chars().collect();
+    let mut out = Vec::new();
+    let mut open: Option<(char, usize)> = None;
+    for (i, &c) in chars.iter().enumerate() {
+        if c != '\'' && c != '"' {
+            continue;
+        }
+        let before = i.checked_sub(1).map(|j| chars[j]);
+        let after = chars.get(i + 1).copied();
+        match open {
+            Some((q, start)) if q == c && !after.is_some_and(|a| a.is_alphanumeric()) => {
+                let inside: String = chars[start..i].iter().collect();
+                if !inside.is_empty() && inside.len() < 300 {
+                    out.push(inside);
+                }
+                open = None;
+            }
+            None if before.is_none_or(|b| b.is_whitespace() || b == '(') => {
+                open = Some((c, i + 1));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A command-line argument's name, if it holds one: a value, or the value
@@ -505,6 +538,25 @@ mod tests {
             assert!(!out.contains(name), "{name} in {out}");
         }
         assert!(out.contains("cloud.o2online.es/sapi/media"), "{out}");
+    }
+
+    #[test]
+    fn test_quotes_and_backtraces() {
+        assert_eq!(
+            quoted_parts("Couldn't find 'Nominas Ana.pdf' in the cloud"),
+            ["Nominas Ana.pdf"]
+        );
+        assert_eq!(
+            quoted_parts("'Ana's photos' is ambiguous"),
+            ["Ana's photos"]
+        );
+        assert_eq!(quoted_parts(r#"name "a.jpg" (b's) 'x'"#), ["a.jpg", "x"]);
+        let crash = "args: upload Ana.jpg\npanicked at src/ops.rs:12:3\n   0: std::panicking::begin_panic\n             at /rustc/abc/library/std/src/panicking.rs:57:5";
+        let names = Names::collect([crash].into_iter(), "salt");
+        let out = names.text(crash);
+        assert!(!out.contains("Ana"), "{out}");
+        assert!(out.contains("std::panicking::begin_panic"), "{out}");
+        assert!(out.contains("library/std/src/panicking.rs"), "{out}");
     }
 
     #[test]

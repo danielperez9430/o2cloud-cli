@@ -145,7 +145,20 @@ impl Drop for Bar {
 pub fn start(label: &'static str, files: u64, bytes: u64) -> Bar {
     use std::io::IsTerminal;
     let stop = Arc::new(AtomicBool::new(false));
-    if level() == 0 || files == 0 {
+    if files == 0 {
+        return Bar { stop };
+    }
+    if level() == 0 {
+        // No bar with -q, but the run's log is still marked in use.
+        let stopped = stop.clone();
+        tokio::spawn(async move {
+            while !stopped.load(Ordering::Relaxed) {
+                tokio::time::sleep(PLAIN_EVERY).await;
+                if !stopped.load(Ordering::Relaxed) {
+                    crate::log::heartbeat();
+                }
+            }
+        });
         return Bar { stop };
     }
     let totals = Arc::new(Totals {
