@@ -69,6 +69,7 @@ pub fn text(text: &str) -> String {
         }
     }
     out = urls(&out);
+    out = signed_paths(&out);
     // Bearer tokens first: `Authorization: Bearer <token>` has two words.
     out = bearer(&out);
     for key in SECRET_KEYS {
@@ -95,6 +96,32 @@ pub fn url(url: &url::Url) -> String {
         .map(|(_, v)| format!("?action={}", v))
         .unwrap_or_default();
     format!("{}://{}{}{}", url.scheme(), host, path, action)
+}
+
+/// O2's relative signed links (`/sapi/download/…?…&k=…`, as its media
+/// listings give them) with their query dropped: it opens the file.
+fn signed_paths(text: &str) -> String {
+    const START: &str = "/sapi/download/";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(START) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ','))
+            .unwrap_or(tail.len());
+        let link = &tail[..end];
+        match link.split_once('?') {
+            Some((path, _)) => {
+                out.push_str(path);
+                out.push_str("?<signed>");
+            }
+            None => out.push_str(link),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Every `http://` or `https://` URL in `text` through `url`.
@@ -274,6 +301,19 @@ pub fn pseudonym(path: &str, salt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_relative_signed_links() {
+        let body =
+            r#"{"url":"/sapi/download/picture?action=get&k=SECRETKEY123&node=n9","name":"a.jpg"}"#;
+        let out = text(body);
+        assert!(
+            !out.contains("SECRETKEY123") && !out.contains("node=n9"),
+            "{out}"
+        );
+        assert!(out.contains("/sapi/download/picture?<signed>"), "{out}");
+    }
+
     use super::*;
 
     #[test]

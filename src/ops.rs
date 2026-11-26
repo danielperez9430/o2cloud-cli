@@ -1283,6 +1283,9 @@ struct Uploaded {
     /// Not uploaded: an empty image, which O2 Cloud rejects (see
     /// `is_empty_image`).
     empty: bool,
+    /// The pieces sent this time, as sent: listings show them before the
+    /// server does (see `cache::note_uploaded`).
+    sent: Vec<crate::cache::CachedItem>,
 }
 
 /// Image types O2 Cloud rejects when the file is empty (`MED-1050`, or
@@ -1336,7 +1339,15 @@ async fn upload_local_file(
         parts: if split { pieces.len() } else { 0 },
         skipped: 0,
         empty: false,
+        sent: Vec::new(),
     };
+    let to_ms = |t: std::time::SystemTime| {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64)
+    };
+    let modified_ms = modified.and_then(to_ms);
+    let now_ms = to_ms(std::time::SystemTime::now());
     for (i, (piece_name, offset, len)) in pieces.iter().enumerate() {
         let already = opts
             .skip_existing
@@ -1377,6 +1388,15 @@ async fn upload_local_file(
             Ok(id) => {
                 uploaded.ids.push(id);
                 done.push(id);
+                uploaded.sent.push(crate::cache::CachedItem {
+                    id,
+                    name: Some(piece_name.clone()),
+                    folderid: Some(folder_id),
+                    size: Some(*len),
+                    date: now_ms,
+                    creationdate: modified_ms.or(now_ms),
+                    modificationdate: modified_ms.or(now_ms),
+                });
             }
             // Say what is already up, so the upload can be resumed.
             Err(e) if split && !uploaded.ids.is_empty() => {
@@ -2128,7 +2148,7 @@ pub async fn upload_file(
     .await?;
 
     drop(bar);
-    crate::cache::note_uploaded(&auth.msisdn, &uploaded.ids);
+    crate::cache::note_uploaded(&auth.msisdn, &uploaded.sent);
     let all_skipped = uploaded.skipped == uploaded.ids.len();
     let done = if all_skipped {
         "Already uploaded"
@@ -2522,6 +2542,7 @@ pub async fn upload_dir(
                             parts: 0,
                             skipped: 0,
                             empty: true,
+                            sent: Vec::new(),
                         };
                         return (i, result, Ok(FileOutcome::Uploaded(empty)));
                     }
@@ -2728,7 +2749,7 @@ pub async fn upload_dir(
     let (mut empty_images, mut updated, mut older, mut differs) = (0usize, 0usize, 0usize, 0usize);
     let mut conflicts = 0usize;
     // What this run put in the cloud, for the next listing (see below).
-    let mut uploaded_ids: Vec<u64> = Vec::new();
+    let mut uploaded_ids: Vec<crate::cache::CachedItem> = Vec::new();
     let mut planned: HashMap<&'static str, usize> = HashMap::new();
     let results: Vec<serde_json::Value> = results
         .into_iter()
@@ -2741,11 +2762,11 @@ pub async fn upload_dir(
                     } else {
                         succeeded += 1;
                     }
-                    uploaded_ids.extend(&up.ids);
+                    uploaded_ids.extend(up.sent.iter().cloned());
                 }
                 Ok(FileOutcome::Updated(up, _)) => {
                     updated += 1;
-                    uploaded_ids.extend(&up.ids);
+                    uploaded_ids.extend(up.sent.iter().cloned());
                 }
                 Ok(FileOutcome::Older(_)) => older += 1,
                 Ok(FileOutcome::Differs(..)) => differs += 1,
@@ -3421,7 +3442,10 @@ pub async fn upload_files(
             );
         }
         Some(all)
-    } else if repeated {
+    } else if repeated || !crate::cache::provisional_ids(&auth.msisdn).is_empty() {
+        // Files uploaded moments ago aren't in the folder's own listing
+        // yet, only in the full one (as uploaded): checked against it, a
+        // second upload of one is a conflict, not a twin.
         Some(client.get_all_media(auth).await?)
     } else {
         None

@@ -1349,8 +1349,16 @@ impl O2Client {
         let mut fresh: std::collections::HashMap<u64, crate::cache::CachedItem> =
             Default::default();
         for batch in wanted.chunks(MEDIA_PAGE_SIZE) {
-            for item in self.get_media_by_ids(batch, auth).await? {
-                fresh.insert(item.id, item.to_cached());
+            // A file still being validated (MED-1017) is just still
+            // pending: no waiting for it here.
+            match self.media_by_ids(batch, auth, false).await {
+                Ok(items) => {
+                    for item in items {
+                        fresh.insert(item.id, item.to_cached());
+                    }
+                }
+                Err(e) if is_validating(&e) => {}
+                Err(e) => return Err(e),
             }
         }
         // Drop deleted files and the old version of changed ones; those
@@ -1369,6 +1377,11 @@ impl O2Client {
                 cache.media.push(item);
             }
         }
+        // What this CLI uploaded stays listed as sent until the server
+        // returns it (or gives up on it, and everything is listed again).
+        let pending: std::collections::HashSet<u64> =
+            cache.pending.iter().map(|(id, _)| *id).collect();
+        cache.provisional.retain(|p| pending.contains(&p.id));
         cache.cursor = changes.requesttime;
         crate::cache::save(&cache);
         crate::log::info(
@@ -1388,7 +1401,12 @@ impl O2Client {
                 cache.pending.len()
             );
         }
-        Ok(cache.media.iter().map(MediaItem::from_cached).collect())
+        Ok(cache
+            .media
+            .iter()
+            .chain(&cache.provisional)
+            .map(MediaItem::from_cached)
+            .collect())
     }
 
     /// What changed in the account since `from` (Unix ms, server time):
@@ -1555,6 +1573,17 @@ impl O2Client {
         media_ids: &[u64],
         auth: &AuthConfig,
     ) -> Result<Vec<MediaItem>, O2Error> {
+        self.media_by_ids(media_ids, auth, true).await
+    }
+
+    /// `get_media_by_ids`; with `retry`, a file still being validated
+    /// (MED-1017) is waited for.
+    async fn media_by_ids(
+        &self,
+        media_ids: &[u64],
+        auth: &AuthConfig,
+        retry: bool,
+    ) -> Result<Vec<MediaItem>, O2Error> {
         #[derive(Deserialize)]
         struct MediaData {
             #[serde(default)]
@@ -1567,7 +1596,7 @@ impl O2Client {
                 "fields": ["name", "size", "folderid", "url", "creationdate", "modificationdate"]
             }
         });
-        let raw = retry_while_validating(|| async {
+        let request = || async {
             let url = format!("{}/sapi/media", BASE_URL);
             let req = self
                 .client
@@ -1593,8 +1622,12 @@ impl O2Client {
                 return Err(O2Error::Api(format!("Get media failed: {}", err)));
             }
             Ok(raw)
-        })
-        .await?;
+        };
+        let raw = if retry {
+            retry_while_validating(request).await?
+        } else {
+            request().await?
+        };
         let data: RawResponse<MediaData> = parse_json(&raw, "media")?;
         Ok(data.data.media)
     }
@@ -1664,8 +1697,11 @@ impl O2Client {
             "video" => "videos",
             other => return Err(O2Error::Invalid(format!("unknown media kind '{}'", other))),
         };
-        let mut all = Vec::new();
-        loop {
+        let mut all: Vec<(MediaItem, MediaDetails)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // At most 2,000 pages (a million files): a server that ignored the
+        // offset would otherwise be asked forever.
+        for _ in 0..2000 {
             let url = format!("{}/sapi/media/{}", BASE_URL, kind);
             let offset = all.len().to_string();
             let req = self.client.get(&url).timeout(REQUEST_TIMEOUT).query(&[
@@ -1689,13 +1725,23 @@ impl O2Client {
                 return Err(O2Error::Api(format!("Get {} failed: {}", key, err)));
             }
             let data: RawResponse<serde_json::Value> = parse_json(&raw, key)?;
-            let page = detailed_items(data.data.get(key))?;
-            let done = page.len() < PAGE;
-            all.extend(page);
-            if done {
+            let Some(list) = data.data.get(key) else {
+                return Err(O2Error::Parse(format!("no '{}' in the response", key)));
+            };
+            let page = detailed_items(Some(list))?;
+            let got = page.len();
+            // Files moving between pages while listing: each once.
+            let new: Vec<_> = page
+                .into_iter()
+                .filter(|(m, _)| seen.insert(m.id))
+                .collect();
+            let stalled = new.is_empty();
+            all.extend(new);
+            if got < PAGE || stalled {
                 return Ok(all);
             }
         }
+        Ok(all)
     }
 
     /// The account's labels of these `origins` (see `Label`): albums,
@@ -2785,24 +2831,54 @@ pub struct MediaDetails {
     /// `picture`, `video`, `audio` or `file`.
     #[serde(default)]
     pub mediatype: Option<String>,
+    /// Values are strings as O2 sends them; anything else is kept as is
+    /// rather than failing the whole item.
     #[serde(default)]
-    pub exif: HashMap<String, String>,
-    #[serde(default)]
+    pub exif: HashMap<String, serde_json::Value>,
+    #[serde(default, deserialize_with = "lenient_thumbnails")]
     pub thumbnails: Vec<Thumbnail>,
-    /// For music, a JSON string with its `duration` (seconds) among others.
+    /// For music, a JSON string with its `duration` (milliseconds) among
+    /// others.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
 }
 
 /// A thumbnail of a photo or video. Its URL is signed: it opens without
 /// the session, for a while.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Thumbnail {
-    #[serde(default)]
     pub w: u32,
-    #[serde(default)]
     pub h: u32,
     pub url: String,
+}
+
+/// Thumbnails as O2 sends them, sizes as numbers or strings; one without
+/// a URL is left out.
+fn lenient_thumbnails<'de, D>(deserializer: D) -> Result<Vec<Thumbnail>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let number = |v: Option<&serde_json::Value>| -> u32 {
+        v.and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok()))
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    Ok(value
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|t| {
+                    Some(Thumbnail {
+                        w: number(t.get("w")),
+                        h: number(t.get("h")),
+                        url: t.get("url")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 impl Thumbnail {
@@ -2814,25 +2890,19 @@ impl Thumbnail {
 
 /// An O2 URL to open: O2 gives most as paths on its own server.
 pub fn absolute_url(url: &str) -> String {
-    if url.starts_with("http") {
-        url.to_string()
-    } else {
-        format!("{}{}", BASE_URL, url)
-    }
+    url::Url::parse(BASE_URL)
+        .and_then(|base| base.join(url))
+        .map(String::from)
+        .unwrap_or_else(|_| format!("{}/{}", BASE_URL, url.trim_start_matches('/')))
 }
 
 impl MediaDetails {
     /// Where the photo was taken, from its EXIF GPS data: (latitude,
     /// longitude) in degrees.
     pub fn location(&self) -> Option<(f64, f64)> {
-        let lat = gps_degrees(
-            self.exif.get("GPS Latitude")?,
-            self.exif.get("GPS Latitude Ref"),
-        )?;
-        let lon = gps_degrees(
-            self.exif.get("GPS Longitude")?,
-            self.exif.get("GPS Longitude Ref"),
-        )?;
+        let text = |key: &str| self.exif.get(key).and_then(serde_json::Value::as_str);
+        let lat = gps_degrees(text("GPS Latitude")?, text("GPS Latitude Ref"))?;
+        let lon = gps_degrees(text("GPS Longitude")?, text("GPS Longitude Ref"))?;
         let valid = (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon);
         // 0,0 is what some cameras write when they had no fix.
         (valid && (lat, lon) != (0.0, 0.0)).then_some((lat, lon))
@@ -2867,7 +2937,18 @@ impl MediaDetails {
 /// EXIF GPS degrees as O2 gives them, `40° 25' 1.2" N` or `-3° 42' 3" W`,
 /// in signed decimal degrees. O2 writes both a minus sign and the
 /// hemisphere for the west: the sign comes from either, once.
-fn gps_degrees(value: &str, reference: Option<&String>) -> Option<f64> {
+fn gps_degrees(value: &str, reference: Option<&str>) -> Option<f64> {
+    // Decimal commas, rationals (`40/1`) and exponents aren't O2's format:
+    // better no location than a wrong one.
+    let chars: Vec<char> = value.chars().collect();
+    let exponent = chars.windows(3).any(|w| {
+        w[0].is_ascii_digit()
+            && matches!(w[1], 'e' | 'E')
+            && (w[2].is_ascii_digit() || matches!(w[2], '+' | '-'))
+    });
+    if value.contains([',', '/']) || exponent {
+        return None;
+    }
     let numbers: Vec<f64> = value
         .split(|c: char| !(c.is_ascii_digit() || c == '.'))
         .filter(|part| !part.is_empty())
@@ -2877,13 +2958,23 @@ fn gps_degrees(value: &str, reference: Option<&String>) -> Option<f64> {
     let (deg, min, sec) = match numbers.as_slice() {
         [d] => (*d, 0.0, 0.0),
         [d, m] => (*d, *m, 0.0),
-        [d, m, s, ..] => (*d, *m, *s),
-        [] => return None,
+        [d, m, s] => (*d, *m, *s),
+        _ => return None,
     };
+    if min >= 60.0 || sec >= 60.0 {
+        return None;
+    }
     let magnitude = deg + min / 60.0 + sec / 3600.0;
-    let reference = reference.map(|r| r.trim().to_ascii_uppercase());
-    let south_or_west = matches!(reference.as_deref(), Some("S") | Some("W"))
-        || value.trim_end().ends_with(['S', 'W']);
+    // `S`, `W`, `South`, `west`…: by its first letter.
+    let first = |s: &str| s.trim().chars().next().map(|c| c.to_ascii_uppercase());
+    let trailing = value
+        .trim_end()
+        .chars()
+        .last()
+        .filter(char::is_ascii_alphabetic)
+        .map(|c| c.to_ascii_uppercase());
+    let south_or_west = matches!(reference.and_then(first), Some('S') | Some('W'))
+        || matches!(trailing, Some('S') | Some('W'));
     let negative = south_or_west || value.trim_start().starts_with('-');
     Some(if negative { -magnitude } else { magnitude })
 }
@@ -2961,7 +3052,7 @@ fn detailed_items(
         .iter()
         .map(|item| {
             let media = MediaItem::deserialize(item)
-                .map_err(|e| O2Error::Api(format!("Unexpected media item: {}", e)))?;
+                .map_err(|e| O2Error::Parse(format!("Unexpected media item: {}", e)))?;
             let details = MediaDetails::deserialize(item).unwrap_or_default();
             Ok((media, details))
         })
@@ -2993,6 +3084,11 @@ where
         }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<u64>, E> {
             v.parse().map(Some).map_err(de::Error::custom)
+        }
+        // `null` as JSON sends it (`deserialize_any` calls this, not
+        // `visit_none`).
+        fn visit_unit<E: de::Error>(self) -> Result<Option<u64>, E> {
+            Ok(None)
         }
         fn visit_none<E: de::Error>(self) -> Result<Option<u64>, E> {
             Ok(None)
@@ -3066,7 +3162,8 @@ fn parse_json<T: serde::de::DeserializeOwned>(raw: &str, what: &str) -> Result<T
             "Failed to parse {}: {} — body: {}",
             what,
             e,
-            truncate_utf8(raw, 300)
+            // Media bodies carry signed links (`k=`): never in an error.
+            crate::redact::text(truncate_utf8(raw, 300))
         ))
     })
 }
@@ -3083,19 +3180,19 @@ mod tests {
 
     #[test]
     fn test_gps_degrees() {
-        let r = |s: &str| Some(s.to_string());
+        let r = |s: &'static str| Some(s);
         let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-6;
         assert!(close(
-            gps_degrees("40° 25' 1.20\" N", r("N").as_ref()),
+            gps_degrees("40° 25' 1.20\" N", r("N")),
             40.0 + 25.0 / 60.0 + 1.2 / 3600.0
         ));
         // O2 writes the west both as a minus sign and as W: west once.
         assert!(close(
-            gps_degrees("-3° 42' 3.00\" W", r("W").as_ref()),
+            gps_degrees("-3° 42' 3.00\" W", r("W")),
             -(3.0 + 42.0 / 60.0 + 3.0 / 3600.0)
         ));
         assert!(close(
-            gps_degrees("3° 42' 3.00\" W", r("W").as_ref()),
+            gps_degrees("3° 42' 3.00\" W", r("W")),
             -(3.0 + 42.0 / 60.0 + 3.0 / 3600.0)
         ));
         assert!(close(
@@ -3108,7 +3205,18 @@ mod tests {
         ));
         assert!(close(gps_degrees("12.5", None), 12.5));
         assert_eq!(gps_degrees("", None), None);
-        assert_eq!(gps_degrees("N", r("N").as_ref()), None);
+        assert_eq!(gps_degrees("N", r("N")), None);
+        // Not O2's format: no location rather than a wrong one.
+        assert_eq!(gps_degrees("3,7038", None), None);
+        assert_eq!(gps_degrees("40/1 25/1 12/10", None), None);
+        assert_eq!(gps_degrees("40° 61' 0\" N", None), None);
+        assert_eq!(gps_degrees("1 2 3 4", None), None);
+        assert_eq!(gps_degrees("1.5e2", None), None);
+        // East, written in the value as O2 does: not an exponent.
+        assert!(close(gps_degrees("2° 10' 12.00\" E", Some("E")), 2.17));
+        // A spelled-out or lowercase hemisphere.
+        assert!(close(gps_degrees("3° 30' 0\"", Some("West")), -3.5));
+        assert!(close(gps_degrees("3° 30' 0\" w", None), -3.5));
     }
 
     #[test]
@@ -3146,10 +3254,33 @@ mod tests {
         // A song's duration, from the JSON string O2 sends.
         let song: MediaDetails = serde_json::from_value(serde_json::json!({
             "mediatype": "audio",
-            "metadata": "{\"duration\":\"2240\",\"codecname\":\"mp3\"}"
+            "metadata": "{\"duration\":\"185000\",\"codecname\":\"mp3\"}"
         }))
         .unwrap();
-        assert_eq!(song.duration(), Some(2.24));
+        assert_eq!(song.duration(), Some(185.0));
+        // Odd fields don't blank the rest: a number in the EXIF data, sizes
+        // as strings, a thumbnail without a URL.
+        let odd = serde_json::json!({
+            "id": "5", "mediatype": "picture",
+            "exif": {"Exif Image Width": 4032, "GPS Latitude": "1° 0' 0\" N", "GPS Longitude": "2° 0' 0\" E"},
+            "thumbnails": [{"w": "320", "h": "240", "url": "/t"}, {"w": 1}]
+        });
+        let items = detailed_items(Some(&serde_json::json!([odd]))).unwrap();
+        let details = &items[0].1;
+        assert_eq!(details.mediatype.as_deref(), Some("picture"));
+        assert_eq!(details.location(), Some((1.0, 2.0)));
+        assert_eq!(details.thumbnails.len(), 1);
+        assert_eq!(details.thumbnails[0].w, 320);
+        // URLs: relative, absolute and without a slash.
+        assert_eq!(
+            absolute_url("/sapi/x?k=1"),
+            format!("{}/sapi/x?k=1", BASE_URL)
+        );
+        assert_eq!(
+            absolute_url("https://other.example/a"),
+            "https://other.example/a"
+        );
+        assert_eq!(absolute_url("sapi/x"), format!("{}/sapi/x", BASE_URL));
         // An item that isn't one: an error, not a panic.
         assert!(detailed_items(Some(&serde_json::json!([{"name": "x"}]))).is_err());
         assert!(detailed_items(None).unwrap().is_empty());

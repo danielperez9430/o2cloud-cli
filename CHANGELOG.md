@@ -17,9 +17,24 @@ All notable changes to o2cloud-cli will be documented in this file.
   1440 px). Thumbnail URLs are signed: they open without the session, for
   a while, so treat them as private.
 
+### Changed
+- A file shows up in `ls` (and `media`) as soon as it's uploaded, instead
+  of 10–60 s later when O2 Cloud lists it: the CLI keeps what it sent
+  until the server returns it. Uploading again right after no longer
+  waits for O2 Cloud to list the previous upload, and still sees it (a
+  conflict, or skipped), never uploading a twin.
+- Listing doesn't wait (up to 12 s) for a file O2 Cloud is still
+  validating: it stays listed as uploaded.
+- `labels --json`: a label's `thumbnail` and `location` come from its
+  cover, or its first photo if the cover is gone, for any kind of label.
+
 ### Fixed
 - `labels <label> --json` gave every file a `null` path: O2 Cloud sends no
   folder for files asked for by ID, so it now comes from the listing.
+  Files with no folder (the phone app's photos) get `/name`; `null` now
+  means a file not in the listing yet.
+- Error messages from a response that couldn't be read no longer carry
+  O2 Cloud's signed download links.
 
 ## [1.1.0] — 2026-11-26
 

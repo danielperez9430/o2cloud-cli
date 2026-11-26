@@ -104,20 +104,25 @@ async fn covers(
     auth: &AuthConfig,
     labels: &[Label],
 ) -> Result<HashMap<u64, MediaDetails>, O2Error> {
-    let photo_of: Vec<(u64, u64)> = labels
+    let mut photos: Vec<u64> = labels
         .iter()
-        .filter_map(|l| Some((l.id, l.coverid.or_else(|| l.items.first().copied())?)))
+        .flat_map(|l| l.coverid.into_iter().chain(l.items.first().copied()))
         .collect();
-    let photos: Vec<u64> = photo_of.iter().map(|(_, photo)| *photo).collect();
+    photos.sort_unstable();
+    photos.dedup();
     let mut details_of_photo = HashMap::new();
     for chunk in photos.chunks(1000) {
         for (media, details) in client.get_media_details_by_ids(chunk, auth).await? {
             details_of_photo.insert(media.id, details);
         }
     }
-    Ok(photo_of
-        .into_iter()
-        .filter_map(|(label, photo)| Some((label, details_of_photo.get(&photo)?.clone())))
+    Ok(labels
+        .iter()
+        .filter_map(|l| {
+            let cover = l.coverid.and_then(|id| details_of_photo.get(&id));
+            let first = l.items.first().and_then(|id| details_of_photo.get(id));
+            Some((l.id, cover.or(first)?.clone()))
+        })
         .collect())
 }
 
@@ -131,7 +136,18 @@ pub async fn list_labels(
     let mut labels = client.get_labels(kind.origins(), auth).await?;
     labels.sort_by_key(|l| std::cmp::Reverse(l.date.unwrap_or(0)));
     if json {
-        let covers = covers(client, auth, &labels).await?;
+        // Without covers the labels are still worth listing.
+        let covers = match covers(client, auth, &labels).await {
+            Ok(covers) => covers,
+            Err(e) => {
+                crate::log::warn(
+                    "labels",
+                    "covers not fetched",
+                    serde_json::json!({ "error": e.to_string() }),
+                );
+                HashMap::new()
+            }
+        };
         print_json(&serde_json::Value::Array(
             labels
                 .iter()
@@ -234,7 +250,7 @@ pub async fn show_label(
     for chunk in label.items.chunks(1000) {
         media.extend(client.get_media_details_by_ids(chunk, auth).await?);
     }
-    media.sort_by_key(|(m, _)| m.creationdate.unwrap_or(0));
+    media.sort_by_key(|(m, _)| m.creationdate.or(m.date).unwrap_or(0));
     let paths = Paths::new(client, auth).await?;
     if json {
         let files: Vec<serde_json::Value> = media
@@ -244,17 +260,17 @@ pub async fn show_label(
                     "id": m.id,
                     "name": m.name,
                     "size": m.size,
-                    "date": format_date_iso(m.creationdate),
+                    "date": format_date_iso(m.creationdate.or(m.date)),
                     "path": paths.of(m),
                 });
                 merge(&mut file, details_json(details));
                 file
             })
             .collect();
-        let cover = media
-            .iter()
-            .find(|(m, _)| Some(m.id) == label.coverid)
-            .or_else(|| media.first())
+        // Its cover, or its first photo as O2 lists them (as `labels`).
+        let by_id = |id: Option<u64>| media.iter().find(|(m, _)| Some(m.id) == id);
+        let cover = by_id(label.coverid)
+            .or_else(|| by_id(label.items.first().copied()))
             .map(|(_, d)| d);
         let mut out = label_json(&label, cover);
         out["files"] = files.into();
@@ -302,6 +318,7 @@ pub(crate) struct Paths {
     /// Each listed file's folder; `None` for the root (O2 sends no folder
     /// for files there).
     folder_of: HashMap<u64, Option<u64>>,
+    /// Every folder's path.
     dirs: HashMap<u64, String>,
 }
 
@@ -312,38 +329,57 @@ impl Paths {
         let folder_name: HashMap<u64, String> =
             folders.iter().map(|f| (f.id, f.name.clone())).collect();
         let tree = Tree::new(&folders, &folder_name, &[]);
-        let folder_of: HashMap<u64, Option<u64>> =
-            media.iter().map(|m| (m.id, m.folderid)).collect();
-        let dirs = folder_of
-            .values()
-            .flatten()
-            .map(|f| (*f, tree.path(*f)))
-            .collect();
+        let dirs = folders.iter().map(|f| (f.id, tree.path(f.id))).collect();
+        let folder_of = media.iter().map(|m| (m.id, m.folderid)).collect();
         Ok(Paths { folder_of, dirs })
     }
 
-    /// `m`'s path, if it is in the listing (a file uploaded moments ago
-    /// may not be yet).
+    /// `m`'s path: in its folder (`None` if that folder isn't known), at
+    /// the root if it has none, or `None` if it isn't in the listing yet
+    /// (uploaded elsewhere moments ago).
     pub(crate) fn of(&self, m: &MediaItem) -> Option<String> {
         let folder = match m.folderid {
             Some(folder) => Some(folder),
             None => *self.folder_of.get(&m.id)?,
         };
         let dir = match folder {
-            Some(folder) => self.dirs.get(&folder).map(String::as_str).unwrap_or("/"),
+            Some(folder) => self.dirs.get(&folder)?.as_str(),
             None => "/",
         };
         let name = m.name.as_deref().unwrap_or("?");
         Some(if dir == "/" {
             format!("/{}", name)
         } else {
-            format!("{}/{}", dir, name)
+            format!("{}/{}", dir.trim_end_matches('/'), name)
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_paths() {
+        let item = |id: u64, folder: Option<u64>| -> MediaItem {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": format!("f{id}.jpg"), "folder": folder
+            }))
+            .unwrap()
+        };
+        let paths = Paths {
+            folder_of: HashMap::from([(1, None), (2, Some(10)), (3, Some(11))]),
+            dirs: HashMap::from([(10, "/Fotos".to_string()), (11, "/Vacía".to_string())]),
+        };
+        // No folder: the root. Its own folder, or the listing's.
+        assert_eq!(paths.of(&item(1, None)).as_deref(), Some("/f1.jpg"));
+        assert_eq!(paths.of(&item(2, None)).as_deref(), Some("/Fotos/f2.jpg"));
+        // A folder with no other file in the listing.
+        assert_eq!(paths.of(&item(9, Some(11))).as_deref(), Some("/Vacía/f9.jpg"));
+        // A folder that isn't known, or a file not listed yet: no path.
+        assert_eq!(paths.of(&item(8, Some(99))), None);
+        assert_eq!(paths.of(&item(7, None)), None);
+    }
+
     use super::*;
 
     fn label(origin: &str) -> Label {
