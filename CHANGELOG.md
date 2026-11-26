@@ -27,8 +27,11 @@ See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
   stats and the logs of the last 3 runs, with file and folder names
   replaced by stand-ins (`--include-names` keeps them, `--stdout` prints
   it). Nothing is sent anywhere.
-- A log of each run (JSON lines, last 10 runs, 5 MB each) in the cache
-  folder, removed by `logout`; `O2CLOUD_LOG_FILE=0` turns it off. Errors
+- A log of each run of a command that changes or transfers something
+  (JSON lines, last 10 runs, 5 MB each; a log written to in the last
+  hour is never removed) in the cache folder, removed by `logout`;
+  `O2CLOUD_LOG_FILE=0` turns it off. Failed files are logged with their
+  error. Errors
   end with the run's ID (`[run 3fa9c1d2]`), also in the JSON error as
   `run`.
 - `--debug` (and `O2CLOUD_LOG=debug|info|warn|error`): each request,
@@ -77,6 +80,8 @@ See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
   `"action": "conflict"` and the cloud copy's `id`/`parts`, `size` and
   `modified`). `duplicate` is the old behaviour (O2 Cloud names the new
   one `name (1)`). `--skip-existing` stays, as `--on-conflict skip`.
+  `overwrite` also replaces a file of the same size that is newer
+  locally.
 - `upload --json` of a file replaced with `--on-conflict overwrite` has
   `"action": "updated"` and `replaced`.
 
