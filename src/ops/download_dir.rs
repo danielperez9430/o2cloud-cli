@@ -177,6 +177,9 @@ pub async fn download_dir(
     }
 
     let stop = AtomicBool::new(false);
+    // Why it stopped, if it did: the session, or else a full disk.
+    let session_over = AtomicBool::new(false);
+    let session_over = &session_over;
     let count = jobs.len();
     // What's already there is settled first, so a rerun asks the server
     // for nothing but what's missing.
@@ -199,6 +202,7 @@ pub async fn download_dir(
             Err(O2Error::SessionExpired) => {
                 eprintln!("  ✗ Stopping: {}", O2Error::SessionExpired);
                 stop.store(true, Ordering::Relaxed);
+                session_over.store(true, Ordering::Relaxed);
                 break;
             }
             // Each file then asks for its own URL.
@@ -216,6 +220,9 @@ pub async fn download_dir(
                     if let Outcome::Failed(e) = &outcome {
                         let fatal = matches!(e, O2Error::SessionExpired)
                             || matches!(e, O2Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull);
+                        if matches!(e, O2Error::SessionExpired) {
+                            session_over.store(true, Ordering::Relaxed);
+                        }
                         if fatal && !stop.swap(true, Ordering::Relaxed) {
                             eprintln!("  ✗ Stopping: {}", e);
                         } else if !fatal {
@@ -278,14 +285,21 @@ pub async fn download_dir(
     if json {
         print_json(&serde_json::Value::Array(entries));
     }
+    if session_over.load(Ordering::Relaxed) {
+        return Err(O2Error::SessionExpired);
+    }
     if stop.load(Ordering::Relaxed) {
-        return Err(O2Error::Invalid(format!(
-            "stopped with {} file(s) left; run the same command with --skip-existing to carry on",
-            failed
+        return Err(O2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            format!(
+                "stopped with {} file(s) left: the disk is full. Make room and run the \
+                 same command with --skip-existing to carry on",
+                failed
+            ),
         )));
     }
     if failed > 0 {
-        return Err(O2Error::Api(format!(
+        return Err(O2Error::Partial(format!(
             "{} of {} files failed to download",
             failed, count
         )));
@@ -550,7 +564,7 @@ fn already_there(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> O
         "  ⚠ {}: already exists locally{}; not overwriting it",
         job.cloud, why
     );
-    Some(Outcome::Failed(O2Error::Invalid(format!(
+    Some(Outcome::Failed(O2Error::Conflict(format!(
         "{} already exists{}; not overwriting it",
         path.display(),
         why
@@ -613,7 +627,7 @@ async fn fetch(
     let total = fetch_pieces(client, auth, &job.pieces, job.size, &mut file, &part, urls).await?;
     finish(file, job.mtime, &part).await?;
     if path.exists() {
-        return Err(O2Error::Invalid(format!(
+        return Err(O2Error::Conflict(format!(
             "{} appeared meanwhile; not overwriting it",
             path.display()
         )));

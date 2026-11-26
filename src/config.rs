@@ -245,6 +245,9 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
 pub fn load_auth() -> Result<AuthConfig, O2Error> {
     let path = auth_file()?;
     let json = fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return O2Error::NotLoggedIn;
+        }
         O2Error::Config(format!(
             "Failed to read auth file {}: {}. Have you logged in?",
             path.display(),

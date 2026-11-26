@@ -469,10 +469,24 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
         eprintln!("→ Session expired");
     }
 
+    // The login window only opens by itself for someone at a terminal:
+    // a script or an app gets "Session expired" (exit 4) and logs in with
+    // `o2cloud login` when it chooses. O2CLOUD_LOGIN_WINDOW=1 opens it
+    // anyway.
+    if !interactive() {
+        return Err(O2Error::SessionExpired);
+    }
     let new_auth = login_like(&auth).await?;
     eprintln!("✓ Re-login successful");
     let new_client = api::O2Client::new(&new_auth.device_id)?;
     Ok((new_client, new_auth))
+}
+
+/// Whether someone at a terminal runs the CLI (stdin is one), or
+/// `O2CLOUD_LOGIN_WINDOW=1` says to behave as if so.
+fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() || std::env::var("O2CLOUD_LOGIN_WINDOW").is_ok_and(|v| v == "1")
 }
 
 /// Log in again the way `old` was logged in: a session from the mobile-app
@@ -867,6 +881,13 @@ async fn main() {
     }
     if let Err(e) = result {
         eprintln!("Error: {e}");
-        std::process::exit(1);
+        // With --json, the error as JSON on stdout too, where the result
+        // would have gone.
+        if std::env::args().any(|a| a == "--json")
+            && !ops::PRINTED_JSON.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            println!("{}", e.to_json());
+        }
+        std::process::exit(e.exit_code());
     }
 }

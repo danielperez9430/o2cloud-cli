@@ -110,7 +110,15 @@ Run `o2cloud <command> --help` for all the options.
 
 ### 🧩 JSON output
 
-`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `fix-jpeg`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr, and errors are `Error: …` on stderr with exit code 1.
+`ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `fix-jpeg`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr. An error is `Error: …` on stderr and, with `--json`, also a JSON value on stdout in place of the result (unless the result was already printed, as `upload-dir` and `download-dir` do before saying some files failed):
+
+```json
+{ "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
+```
+
+Exit codes: `0` done; `2` a request it won't carry out as given (bad arguments, an ambiguous name, a change O2 Cloud doesn't allow); `3` not found; `4` not logged in or session expired (`code` `not_logged_in` / `session_expired`; log in with `o2cloud login`); `5` conflict, something with that name is already there (`conflict`); `6` some files of a run failed and the rest were done (`partial_failure`; run it again with `--skip-existing`); `7` the network or O2 Cloud failed (`network`, `server_error`, `bad_response`; worth trying again later); `1` anything else. `retryable` is `true` for 6 and 7.
+
+When the session has expired, the login window only opens by itself if you're at a terminal. A script or an app gets exit code 4 instead, and logs in with `o2cloud login` when it chooses (set `O2CLOUD_LOGIN_WINDOW=1` to open it anyway).
 
 ```console
 $ o2cloud upload ./movie.mkv --json 2>/dev/null
