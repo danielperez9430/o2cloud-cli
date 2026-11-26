@@ -76,7 +76,13 @@ pub(crate) fn details_json(details: &MediaDetails) -> serde_json::Value {
     })
 }
 
-fn label_json(label: &Label, location: Option<(f64, f64)>) -> serde_json::Value {
+/// A label for `--json`. `cover` is what O2 knows of its cover photo: the
+/// label's location and thumbnail come from it.
+fn label_json(label: &Label, cover: Option<&MediaDetails>) -> serde_json::Value {
+    let location = cover.and_then(MediaDetails::location);
+    let thumbnail = cover
+        .and_then(|c| c.thumbnail_and_preview().0)
+        .map(|t| t.absolute_url());
     serde_json::json!({
         "id": label.id,
         "name": label.name,
@@ -86,34 +92,32 @@ fn label_json(label: &Label, location: Option<(f64, f64)>) -> serde_json::Value 
         "date": format_date_iso(label.date),
         "cover": label.coverid,
         "location": location_json(location),
+        "thumbnail": thumbnail,
         "items": label.items,
     })
 }
 
-/// Where each place (`geolocalized` label) is: where its cover was taken,
-/// or its first photo if it has no cover. One request for all of them.
-async fn place_locations(
+/// What O2 knows of each label's cover (or its first photo, if it has no
+/// cover): its location and thumbnails. One request for every 1,000.
+async fn covers(
     client: &O2Client,
     auth: &AuthConfig,
     labels: &[Label],
-) -> Result<HashMap<u64, (f64, f64)>, O2Error> {
+) -> Result<HashMap<u64, MediaDetails>, O2Error> {
     let photo_of: Vec<(u64, u64)> = labels
         .iter()
-        .filter(|l| l.origin.as_deref() == Some("geolocalized"))
         .filter_map(|l| Some((l.id, l.coverid.or_else(|| l.items.first().copied())?)))
         .collect();
-    let mut location_of_photo = HashMap::new();
     let photos: Vec<u64> = photo_of.iter().map(|(_, photo)| *photo).collect();
+    let mut details_of_photo = HashMap::new();
     for chunk in photos.chunks(1000) {
         for (media, details) in client.get_media_details_by_ids(chunk, auth).await? {
-            if let Some(location) = details.location() {
-                location_of_photo.insert(media.id, location);
-            }
+            details_of_photo.insert(media.id, details);
         }
     }
     Ok(photo_of
         .into_iter()
-        .filter_map(|(label, photo)| Some((label, *location_of_photo.get(&photo)?)))
+        .filter_map(|(label, photo)| Some((label, details_of_photo.get(&photo)?.clone())))
         .collect())
 }
 
@@ -127,11 +131,11 @@ pub async fn list_labels(
     let mut labels = client.get_labels(kind.origins(), auth).await?;
     labels.sort_by_key(|l| std::cmp::Reverse(l.date.unwrap_or(0)));
     if json {
-        let locations = place_locations(client, auth, &labels).await?;
+        let covers = covers(client, auth, &labels).await?;
         print_json(&serde_json::Value::Array(
             labels
                 .iter()
-                .map(|l| label_json(l, locations.get(&l.id).copied()))
+                .map(|l| label_json(l, covers.get(&l.id)))
                 .collect(),
         ));
         return Ok(());
@@ -247,13 +251,12 @@ pub async fn show_label(
                 file
             })
             .collect();
-        // The cover's location, or the first photo's that has one.
-        let location = media
+        let cover = media
             .iter()
             .find(|(m, _)| Some(m.id) == label.coverid)
-            .and_then(|(_, d)| d.location())
-            .or_else(|| media.iter().find_map(|(_, d)| d.location()));
-        let mut out = label_json(&label, location);
+            .or_else(|| media.first())
+            .map(|(_, d)| d);
+        let mut out = label_json(&label, cover);
         out["files"] = files.into();
         print_json(&out);
         return Ok(());
@@ -370,6 +373,7 @@ mod tests {
             }
         }
         let json = label_json(&label("flashback"), None);
+        assert!(json["location"].is_null() && json["thumbnail"].is_null());
         assert_eq!(
             (json["kind"].as_str(), json["count"].as_u64()),
             (Some("moment"), Some(2))
