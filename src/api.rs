@@ -200,6 +200,11 @@ where
         match call().await {
             Err(e) if is_validating(&e) && attempt < VALIDATION_RETRIES => {
                 attempt += 1;
+                crate::log::debug(
+                    "retry",
+                    "file still being validated (MED-1017); trying again",
+                    serde_json::json!({ "attempt": attempt }),
+                );
                 tokio::time::sleep(VALIDATION_RETRY_DELAY).await;
             }
             result => return result,
@@ -405,7 +410,8 @@ trait SendTraced {
 impl SendTraced for reqwest::RequestBuilder {
     async fn send_traced(self) -> Result<reqwest::Response, reqwest::Error> {
         let n = REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if !tracing() {
+        let logged = crate::log::enabled(crate::log::Level::Debug);
+        if !tracing() && !logged {
             return self.send().await.map_err(reqwest::Error::without_url);
         }
         let (client, req) = self.build_split();
@@ -436,15 +442,27 @@ impl SendTraced for reqwest::RequestBuilder {
             .await
             .map_err(reqwest::Error::without_url);
         let ms = start.elapsed().as_millis();
-        match &resp {
-            Ok(r) => eprintln!(
-                "[trace #{}] {} → {} in {} ms",
-                n,
-                label,
-                r.status().as_u16(),
-                ms
-            ),
-            Err(e) => eprintln!("[trace #{}] {} → error after {} ms: {}", n, label, ms, e),
+        if tracing() {
+            match &resp {
+                Ok(r) => eprintln!(
+                    "[trace #{}] {} → {} in {} ms",
+                    n,
+                    label,
+                    r.status().as_u16(),
+                    ms
+                ),
+                Err(e) => eprintln!("[trace #{}] {} → error after {} ms: {}", n, label, ms, e),
+            }
+        }
+        if logged {
+            let fields = match &resp {
+                Ok(r) => serde_json::json!({
+                    "req": n, "status": r.status().as_u16(), "ms": ms as u64,
+                    "bytes": r.content_length(),
+                }),
+                Err(e) => serde_json::json!({ "req": n, "ms": ms as u64, "error": e.to_string() }),
+            };
+            crate::log::debug("http", &label, fields);
         }
         resp
     }
@@ -801,6 +819,13 @@ impl O2Client {
             }
             let wait = busy_wait(&resp, retry);
             retry += 1;
+            crate::log::info(
+                "retry",
+                "server busy or failing; trying again",
+                serde_json::json!({
+                    "status": resp.status().as_u16(), "attempt": retry, "wait_ms": wait.as_millis() as u64,
+                }),
+            );
             tokio::time::sleep(wait).await;
         }
     }
@@ -1197,6 +1222,11 @@ impl O2Client {
             if !outage || retry >= READ_RETRIES {
                 return Ok((status, raw));
             }
+            crate::log::info(
+                "retry",
+                "folder list: FOL-1000 (outage); trying again",
+                serde_json::json!({ "attempt": retry + 1 }),
+            );
             tokio::time::sleep(Duration::from_secs(1 << retry)).await;
             retry += 1;
         }
@@ -1219,10 +1249,16 @@ impl O2Client {
         if let Some(cache) = crate::cache::load(account) {
             match self.update_cache(cache, auth).await {
                 Ok(media) => return Ok(in_listing_order(media)),
-                Err(e) if tracing() => {
-                    eprintln!("[trace] cache not updated ({e}); listing everything")
+                Err(e) => {
+                    if tracing() {
+                        eprintln!("[trace] cache not updated ({e}); listing everything");
+                    }
+                    crate::log::info(
+                        "cache",
+                        "not updated; listing everything",
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
                 }
-                Err(_) => {}
             }
         }
         // The cursor is taken before listing, so changes made meanwhile
@@ -1324,6 +1360,14 @@ impl O2Client {
         }
         cache.cursor = changes.requesttime;
         crate::cache::save(&cache);
+        crate::log::info(
+            "cache",
+            "updated",
+            serde_json::json!({
+                "files": cache.media.len(), "changed": wanted.len(),
+                "deleted": deleted.len(), "pending": cache.pending.len(),
+            }),
+        );
         if tracing() {
             eprintln!(
                 "[trace] cache: {} files, {} changed, {} deleted, {} pending",

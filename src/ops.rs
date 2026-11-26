@@ -2257,6 +2257,26 @@ pub async fn upload_dir(
                     )
                 });
                 let local = local_path_in(local_dir, file_path);
+                if crate::log::enabled(crate::log::Level::Debug) {
+                    let (label, cloud) = match &decision {
+                        Some(Decision::Changed { old }) => ("update", old.clone()),
+                        Some(Decision::Older { cloud }) => ("older", cloud.clone()),
+                        Some(Decision::Differs { cloud, .. }) => ("differs", cloud.clone()),
+                        Some(d) => (d.label(), Vec::new()),
+                        None => ("upload", Vec::new()),
+                    };
+                    let cloud_ms: Vec<Option<u64>> =
+                        cloud.iter().map(|id| mdates.get(id).copied()).collect();
+                    crate::log::debug(
+                        "decide",
+                        label,
+                        serde_json::json!({
+                            "local": local, "size": size, "local_ms": local_ms,
+                            "folder": parent_o2, "cloud": cloud, "cloud_ms": cloud_ms,
+                            "policy": format!("{:?}", policy).to_lowercase(),
+                        }),
+                    );
+                }
                 if let (true, Some(decision)) = (opts.dry_run, &decision) {
                     match &decision {
                         Decision::New => eprintln!("  + {}", local),
@@ -2511,6 +2531,16 @@ pub async fn upload_dir(
         return Ok(());
     }
 
+    crate::log::info(
+        "upload-dir",
+        "done",
+        serde_json::json!({
+            "files": file_count, "uploaded": succeeded, "skipped": skipped,
+            "updated": updated, "older": older, "differs": differs, "conflicts": conflicts,
+            "empty": empty_images, "failed": failed, "beyond_limits": rejected.len(),
+            "not_done": not_done, "dry_run": opts.dry_run,
+        }),
+    );
     // Listings take up to a minute to include new uploads: the next
     // listing asks for these by ID, so a run right after this one (after
     // the session expired, say) doesn't upload them again.

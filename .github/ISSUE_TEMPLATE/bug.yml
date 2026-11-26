@@ -1,0 +1,32 @@
+name: Bug report / Informe de error
+description: Something doesn't work as it should / Algo no funciona como debería
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting it. / Gracias por avisar.
+
+        The quickest way to find the cause: run `o2cloud debug-report` and attach the `.zip` it writes (drag it into the box below). It has no session keys, and file and folder names are replaced. Look it over before attaching it.
+
+        La forma más rápida de encontrar la causa: ejecuta `o2cloud debug-report` y adjunta el `.zip` que genera (arrástralo al cuadro de abajo). No lleva claves de sesión y los nombres de archivos y carpetas van sustituidos. Revísalo antes de adjuntarlo.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / Qué pasó
+      description: The command you ran, what you expected and what you got. / El comando que ejecutaste, qué esperabas y qué obtuviste.
+      placeholder: |
+        o2cloud upload-dir ./Photos --update
+        Error: … [run 3fa9c1d2]
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: debug-report
+      description: Attach the zip from `o2cloud debug-report`, or paste the output of `o2cloud debug-report --stdout`. / Adjunta el zip de `o2cloud debug-report`, o pega la salida de `o2cloud debug-report --stdout`.
+  - type: input
+    id: version
+    attributes:
+      label: Version / Versión
+      description: Output of `o2cloud --version` / Salida de `o2cloud --version`

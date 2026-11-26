@@ -286,6 +286,20 @@ o2cloud rm /Fotos/antiguas -r -y        # lo mismo, sin preguntar (para scripts)
 - **No se sobrescribe nada:** `mkdir`, `mv`, `cp` y `rename` se niegan a crear un segundo archivo o carpeta con el mismo nombre en el mismo sitio.
 - **Aún no soportado:** dejar de compartir un archivo, y copiar carpetas. De momento hazlo desde la web.
 
+## 🐞 Reportar un problema
+
+Si algo falla, ejecuta
+
+```sh
+o2cloud debug-report
+```
+
+y adjunta el `o2cloud-report-….zip` que genera a un [issue](https://github.com/danielperez9430/o2cloud-cli/issues). Lleva la versión, tu sistema, tu configuración (nunca las claves de sesión) y los logs de las 3 últimas ejecuciones, con cada nombre de archivo y carpeta sustituido por uno que conserva lo que hace falta para depurar nombres (extensión, longitud, acentos, puntos finales). No se envía nada; revísalo antes de adjuntarlo. `--stdout` lo muestra en pantalla, y `--include-names` mantiene los nombres.
+
+Cada error termina con el ID de la ejecución (`… [run 3fa9c1d2]`), que identifica su log. Cada ejecución guarda un log pequeño en la carpeta de caché (`~/Library/Caches/o2cli/logs` en macOS, `~/.cache/o2cli/logs` en Linux, `%LOCALAPPDATA%\o2cli\logs` en Windows): las 10 últimas, de 5 MB como mucho cada una, y `o2cloud logout` las borra. `O2CLOUD_LOG_FILE=0` lo desactiva.
+
+Para ver qué hace un comando paso a paso (cada petición, los reintentos y por qué cada archivo se sube, se salta o se deja), añade `--debug`: lo muestra en stderr y lo guarda entero en el log de la ejecución. `O2CLOUD_LOG=debug` hace lo mismo para apps y scripts, y `O2CLOUD_TRACE=1` muestra solo las peticiones. Las claves de sesión, los tokens, tu teléfono y los enlaces de descarga firmados nunca aparecen, ni en pantalla ni en los logs.
+
 ## 🖥️ Login sin ventana de acceso
 
 Normalmente `o2cloud login` abre una ventana pequeña para tu número y el código SMS. En una máquina sin entorno gráfico, o en un escritorio Linux donde esa ventana no se abre (por ejemplo en algunas configuraciones de Wayland), inicia sesión con las cookies de sesión de un navegador:

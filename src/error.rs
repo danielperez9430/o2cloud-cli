@@ -137,9 +137,10 @@ impl O2Error {
         serde_json::json!({
             "error": {
                 "code": self.code(),
-                "message": self.to_string(),
+                "message": crate::redact::text(&self.to_string()),
                 "retryable": self.retryable(),
                 "exit_code": self.exit_code(),
+                "run": crate::log::run_id(),
             }
         })
     }
@@ -180,6 +181,39 @@ mod tests {
         assert_eq!(json["error"]["code"], "conflict");
         assert_eq!(json["error"]["message"], "a.txt is there");
         assert_eq!(json["error"]["exit_code"], 5);
+    }
+
+    /// A session's keys never show in an error, whatever its text.
+    #[test]
+    fn test_no_session_keys_in_errors() {
+        let auth = crate::config::AuthConfig {
+            validationkey: "CANARY-VK-0001".into(),
+            jsessionid: "CANARY-JS-0002".into(),
+            access_token: "CANARY-AT-0003".into(),
+            encryption_token: "CANARY-ET-0004".into(),
+            msisdn: "34600111222".into(),
+            platform: "ios".into(),
+            device_id: "CANARY-DEV-0005".into(),
+            logged_in_at: 0,
+            oauth_client: Some(crate::config::OAuthClient {
+                id: "CANARY-OID-0006".into(),
+                secret: "CANARY-OSEC-0007".into(),
+            }),
+        };
+        crate::redact::register_auth(&auth);
+        let all = "CANARY-VK-0001 CANARY-JS-0002 CANARY-AT-0003 CANARY-ET-0004 34600111222 \
+                   CANARY-DEV-0005 CANARY-OID-0006 CANARY-OSEC-0007";
+        for e in [
+            O2Error::Auth(format!("login failed: {all}")),
+            O2Error::Api(format!("Upload failed (status 500): {all}")),
+            O2Error::Parse(format!("bad body {all}")),
+            O2Error::Invalid(format!("x {all}")),
+        ] {
+            let shown = [crate::redact::text(&e.to_string()), e.to_json().to_string()];
+            for text in shown {
+                assert!(!text.contains("CANARY") && !text.contains("34600111222"), "{text}");
+            }
+        }
     }
 
     /// No session key or signed link in a request error's message.

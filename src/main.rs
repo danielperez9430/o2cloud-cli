@@ -4,7 +4,10 @@ mod cache;
 mod config;
 mod error;
 mod jpeg;
+mod log;
 mod ops;
+mod redact;
+mod report;
 mod util;
 mod webview;
 
@@ -23,6 +26,12 @@ use error::O2Error;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Show what the command does step by step (requests, retries, the
+    /// decision for each file) on stderr, and keep it in the run log in
+    /// full. Session keys never appear
+    #[arg(long, global = true)]
+    debug: bool,
 }
 
 /// Options shared by the upload commands.
@@ -374,6 +383,23 @@ enum Commands {
         json: bool,
     },
 
+    /// Make a report to attach to a bug report: version, system, settings
+    /// (no keys), and the logs of the last runs, with file and folder
+    /// names replaced. Nothing is sent anywhere
+    DebugReport {
+        /// Where to write it (default: o2cloud-report-<run>.zip here)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Print the report as text instead of writing a zip
+        #[arg(long)]
+        stdout: bool,
+
+        /// Keep file and folder names as they are
+        #[arg(long)]
+        include_names: bool,
+    },
+
     /// Show storage used, free and in the trash
     Quota {
         /// Print JSON instead of messages
@@ -438,9 +464,24 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     let auth = config::load_auth()?;
     let client = api::O2Client::new(&auth.device_id)?;
 
+    let kind = if auth.sapi_auth_header().is_some() {
+        "app"
+    } else {
+        "web"
+    };
     if client.check_session(&auth).await? {
+        log::info(
+            "auth",
+            "session valid",
+            serde_json::json!({ "login": kind }),
+        );
         return Ok((client, auth));
     }
+    log::info(
+        "auth",
+        "session expired",
+        serde_json::json!({ "login": kind }),
+    );
 
     if auth.sapi_auth_header().is_some() {
         eprintln!("→ Session expired, trying silent re-login...");
@@ -478,9 +519,17 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
                     eprintln!("Failed to save refreshed auth: {}", e);
                 }
                 eprintln!("✓ Session refreshed silently");
+                log::info("auth", "renewed silently", serde_json::Value::Null);
                 return Ok((client, new_auth));
             }
-            Err(e) => eprintln!("→ Silent re-login failed ({e})"),
+            Err(e) => {
+                eprintln!("→ Silent re-login failed ({e})");
+                log::warn(
+                    "auth",
+                    "silent renewal failed",
+                    serde_json::json!({ "error": e.to_string() }),
+                );
+            }
         }
     } else {
         eprintln!("→ Session expired");
@@ -491,8 +540,14 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     // `o2cloud login` when it chooses. O2CLOUD_LOGIN_WINDOW=1 opens it
     // anyway.
     if !interactive() {
+        log::info(
+            "auth",
+            "no terminal: not opening the login window",
+            serde_json::Value::Null,
+        );
         return Err(O2Error::SessionExpired);
     }
+    log::info("auth", "opening the login window", serde_json::Value::Null);
     let new_auth = login_like(&auth).await?;
     eprintln!("✓ Re-login successful");
     let new_client = api::O2Client::new(&new_auth.device_id)?;
@@ -646,8 +701,18 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             }
         },
 
+        Commands::DebugReport {
+            output,
+            stdout,
+            include_names,
+        } => report::debug_report(output, stdout, include_names)?,
+
         Commands::Logout => {
             config::clear_auth()?;
+            // The run logs name the account's files too.
+            if let Some(dir) = log::dir() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             // The cache lists the account's file names.
             if let Err(e) = cache::clear() {
                 eprintln!("Failed to remove the file cache: {}", e);
@@ -895,12 +960,65 @@ async fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let result = run(Cli::parse()).await;
+    let cli = Cli::parse();
+    log::init(cli.debug);
+    // A crash leaves a report next to the run logs.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error(
+            "run",
+            "crash",
+            serde_json::json!({ "panic": info.to_string() }),
+        );
+        log::flush();
+        default_hook(info);
+        if let Some(path) = log::crash_report(info) {
+            eprintln!(
+                "o2cloud crashed. A report is in {}; please attach it (or the output of \
+                 `o2cloud debug-report`) to an issue at \
+                 https://github.com/danielperez9430/o2cloud-cli/issues",
+                path.display()
+            );
+        }
+    }));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    log::info(
+        "run",
+        "start",
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "command": args.iter().find(|a| !a.starts_with('-')),
+            "args": redact::args(&args),
+            "interactive": ops::can_ask(),
+        }),
+    );
+    let result = run(cli).await;
     if api::tracing() {
         eprintln!("[trace] {} requests", api::requests_sent());
     }
+    let (exit_code, error) = match &result {
+        Ok(()) => (0, None),
+        Err(e) => (e.exit_code(), Some((e.code(), e.to_string()))),
+    };
+    if let Some((code, message)) = &error {
+        log::error("run", message, serde_json::json!({ "code": code }));
+    }
+    log::info(
+        "run",
+        "end",
+        serde_json::json!({ "exit_code": exit_code, "requests": api::requests_sent() }),
+    );
+    log::flush();
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        // The run ID finds this run's log (`o2cloud debug-report`).
+        let message = redact::text(&e.to_string());
+        if log::path().is_some() {
+            eprintln!("Error: {message} [run {}]", log::run_id());
+        } else {
+            eprintln!("Error: {message}");
+        }
         // With --json, the error as JSON on stdout too, where the result
         // would have gone.
         if std::env::args().any(|a| a == "--json")
