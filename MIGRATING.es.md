@@ -110,6 +110,10 @@ La 0.x escribía una línea por cada archivo de `upload-dir` y `download-dir` (`
 
 Las líneas `Error: …` terminan ahora con ` [run 3fa9c1d2]`, el ID del log de esa ejecución (mira `debug-report` en el README). Si muestras o comparas mensajes de error, quítalo, o usa `code` y `message` del error en JSON (ahí el mensaje no lleva el ID; está en `run`).
 
+## Para apps: `--json-lines`
+
+No hay que cambiar nada, pero conviene saberlo. En lugar de mirar cuánto ocupa el archivo que se está escribiendo, o cuánto ha leído la CLI del original, una app puede pasar `--json-lines` y leer según ocurren el progreso, el resultado de cada archivo (con el `sha256` de la subida) y los reintentos. Está en el README.
+
 ## Valores nuevos en campos que ya existían
 
 La 1.0 añade valores a campos que la 0.x ya escribía. Un programa que rechace valores desconocidos debería aceptar estos:
@@ -118,4 +122,5 @@ La 1.0 añade valores a campos que la 0.x ya escribía. Un programa que rechace 
 |---|---|---|
 | `upload-dir --json` | `action` | `conflict` |
 | `upload-dir --dry-run --json` | `action` | `conflict` |
+| `upload`, `upload-dir`, `download`, `download-dir` con `--json` | `ids` (nuevo) | Siempre una lista: el ID del archivo, o los de sus partes |
 | `upload --json`, `upload-zip --json` | `action` (nuevo; solo cuando no es una subida normal) | `differs`, `conflict`, `updated` |
