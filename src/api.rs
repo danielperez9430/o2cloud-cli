@@ -1305,17 +1305,23 @@ impl O2Client {
     }
 
     /// The files added, changed, moved or renamed since `cursor` (from
-    /// `change_cursor`, a minute earlier to be safe), and whether the log
+    /// `change_cursor`), and whether the log
     /// also had something it couldn't tell is not a file. The change log
     /// knows of a new upload at once, while listings take up to a minute.
+    /// With `overlap`, from a minute before `cursor`: a change made just
+    /// before it can take a few seconds to show up in the log.
     pub async fn changed_since(
         &self,
         cursor: u64,
+        overlap: bool,
         auth: &AuthConfig,
     ) -> Result<(Vec<u64>, bool), O2Error> {
-        let changes = self
-            .changes_since(cursor.saturating_sub(CHANGES_OVERLAP_MS), auth)
-            .await?;
+        let from = if overlap {
+            cursor.saturating_sub(CHANGES_OVERLAP_MS)
+        } else {
+            cursor
+        };
+        let changes = self.changes_since(from, auth).await?;
         Ok((changes.changed, changes.unknown.is_some()))
     }
 

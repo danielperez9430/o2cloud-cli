@@ -2441,6 +2441,9 @@ pub async fn upload_dir(
     // worked out before anything is uploaded, so a plan beyond the limit
     // stops the run with nothing changed.
     let mut mirror_top: Option<u64> = None;
+    // Why --delete won't delete this time, if found before uploading
+    // (uploads still go: a backup keeps working).
+    let mut mirror_withheld: Option<String> = None;
     let plan: mirror::Plan = match (mirror, &top_name) {
         (None, _) => mirror::Plan::default(),
         (Some(_), None) => {
@@ -2469,15 +2472,20 @@ pub async fn upload_dir(
                 mirror_top = Some(top);
                 let left_out: Vec<(PathBuf, bool)> =
                     rejected.iter().map(|(p, d, _)| (p.clone(), *d)).collect();
-                mirror::plan(
+                match mirror::plan(
                     local_dir,
                     &entries,
                     &left_out,
                     top,
                     &existing_folders,
                     &cloud_files,
-                )
-                .map_err(O2Error::Invalid)?
+                ) {
+                    Ok(plan) => plan,
+                    Err(why) => {
+                        mirror_withheld = Some(format!("nothing moved to the trash: {}", why));
+                        mirror::Plan::default()
+                    }
+                }
             }
         },
     };
@@ -3002,6 +3010,9 @@ pub async fn upload_dir(
             empty_images,
             beyond_limits.len()
         );
+        if let Some(why) = &mirror_withheld {
+            crate::warn!("⚠ --delete: {}", why);
+        }
         if mirror.is_some() {
             crate::info!(
                 "  --delete would move to the trash {} file(s) and {} folder(s) \
@@ -3023,89 +3034,117 @@ pub async fn upload_dir(
         return Ok(());
     }
 
-    // --delete, once the uploads are done: not if one failed or was a
-    // conflict (a renamed folder whose upload failed would lose both
-    // copies), nor if the session expired (the run carries on next time).
-    // Planned again first, on fresh listings and a fresh look at the
-    // directory: only what both plans agree on goes, so nothing changed
-    // meanwhile (on the web, locally) is deleted on an old plan.
+    // --delete, once the uploads are done: not if one failed, was a
+    // conflict or was left out for O2 Cloud's limits (a renamed folder
+    // that didn't go up would lose both copies), nor if the session
+    // expired (the run carries on next time). Planned again first, on
+    // fresh listings and a fresh look at the directory: only what both
+    // plans agree on goes, so nothing changed meanwhile (on the web,
+    // locally) is deleted on an old plan. What is held back is said, and
+    // makes the run end as partial (exit 6).
     let (mut deleted, mut deleted_folders, mut delete_failed) = (0usize, 0usize, 0usize);
     let mut session_lost = false;
+    let mut withheld: Vec<String> = mirror_withheld.into_iter().collect();
     if let (Some((max, explicit)), Some(top)) = (mirror, mirror_top) {
+        let left_out = rejected.len();
         if plan.deletions.is_empty() || not_done > 0 {
-        } else if failed > 0 || conflicts > 0 {
-            crate::warn!(
-                "⚠ --delete: nothing moved to the trash, as {} file(s) failed to upload or \
-                 were conflicts; fix those and run again",
-                failed + conflicts
-            );
+        } else if failed > 0 || conflicts > 0 || left_out > 0 {
+            withheld.push(format!(
+                "nothing moved to the trash, as {} file(s) failed to upload, were conflicts or \
+                 were left out for O2 Cloud's limits; fix those and run again",
+                failed + conflicts + left_out
+            ));
         } else {
             match replan(client, auth, local_dir, top).await {
                 Err(O2Error::SessionExpired) => session_lost = true,
-                Err(e) => {
-                    delete_failed += 1;
-                    crate::warn!(
-                        "⚠ --delete: nothing moved to the trash, couldn't check again: {}",
-                        e
-                    );
-                }
+                Err(e) => withheld.push(format!(
+                    "nothing moved to the trash: couldn't check the account again ({})",
+                    e
+                )),
                 Ok((fresh, folders_now, media_now)) => {
+                    let fresh_set: HashSet<&mirror::Deletion> = fresh.deletions.iter().collect();
                     let mut agreed: Vec<&mirror::Deletion> = plan
                         .deletions
                         .iter()
-                        .filter(|d| fresh.deletions.contains(d))
+                        .filter(|d| fresh_set.contains(d))
                         .collect();
-                    // Files added in the account since the plan that the
-                    // listing doesn't show yet (not this run's uploads)
-                    // could be inside a folder to delete: folders stay.
-                    // The change log takes a few seconds to show a new
-                    // upload (2–5 s, seen live): give it 10 before asking.
-                    if change_cursor.is_some() && agreed.iter().any(|d| d.is_folder) {
-                        crate::detail!(
-                            "  … checking the account for changes before deleting folders"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    }
-                    let unseen = match change_cursor {
-                        Some(cursor) => match client.changed_since(cursor, auth).await {
-                            Ok((changed, unknown)) => {
-                                let listed: HashSet<u64> = media_now.iter().map(|m| m.id).collect();
-                                let ours: HashSet<u64> =
-                                    uploaded_ids.iter().map(|u| u.id).collect();
-                                let n = changed
-                                    .iter()
-                                    .filter(|id| !listed.contains(id) && !ours.contains(id))
-                                    .count();
-                                n + usize::from(unknown)
-                            }
-                            Err(O2Error::SessionExpired) => {
-                                session_lost = true;
-                                usize::MAX
-                            }
-                            Err(_) => usize::MAX,
-                        },
-                        None => 0,
-                    };
-                    if unseen > 0 && agreed.iter().any(|d| d.is_folder) {
-                        crate::warn!(
-                            "⚠ --delete: files were added in the account moments ago and aren't \
-                             listed yet; as they could be inside them, folders were kept. Run \
-                             again in a minute"
-                        );
-                        agreed.retain(|d| !d.is_folder);
-                    }
                     if agreed.len() < plan.deletions.len() {
-                        crate::warn!(
-                            "⚠ --delete: {} planned deletion(s) changed meanwhile and were kept; \
-                             run again to see them",
+                        withheld.push(format!(
+                            "{} planned deletion(s) changed meanwhile and were kept; run again \
+                             to see them",
                             plan.deletions.len() - agreed.len()
-                        );
+                        ));
+                    }
+                    // What changed in the account since the plan, other
+                    // than this run's uploads (the change log knows of an
+                    // upload or a move in 2–5 s, listings in up to a
+                    // minute: it waits 10 s first). A file changed is not
+                    // deleted on what the plan knew of it; and as a new or
+                    // moved file could be inside a folder to delete,
+                    // folders stay if anything changed.
+                    if change_cursor.is_some() && !agreed.is_empty() {
+                        if agreed.iter().any(|d| d.is_folder) {
+                            crate::detail!(
+                                "  … checking the account for changes before deleting folders"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        }
+                        let ours: HashSet<u64> = uploaded_ids.iter().map(|u| u.id).collect();
+                        let listed: HashSet<u64> = media_now.iter().map(|m| m.id).collect();
+                        let cursor = change_cursor.unwrap_or(0);
+                        // Since the plan exactly (the cursor is the
+                        // server's own time); and, for what isn't listed
+                        // yet, from a minute before (an upload just before
+                        // the plan can take seconds to reach the log).
+                        let since_plan = client.changed_since(cursor, false, auth).await;
+                        let around_plan = client.changed_since(cursor, true, auth).await;
+                        match (since_plan, around_plan) {
+                            (Ok((changed, unknown)), Ok((around, unknown_around))) => {
+                                let others: HashSet<u64> = changed
+                                    .into_iter()
+                                    .filter(|id| !ours.contains(id))
+                                    .collect();
+                                let unlisted = around
+                                    .iter()
+                                    .filter(|id| !ours.contains(id) && !listed.contains(id))
+                                    .count();
+                                let before = agreed.len();
+                                agreed.retain(|d| d.is_folder || !others.contains(&d.id));
+                                if agreed.len() < before {
+                                    withheld.push(format!(
+                                        "{} file(s) changed in the account meanwhile and were kept",
+                                        before - agreed.len()
+                                    ));
+                                }
+                                let changed_anything =
+                                    unknown || unknown_around || !others.is_empty() || unlisted > 0;
+                                if changed_anything && agreed.iter().any(|d| d.is_folder) {
+                                    agreed.retain(|d| !d.is_folder);
+                                    withheld.push(
+                                        "folders were kept: files were added, moved or changed \
+                                         in the account meanwhile and could be inside them; run \
+                                         again when nothing else is changing"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            (Err(O2Error::SessionExpired), _)
+                            | (_, Err(O2Error::SessionExpired)) => session_lost = true,
+                            (Err(e), _) | (_, Err(e)) => {
+                                agreed.retain(|d| !d.is_folder);
+                                withheld.push(format!(
+                                    "folders were kept: couldn't ask the account what changed ({})",
+                                    e
+                                ));
+                            }
+                        }
                     }
                     if let Some(message) = mirror_limit(&fresh, max, explicit) {
-                        crate::warn!("⚠ {}; nothing moved to the trash", message);
-                    } else {
+                        withheld.push(format!("{}; nothing moved to the trash", message));
+                    } else if !session_lost {
                         // Folders first, as `rm -r` does (their files, then
-                        // them), then the files, in batches.
+                        // them), then the files, in batches, each said as
+                        // it goes.
                         for d in agreed.iter().filter(|d| d.is_folder) {
                             match delete_folder(client, auth, d.id, &folders_now, &media_now, true)
                                 .await
@@ -3121,25 +3160,32 @@ pub async fn upload_dir(
                                 }
                                 Err(e) => {
                                     delete_failed += 1;
+                                    let e = O2Error::Api(format!(
+                                        "{} (some of what it holds may be in the trash already)",
+                                        e
+                                    ));
                                     report_deletion(d, "failed", Some(&e), json, &mut results);
                                 }
                             }
                         }
                         let files: Vec<&&mirror::Deletion> =
                             agreed.iter().filter(|d| !d.is_folder).collect();
-                        let ids: Vec<u64> = files.iter().map(|d| d.id).collect();
-                        if !session_lost && !ids.is_empty() {
+                        for batch in files.chunks(200) {
+                            if session_lost {
+                                break;
+                            }
+                            let ids: Vec<u64> = batch.iter().map(|d| d.id).collect();
                             match delete_files_batched(client, auth, &ids).await {
                                 Ok(()) => {
                                     deleted += ids.len();
-                                    for d in &files {
+                                    for d in batch {
                                         report_deletion(d, "deleted", None, json, &mut results);
                                     }
                                 }
                                 Err(O2Error::SessionExpired) => session_lost = true,
                                 Err(e) => {
                                     delete_failed += ids.len();
-                                    for d in &files {
+                                    for d in batch {
                                         report_deletion(d, "failed", Some(&e), json, &mut results);
                                     }
                                 }
@@ -3148,6 +3194,13 @@ pub async fn upload_dir(
                     }
                 }
             }
+        }
+        if session_lost {
+            withheld
+                .push("the session expired before the deletions were done; run again".to_string());
+        }
+        for why in &withheld {
+            crate::warn!("⚠ --delete: {}", why);
         }
     }
     let mut summary = serde_json::json!({
@@ -3160,6 +3213,7 @@ pub async fn upload_dir(
         summary["deleted"] = deleted.into();
         summary["deleted_folders"] = deleted_folders.into();
         summary["delete_failed"] = delete_failed.into();
+        summary["delete_withheld"] = withheld.clone().into();
     }
     crate::events::emit("summary", summary);
     crate::log::info(
@@ -3291,6 +3345,12 @@ pub async fn upload_dir(
         return Err(O2Error::Partial(format!(
             "{} file(s) or folder(s) couldn't be moved to the trash",
             delete_failed
+        )));
+    }
+    if !withheld.is_empty() {
+        return Err(O2Error::Partial(format!(
+            "--delete didn't finish: {}",
+            withheld.join("; ")
         )));
     }
     Ok(())
