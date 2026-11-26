@@ -2,8 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum O2Error {
+    /// Without its URL (see the `From` below).
     #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
 
     /// Login / session failures: bad credentials, expired session,
     /// silent re-login or OAuth exchange errors.
@@ -43,7 +44,7 @@ pub enum O2Error {
     /// The server answered 401 in the middle of a command: the session
     /// expired (a web login ends after a while without use) or was revoked.
     #[error(
-        "the session has expired; run the command again to log in (with \
+        "Session expired: run the command again to log in (with \
          `upload-dir --skip-existing` it carries on where it stopped)"
     )]
     SessionExpired,
@@ -51,4 +52,44 @@ pub enum O2Error {
     /// A server response could not be parsed into the expected shape.
     #[error("Invalid response: {0}")]
     Parse(String),
+}
+
+/// A request error loses its URL: reqwest prints it, and it carries the
+/// session's `validationkey` or a signed download link, which would end up
+/// in logs people attach to bug reports.
+impl From<reqwest::Error> for O2Error {
+    fn from(e: reqwest::Error) -> Self {
+        O2Error::Http(e.without_url())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No session key or signed link in a request error's message.
+    #[tokio::test]
+    async fn test_http_error_without_url() {
+        // Nothing listens on port 9 (discard) of localhost.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:9/sapi/media?action=get&validationkey=SECRETKEY123")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("SECRETKEY123"),
+            "reqwest prints it"
+        );
+        let e = O2Error::from(err);
+        assert!(!e.to_string().contains("SECRETKEY123"), "{e}");
+        assert!(e.to_string().starts_with("HTTP request failed"));
+    }
+
+    #[test]
+    fn test_session_expired_wording() {
+        // Apps match these words (the Tauri app looks for "Session expired").
+        assert!(O2Error::SessionExpired
+            .to_string()
+            .starts_with("Session expired"));
+    }
 }

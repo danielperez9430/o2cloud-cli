@@ -406,10 +406,10 @@ impl SendTraced for reqwest::RequestBuilder {
     async fn send_traced(self) -> Result<reqwest::Response, reqwest::Error> {
         let n = REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if !tracing() {
-            return self.send().await;
+            return self.send().await.map_err(reqwest::Error::without_url);
         }
         let (client, req) = self.build_split();
-        let req = req?;
+        let req = req.map_err(reqwest::Error::without_url)?;
         let url = req.url();
         let action = url
             .query_pairs()
@@ -430,7 +430,11 @@ impl SendTraced for reqwest::RequestBuilder {
             action
         );
         let start = std::time::Instant::now();
-        let resp = client.execute(req).await;
+        // Never the URL in an error: it carries the session key.
+        let resp = client
+            .execute(req)
+            .await
+            .map_err(reqwest::Error::without_url);
         let ms = start.elapsed().as_millis();
         match &resp {
             Ok(r) => eprintln!(
