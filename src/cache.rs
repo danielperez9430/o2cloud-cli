@@ -82,6 +82,44 @@ pub fn load(account: &str) -> Option<MediaCache> {
     (cache.version == VERSION && cache.account == account && fresh).then_some(cache)
 }
 
+/// Note files just uploaded to `account`: listings can take a minute to
+/// include them, so the next update of the cache asks for them by ID
+/// (see `pending`), and `pending_count` says when they're all in.
+/// Nothing is noted without a cache; the next full listing will do.
+pub fn note_uploaded(account: &str, ids: &[u64]) {
+    if !enabled() || account.is_empty() || ids.is_empty() {
+        return;
+    }
+    let Some(mut cache) = load(account) else {
+        return;
+    };
+    let mut known: std::collections::HashSet<u64> = cache
+        .media
+        .iter()
+        .map(|m| m.id)
+        .chain(cache.pending.iter().map(|(id, _)| *id))
+        .collect();
+    let now = crate::config::now_unix();
+    let before = cache.pending.len();
+    for &id in ids {
+        if known.insert(id) {
+            cache.pending.push((id, now));
+        }
+    }
+    if cache.pending.len() > before {
+        save(&cache);
+    }
+}
+
+/// How many files the cache of `account` is still waiting for the server
+/// to return (0 without a cache).
+pub fn pending_count(account: &str) -> usize {
+    if !enabled() || account.is_empty() {
+        return 0;
+    }
+    load(account).map_or(0, |c| c.pending.len())
+}
+
 /// Save the cache. It is only a speed-up, so failing to save it isn't an
 /// error. It is written to a temporary file first, so a reader never sees
 /// half of it.
