@@ -110,6 +110,8 @@ Run `o2cloud <command> --help` for all the options.
 
 ### 🧩 JSON output
 
+> **Upgrading from 0.x?** 1.0 changes exit codes, errors with `--json`, the login window and uploads of files already in the cloud: see [MIGRATING.md](MIGRATING.md).
+
 `ls`, `find`, `upload`, `upload-dir`, `upload-zip`, `download`, `download-dir`, `fix-jpeg`, `mkdir`, `cp`, `share`, `shares`, `status` and `quota` take `--json` and print one JSON value to stdout, for scripts and other apps. Progress messages still go to stderr. An error is `Error: …` on stderr and, with `--json`, also a JSON value on stdout in place of the result (unless the result was already printed, as `upload-dir` and `download-dir` do before saying some files failed):
 
 ```json
