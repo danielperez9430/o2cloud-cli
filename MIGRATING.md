@@ -99,6 +99,10 @@ A file in parts has `parts` (a list of IDs) instead of `id`.
 - **In an app,** don't pass `--on-conflict` the first time. On exit code `5`, show the user each `conflict` entry ("you have a.jpg, 2.4 MB, 02/06/2024; the cloud has 2.1 MB, 01/05/2024: overwrite or skip?"). Then run it again with `--on-conflict overwrite` or `--on-conflict skip`. You can run it once per file for answers that differ.
 - **In a script** that relied on `--skip-existing`, nothing changes.
 
+## Error messages end with the run's ID
+
+`Error: …` lines now end with ` [run 3fa9c1d2]`, the ID of the run's log (see `debug-report` in the README). If you show or compare error messages, strip it, or use the JSON error's `code` and `message` (the message there has no ID; the ID is in `run`).
+
 ## New values in existing fields
 
 1.0 adds values to fields that 0.x already printed. A program that rejects unknown values should accept these:

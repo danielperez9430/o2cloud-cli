@@ -281,6 +281,20 @@ o2cloud rm /Photos/old -r -y            # same, without asking (for scripts)
 - **Nothing is overwritten:** `mkdir`, `mv`, `cp` and `rename` refuse to create a second file or folder with the same name in the same place.
 - **Not supported yet:** unsharing a file, and copying folders. Use the website for those for now.
 
+## 🐞 Reporting a problem
+
+If something goes wrong, run
+
+```sh
+o2cloud debug-report
+```
+
+and attach the `o2cloud-report-….zip` it writes to an [issue](https://github.com/danielperez9430/o2cloud-cli/issues). It has the version, your system, your settings (never the session keys) and the logs of the last 3 runs, with every file and folder name replaced by a stand-in that keeps what name bugs need (extension, length, accents, trailing dots). Nothing is sent anywhere; look it over before attaching it. `--stdout` prints it instead, and `--include-names` keeps the names.
+
+Every error ends with the run's ID (`… [run 3fa9c1d2]`), which finds its log. Each run keeps a small log in the cache folder (`~/Library/Caches/o2cli/logs` on macOS, `~/.cache/o2cli/logs` on Linux, `%LOCALAPPDATA%\o2cli\logs` on Windows): the last 10 runs, at most 5 MB each, removed by `o2cloud logout`. `O2CLOUD_LOG_FILE=0` turns it off.
+
+To see what a command does step by step (each request, retries, and why each file is uploaded, skipped or left alone), add `--debug`: it shows it on stderr and keeps it in the run log in full. `O2CLOUD_LOG=debug` does the same for apps and scripts, and `O2CLOUD_TRACE=1` shows only the requests. Session keys, tokens, your phone number and signed download links never appear, on screen or in the logs.
+
 ## 🖥️ Logging in without a login window
 
 Normally `o2cloud login` opens a small window for your phone number and SMS code. On a headless machine, or a Linux desktop where that window can't open (for example some Wayland setups), log in with the session cookies of a browser instead:

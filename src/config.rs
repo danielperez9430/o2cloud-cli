@@ -191,6 +191,7 @@ fn auth_file() -> Result<PathBuf, O2Error> {
 
 /// Save authentication configuration to disk.
 pub fn save_auth(config: &AuthConfig) -> Result<(), O2Error> {
+    crate::redact::register_auth(config);
     let dir = config_dir()?;
     fs::create_dir_all(&dir).map_err(|e| {
         O2Error::Config(format!(
@@ -241,6 +242,18 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
     fs::write(path, bytes)
 }
 
+/// Open `path` for appending, creating it readable by the user only.
+pub fn open_private_append(path: &std::path::Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Load authentication configuration from disk.
 pub fn load_auth() -> Result<AuthConfig, O2Error> {
     let path = auth_file()?;
@@ -257,7 +270,8 @@ pub fn load_auth() -> Result<AuthConfig, O2Error> {
 
     let config: AuthConfig = serde_json::from_str(&json)
         .map_err(|e| O2Error::Config(format!("Failed to parse auth file: {}", e)))?;
-
+    // From here on, these never show in a message or log.
+    crate::redact::register_auth(&config);
     Ok(config)
 }
 

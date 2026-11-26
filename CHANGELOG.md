@@ -6,6 +6,25 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
 
+### Added
+- `o2cloud debug-report`: a zip to attach to bug reports, with the
+  version, system, settings (no keys), session kind and age, cache
+  stats and the logs of the last 3 runs, with file and folder names
+  replaced by stand-ins (`--include-names` keeps them, `--stdout` prints
+  it). Nothing is sent anywhere.
+- A log of each run (JSON lines, last 10 runs, 5 MB each) in the cache
+  folder, removed by `logout`; `O2CLOUD_LOG_FILE=0` turns it off. Errors
+  end with the run's ID (`[run 3fa9c1d2]`), also in the JSON error as
+  `run`.
+- `--debug` (and `O2CLOUD_LOG=debug|info|warn|error`): each request,
+  retry, the session and cache, and the decision for each file of
+  `upload-dir`, on stderr (as `[debug] …` lines) and in the run log.
+- A crash leaves a report next to the logs and says where.
+- Session keys, tokens, the phone number, OAuth client and signed links
+  are removed from everything shown or logged, error messages included;
+  so are the values of `--jsessionid`, `--validationkey` and the OAuth
+  options in the logged command line.
+
 ### Changed (breaking)
 - Exit codes say what went wrong: 2 a request it won't carry out as
   given, 3 not found, 4 not logged in or session expired, 5 conflict

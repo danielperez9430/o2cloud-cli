@@ -270,6 +270,14 @@ pub async fn download_dir(
         }
     }
 
+    crate::log::info(
+        "download-dir",
+        "done",
+        serde_json::json!({
+            "files": count, "downloaded": done, "bytes": bytes, "skipped": skipped,
+            "failed": failed,
+        }),
+    );
     if skipped > 0 {
         eprintln!("  ({} file(s) were already there)", skipped);
     }

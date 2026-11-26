@@ -99,6 +99,10 @@ Un archivo en partes lleva `parts` (una lista de IDs) en lugar de `id`.
 - **En una app,** no pases `--on-conflict` la primera vez. Si sale el código `5`, enseña al usuario cada entrada `conflict` ("tienes a.jpg, 2,4 MB, 02/06/2024; en la nube hay 2,1 MB, 01/05/2024: ¿sobrescribir o ignorar?"). Luego relánzalo con `--on-conflict overwrite` o `--on-conflict skip`. Si las respuestas son distintas para cada archivo, puedes lanzarlo una vez por archivo.
 - **En un script** que ya usaba `--skip-existing`, no cambia nada.
 
+## Los mensajes de error terminan con el ID de la ejecución
+
+Las líneas `Error: …` terminan ahora con ` [run 3fa9c1d2]`, el ID del log de esa ejecución (mira `debug-report` en el README). Si muestras o comparas mensajes de error, quítalo, o usa `code` y `message` del error en JSON (ahí el mensaje no lleva el ID; está en `run`).
+
 ## Valores nuevos en campos que ya existían
 
 La 1.0 añade valores a campos que la 0.x ya escribía. Un programa que rechace valores desconocidos debería aceptar estos:
