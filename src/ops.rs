@@ -1420,13 +1420,227 @@ enum FileOutcome {
     Conflict(Vec<u64>, bool, u64, Option<u64>),
 }
 
-/// Upload a changed file and replace the cloud's copy `old` with it. The
-/// server renames an upload whose name is taken (`a (1).jpg`, and
-/// `a.jpg (1).001` for parts), so: upload, and only once that worked move
-/// `old` to the trash and give the new files their names. A failed upload
-/// leaves the old version untouched.
+/// Upload a changed file and replace the cloud's copy `old` with it.
+///
+/// The server renames an upload whose name is taken (`a (1).jpg`), and a
+/// file just uploaded can't be renamed until the server has validated it
+/// (MED-1017, several seconds). So the old copy steps aside instead: it's
+/// renamed to a temporary name (it's long validated, so that's instant),
+/// the new version goes up under the real name, and only then the old one
+/// goes to the trash. If anything fails, the old copy gets its name back
+/// and whatever went up is taken back: the old version is never lost.
+/// Where the old copy can't step aside (a temporary name would be too long),
+/// the new one goes up beside it and is renamed once validated.
 #[allow(clippy::too_many_arguments)]
 async fn replace_file(
+    client: &O2Client,
+    auth: &AuthConfig,
+    path: &Path,
+    name: &str,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    folder_id: u64,
+    opts: &UploadOptions,
+    old: &[u64],
+) -> Result<Uploaded, O2Error> {
+    // The old copies' names (the file, or its parts), to put them back.
+    let olds: Vec<(u64, String)> = client
+        .get_media_by_ids(old, auth)
+        .await?
+        .into_iter()
+        .filter_map(|m| m.name.map(|n| (m.id, n)))
+        .collect();
+    let aside: Option<Vec<(u64, String, String)>> = if olds.len() == old.len() {
+        olds.iter()
+            .map(|(id, n)| aside_name(n, *id).map(|tmp| (*id, n.clone(), tmp)))
+            .collect()
+    } else {
+        None
+    };
+    match aside {
+        Some(aside) => {
+            replace_stepping_aside(
+                client, auth, path, name, size, modified, folder_id, opts, &aside,
+            )
+            .await
+        }
+        None => {
+            replace_then_rename(
+                client, auth, path, name, size, modified, folder_id, opts, old,
+            )
+            .await
+        }
+    }
+}
+
+/// A temporary name for `name` (media `id`) while it steps aside: the same
+/// extension (the server keeps a file's extension), marked with its ID.
+/// `None` if it would be too long.
+fn aside_name(name: &str, id: u64) -> Option<String> {
+    let tmp = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{}.o2-replacing-{}.{}", stem, id, ext),
+        _ => format!("{}~o2-replacing-{}", name, id),
+    };
+    crate::api::file_name_problem(&tmp).is_none().then_some(tmp)
+}
+
+/// `replace_file` by renaming the old copies (`aside`: ID, name, temporary
+/// name) out of the way first.
+#[allow(clippy::too_many_arguments)]
+async fn replace_stepping_aside(
+    client: &O2Client,
+    auth: &AuthConfig,
+    path: &Path,
+    name: &str,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    folder_id: u64,
+    opts: &UploadOptions,
+    aside: &[(u64, String, String)],
+) -> Result<Uploaded, O2Error> {
+    // Put back the names of the first `n` copies stepped aside.
+    let restore = |n: usize| async move {
+        for (id, original, tmp) in &aside[..n] {
+            let changes = serde_json::json!({ "name": original });
+            let _ = client.update_file(*id, tmp, changes, auth).await;
+        }
+    };
+    for (k, (id, original, tmp)) in aside.iter().enumerate() {
+        let changes = serde_json::json!({ "name": tmp });
+        if let Err(e) = client.update_file(*id, original, changes, auth).await {
+            if !matches!(e, O2Error::SessionExpired) {
+                restore(k).await;
+            }
+            return Err(e);
+        }
+    }
+    crate::log::debug(
+        "replace",
+        "old copy stepped aside",
+        serde_json::json!({ "name": name, "parts": aside.len() }),
+    );
+
+    let fresh = UploadOptions {
+        skip_existing: false,
+        ..opts.clone()
+    };
+    let mut done = Vec::new();
+    let up = match upload_local_file(
+        client,
+        auth,
+        path,
+        name,
+        size,
+        modified,
+        folder_id,
+        &ExistingFiles::new(),
+        &fresh,
+        &mut done,
+    )
+    .await
+    {
+        Ok(up) => up,
+        Err(e) => {
+            if !matches!(e, O2Error::SessionExpired) {
+                if !done.is_empty() {
+                    let _ = client.delete_files(&done, auth).await;
+                }
+                restore(aside.len()).await;
+            }
+            return Err(e);
+        }
+    };
+
+    // The name taken while the old copy stood aside should be free, but
+    // check: if the server named it otherwise, rename it once validated.
+    let expected: Vec<String> = if up.parts > 0 {
+        (1..=up.ids.len()).map(|k| part_name(name, k)).collect()
+    } else {
+        vec![name.to_string()]
+    };
+    let named: HashMap<u64, String> = client
+        .get_media_by_ids(&up.ids, auth)
+        .await
+        .map(|items| {
+            items
+                .into_iter()
+                .filter_map(|m| m.name.map(|n| (m.id, n)))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (id, want) in up.ids.iter().zip(&expected) {
+        if named.get(id).is_some_and(|n| n != want) {
+            rename_new(client, auth, *id, want, name, &up).await?;
+        }
+    }
+
+    let old_ids: Vec<u64> = aside.iter().map(|(id, _, _)| *id).collect();
+    if let Err(e) = client.delete_files(&old_ids, auth).await {
+        if matches!(e, O2Error::SessionExpired) {
+            return Err(e);
+        }
+        // Take the new version back and give the old one its name again,
+        // so nothing is left half done.
+        let undone = client.delete_files(&up.ids, auth).await.is_ok();
+        if undone {
+            restore(aside.len()).await;
+        }
+        let ids: Vec<String> = up.ids.iter().map(u64::to_string).collect();
+        return Err(O2Error::Api(format!(
+            "the old version of {} couldn't be moved to the trash ({}); {}",
+            name,
+            e,
+            if undone {
+                "the new one was taken back, so nothing changed".to_string()
+            } else {
+                format!(
+                    "the new one is up too (ids: {}), and the old one is named {}",
+                    ids.join(", "),
+                    aside[0].2
+                )
+            }
+        )));
+    }
+    Ok(up)
+}
+
+/// Rename a new upload to `want`, retrying once (the server validates a
+/// new file for a few seconds first; `update_file` waits for that).
+async fn rename_new(
+    client: &O2Client,
+    auth: &AuthConfig,
+    id: u64,
+    want: &str,
+    name: &str,
+    up: &Uploaded,
+) -> Result<(), O2Error> {
+    let changes = serde_json::json!({ "name": want });
+    let mut result = client.update_file(id, want, changes.clone(), auth).await;
+    if matches!(result, Err(ref e) if !matches!(e, O2Error::SessionExpired)) {
+        result = client.update_file(id, want, changes, auth).await;
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(O2Error::SessionExpired) => Err(O2Error::SessionExpired),
+        Err(e) => {
+            let ids: Vec<String> = up.ids.iter().map(u64::to_string).collect();
+            Err(O2Error::Api(format!(
+                "the new version of {} is up (ids: {}) and the old one is in the trash, \
+                 but it couldn't be renamed to {}: {}",
+                name,
+                ids.join(", "),
+                want,
+                e
+            )))
+        }
+    }
+}
+
+/// `replace_file` by uploading the new version beside the old one (the
+/// server names it `name (1)`), trashing the old one, and renaming the new
+/// one once the server has validated it.
+#[allow(clippy::too_many_arguments)]
+async fn replace_then_rename(
     client: &O2Client,
     auth: &AuthConfig,
     path: &Path,
@@ -1491,27 +1705,7 @@ async fn replace_file(
         } else {
             name.to_string()
         };
-        let changes = serde_json::json!({ "name": new_name });
-        let mut result = client
-            .update_file(*id, &new_name, changes.clone(), auth)
-            .await;
-        if matches!(result, Err(ref e) if !matches!(e, O2Error::SessionExpired)) {
-            result = client.update_file(*id, &new_name, changes, auth).await;
-        }
-        match result {
-            Ok(()) => {}
-            Err(O2Error::SessionExpired) => return Err(O2Error::SessionExpired),
-            Err(e) => {
-                return Err(O2Error::Api(format!(
-                    "the new version of {} is up (ids: {}) and the old one is in the trash, \
-                     but it couldn't be renamed to {}: {}",
-                    name,
-                    ids.join(", "),
-                    new_name,
-                    e
-                )))
-            }
-        }
+        rename_new(client, auth, *id, &new_name, name, &up).await?;
     }
     Ok(up)
 }
@@ -5594,6 +5788,31 @@ mod tests {
         assert_eq!(p(r"\\?\C:\Users\a\x.bin"), r"C:\Users\a\x.bin");
         assert_eq!(p(r"\\?\UNC\server\share\x"), r"\\server\share\x");
         assert_eq!(p("/home/a/x.bin"), "/home/a/x.bin");
+    }
+
+    #[test]
+    fn test_aside_name() {
+        assert_eq!(
+            aside_name("nota.txt", 7).as_deref(),
+            Some("nota.o2-replacing-7.txt")
+        );
+        assert_eq!(
+            aside_name("big.iso.002", 9).as_deref(),
+            Some("big.iso.o2-replacing-9.002")
+        );
+        assert_eq!(
+            aside_name("README", 3).as_deref(),
+            Some("README~o2-replacing-3")
+        );
+        assert_eq!(
+            aside_name(".bashrc", 3).as_deref(),
+            Some(".bashrc~o2-replacing-3")
+        );
+        // Too long with the mark: none (the upload goes beside it instead).
+        assert_eq!(
+            aside_name(&format!("{}.jpg", "a".repeat(245)), 123456789),
+            None
+        );
     }
 
     #[test]

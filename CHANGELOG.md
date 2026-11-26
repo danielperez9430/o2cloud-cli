@@ -2,6 +2,18 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.0.1] — 2026-11-26
+
+### Changed
+- Replacing a file (`--on-conflict overwrite`, `upload-dir --update`) takes
+  about a second instead of 7–10: the old copy is renamed out of the way
+  first (to `name.o2-replacing-<id>.ext`), the new one goes up under the
+  real name, and then the old one goes to the trash. Before, the new one
+  went up as `name (1)` and had to wait for O2 to validate it before it
+  could be renamed. If anything fails, the old copy gets its name back.
+  Where the temporary name would be over O2 Cloud's limit, it works as
+  before.
+
 ## [1.0.0] — 2026-11-26
 
 The first stable version: safer defaults (uploading twice never makes
