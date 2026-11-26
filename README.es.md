@@ -298,7 +298,7 @@ y adjunta el `o2cloud-report-….zip` que genera a un [issue](https://github.com
 
 Cada error termina con el ID de la ejecución (`… [run 3fa9c1d2]`), que identifica su log. Cada ejecución guarda un log pequeño en la carpeta de caché (`~/Library/Caches/o2cli/logs` en macOS, `~/.cache/o2cli/logs` en Linux, `%LOCALAPPDATA%\o2cli\logs` en Windows): las 10 últimas, de 5 MB como mucho cada una, y `o2cloud logout` las borra. `O2CLOUD_LOG_FILE=0` lo desactiva.
 
-Para ver qué hace un comando paso a paso (cada petición, los reintentos y por qué cada archivo se sube, se salta o se deja), añade `--debug`: lo muestra en stderr y lo guarda entero en el log de la ejecución. `O2CLOUD_LOG=debug` hace lo mismo para apps y scripts, y `O2CLOUD_TRACE=1` muestra solo las peticiones. Las claves de sesión, los tokens, tu teléfono y los enlaces de descarga firmados nunca aparecen, ni en pantalla ni en los logs.
+Las transferencias largas muestran una barra de progreso (archivos, bytes, velocidad, tiempo restante); `-v` muestra una línea por archivo, y `-q` solo avisos y errores. Para ver qué hace un comando paso a paso (cada petición, los reintentos y por qué cada archivo se sube, se salta o se deja), añade `--debug`: lo muestra en stderr y lo guarda entero en el log de la ejecución. `O2CLOUD_LOG=debug` hace lo mismo para apps y scripts, y `O2CLOUD_TRACE=1` muestra solo las peticiones. Las claves de sesión, los tokens, tu teléfono y los enlaces de descarga firmados nunca aparecen, ni en pantalla ni en los logs.
 
 ## 🖥️ Login sin ventana de acceso
 

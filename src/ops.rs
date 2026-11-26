@@ -1314,7 +1314,7 @@ async fn upload_local_file(
     let split = pieces.len() > 1;
     if split {
         check_existing_parts(name, &pieces, folder_id, existing, opts.skip_existing)?;
-        eprintln!(
+        crate::detail!(
             "  {} is larger than {}: uploading it in {} parts ({}.001 …)",
             name,
             format_size(opts.part_size),
@@ -1337,13 +1337,13 @@ async fn upload_local_file(
             .flatten()
             .and_then(|found| found.iter().find(|(s, _)| s == len));
         if let Some((_, id)) = already {
-            eprintln!("  = {} is already there (id: {}), skipped", piece_name, id);
+            crate::detail!("  = {} is already there (id: {}), skipped", piece_name, id);
             uploaded.ids.push(*id);
             uploaded.skipped += 1;
             continue;
         }
         if split {
-            eprintln!(
+            crate::detail!(
                 "  → part {}/{}: {} ({})",
                 i + 1,
                 pieces.len(),
@@ -1566,7 +1566,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
     let mut results = Vec::new();
     for path in &files {
         let Ok(bytes) = crate::jpeg::read_header(path) else {
-            eprintln!("  ⚠ Can't read {}", path.display());
+            crate::warn!("  ⚠ Can't read {}", path.display());
             failed += 1;
             continue;
         };
@@ -1585,7 +1585,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                     match whole.and_then(|whole| rewrite_keeping_date(path, &whole)) {
                         Ok(()) => {
                             fixed += 1;
-                            eprintln!(
+                            crate::info!(
                                 "  ✓ {}: colour profile relabelled ({} chunks)",
                                 path.display(),
                                 chunks
@@ -1593,12 +1593,12 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                         }
                         Err(e) => {
                             failed += 1;
-                            eprintln!("  ⚠ {}: couldn't repair it: {}", path.display(), e);
+                            crate::warn!("  ⚠ {}: couldn't repair it: {}", path.display(), e);
                             entry["error"] = e.to_string().into();
                         }
                     }
                 } else {
-                    eprintln!(
+                    crate::info!(
                         "  • {}: colour profile split into {} chunks all labelled \"1 of 1\"",
                         path.display(),
                         chunks
@@ -1608,7 +1608,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
             }
             crate::jpeg::ProfileProblem::Broken { chunks } => {
                 damaged += 1;
-                eprintln!(
+                crate::warn!(
                     "  ✗ {}: colour profile damaged ({} chunks); can't be repaired safely — \
                      save it again from an image editor",
                     path.display(),
@@ -1622,24 +1622,25 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         results.push(entry);
     }
 
-    eprintln!("Checked {} JPEG file(s).", files.len());
+    crate::info!("Checked {} JPEG file(s).", files.len());
     if mislabelled == 0 && damaged == 0 {
-        eprintln!("✓ None has a colour profile O2 Cloud can't read.");
+        crate::info!("✓ None has a colour profile O2 Cloud can't read.");
     }
     if mislabelled > 0 && apply {
-        eprintln!(
+        crate::info!(
             "✓ Repaired {} of {} with a mislabelled colour profile.",
-            fixed, mislabelled
+            fixed,
+            mislabelled
         );
     } else if mislabelled > 0 {
-        eprintln!(
+        crate::info!(
             "→ {} with a mislabelled colour profile; run again with --apply to repair them \
              (only the labels change, not the image).",
             mislabelled
         );
     }
     if damaged > 0 {
-        eprintln!(
+        crate::warn!(
             "⚠ {} with a damaged colour profile; save them again from an image editor.",
             damaged
         );
@@ -1796,7 +1797,7 @@ pub async fn upload_file(
                 });
             }
             OnConflict::Skip => {
-                eprintln!("≠ {} is already there with another size: left alone", name);
+                crate::info!("≠ {} is already there with another size: left alone", name);
                 if json {
                     out["action"] = "differs".into();
                     if *parts {
@@ -1837,9 +1838,10 @@ pub async fn upload_file(
         }
     }
 
+    let bar = crate::ui::start("Uploading", 1, size);
     let mut replaced = None;
     let uploaded = if let Decision::Changed { old } = decision {
-        eprintln!(
+        crate::info!(
             "→ Replacing {} in the cloud with {} ({})...",
             name,
             local_path.display(),
@@ -1852,7 +1854,7 @@ pub async fn upload_file(
         replaced = Some(old);
         up
     } else {
-        eprintln!(
+        crate::info!(
             "→ Uploading {} ({})...",
             local_path.display(),
             format_size(size)
@@ -1872,6 +1874,7 @@ pub async fn upload_file(
         .await?
     };
 
+    drop(bar);
     crate::cache::note_uploaded(&auth.msisdn, &uploaded.ids);
     let all_skipped = uploaded.skipped == uploaded.ids.len();
     let done = if all_skipped {
@@ -1880,10 +1883,10 @@ pub async fn upload_file(
         "Uploaded successfully"
     };
     match uploaded.ids.as_slice() {
-        [id] => eprintln!("✓ {} (id: {})", done, id),
+        [id] => crate::info!("✓ {} (id: {})", done, id),
         ids => {
             let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
-            eprintln!(
+            crate::info!(
                 "✓ {} in {} parts (ids: {})",
                 done,
                 ids.len(),
@@ -1976,7 +1979,7 @@ pub async fn upload_dir(
         // them rather than upload them again as `name (1)`.
         let (media, unsettled) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
         if unsettled > 0 {
-            eprintln!(
+            crate::warn!(
                 "⚠ {} file(s) uploaded moments ago still aren't listed; if any of them \
                  is in this folder it may be uploaded again as `name (1)`",
                 unsettled
@@ -2033,13 +2036,13 @@ pub async fn upload_dir(
     let rejected = keep_within_o2_limits(&mut entries, local_dir, top_level);
     for (path, is_dir, reason) in &rejected {
         if *is_dir {
-            eprintln!(
+            crate::warn!(
                 "  ⚠ Skipping {}/ and what's in it: {}",
                 local_path_in(local_dir, path),
                 reason
             );
         } else if reason.starts_with("the name") {
-            eprintln!(
+            crate::warn!(
                 "  ⚠ Skipping {}: {}",
                 local_path_in(local_dir, path),
                 reason
@@ -2047,7 +2050,7 @@ pub async fn upload_dir(
         }
     }
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
-    eprintln!(
+    crate::info!(
         "→ {} {} ({}) — {} files, {} dirs{}...",
         if opts.dry_run {
             "Checking (dry run)"
@@ -2186,6 +2189,11 @@ pub async fn upload_dir(
     // alone rather than each failing the same way.
     let expired = std::sync::atomic::AtomicBool::new(false);
     let expired = &expired;
+    let bar = crate::ui::start(
+        "Uploading",
+        if opts.dry_run { 0 } else { file_count as u64 },
+        total_size,
+    );
     let mut results: Vec<(usize, serde_json::Value, Result<FileOutcome, O2Error>)> =
         futures_util::stream::iter(files)
             .map(|(i, file_path, parent_o2)| async move {
@@ -2208,7 +2216,7 @@ pub async fn upload_dir(
                 let modified = file_meta.and_then(|m| m.modified().ok());
 
                 if !opts.dry_run {
-                    eprintln!(
+                    crate::detail!(
                         "  [{}/{}] 📄 {} ({})",
                         i + 1,
                         file_count,
@@ -2224,7 +2232,7 @@ pub async fn upload_dir(
                     "size": size,
                 });
                 if file_meta_ok && is_empty_image(&name, size) {
-                    eprintln!(
+                    crate::detail!(
                         "  ∅ {} is empty: skipped (O2 Cloud rejects empty images)",
                         name
                     );
@@ -2279,13 +2287,18 @@ pub async fn upload_dir(
                 }
                 if let (true, Some(decision)) = (opts.dry_run, &decision) {
                     match &decision {
-                        Decision::New => eprintln!("  + {}", local),
-                        Decision::Changed { .. } => eprintln!("  ↻ {} (changed locally)", local),
-                        Decision::Resume => eprintln!("  … {} (parts missing)", local),
-                        Decision::Differs { .. } if policy == OnConflict::Skip => {
-                            eprintln!("  ≠ {} (another size than in the cloud: left alone)", local)
+                        Decision::New => crate::detail!("  + {}", local),
+                        Decision::Changed { .. } => {
+                            crate::detail!("  ↻ {} (changed locally)", local)
                         }
-                        Decision::Differs { .. } => eprintln!(
+                        Decision::Resume => crate::detail!("  … {} (parts missing)", local),
+                        Decision::Differs { .. } if policy == OnConflict::Skip => {
+                            crate::detail!(
+                                "  ≠ {} (another size than in the cloud: left alone)",
+                                local
+                            )
+                        }
+                        Decision::Differs { .. } => crate::detail!(
                             "  ≠ {} (another size than in the cloud: a conflict, see \
                              --on-conflict)",
                             local
@@ -2322,7 +2335,7 @@ pub async fn upload_dir(
                 let folder = parent_o2.unwrap_or(root_parent);
                 let uploaded = match decision {
                     Some(Decision::Changed { old }) => {
-                        eprintln!("  ↻ {} changed locally: replacing the cloud's copy", local);
+                        crate::detail!("  ↻ {} changed locally: replacing the cloud's copy", local);
                         replace_file(
                             client, auth, file_path, &name, size, modified, folder, opts, &old,
                         )
@@ -2330,14 +2343,14 @@ pub async fn upload_dir(
                         .map(|up| FileOutcome::Updated(up, old))
                     }
                     Some(Decision::Older { cloud }) => {
-                        eprintln!(
+                        crate::detail!(
                             "  = {} is older locally than in the cloud: left alone",
                             local
                         );
                         Ok(FileOutcome::Older(cloud))
                     }
                     Some(Decision::Differs { cloud, parts, .. }) if policy == OnConflict::Skip => {
-                        eprintln!(
+                        crate::detail!(
                             "  ≠ {} has another size than in the cloud: left alone",
                             local
                         );
@@ -2348,7 +2361,7 @@ pub async fn upload_dir(
                         parts,
                         size: cloud_size,
                     }) => {
-                        eprintln!(
+                        crate::warn!(
                             "  ≠ {} has another size than in the cloud ({} there, {} here): \
                              not uploaded",
                             local,
@@ -2377,17 +2390,30 @@ pub async fn upload_dir(
                 match &uploaded {
                     Err(O2Error::SessionExpired) => {
                         if !expired.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            eprintln!("  ✗ The session expired while uploading {}", name);
+                            crate::warn!("  ✗ The session expired while uploading {}", name);
                         }
                     }
-                    Err(e) => eprintln!("  ⚠ Upload failed for {}: {}", name, e),
+                    Err(e) => crate::warn!("  ⚠ Upload failed for {}: {}", name, e),
                     Ok(_) => {}
                 }
                 (i, result, uploaded)
             })
+            // Each file, as it finishes, for the progress bar.
+            .map(|file| async move {
+                let done = file.await;
+                let (_, result, outcome) = &done;
+                let moved = match outcome {
+                    Ok(FileOutcome::Updated(..)) => true,
+                    Ok(FileOutcome::Uploaded(up)) => !up.empty && up.skipped < up.ids.len(),
+                    _ => false,
+                };
+                crate::ui::file_done(result["size"].as_u64().unwrap_or(0), moved);
+                done
+            })
             .buffer_unordered(opts.jobs.max(1))
             .collect()
             .await;
+    drop(bar);
     results.sort_by_key(|(i, _, _)| *i);
 
     // One entry per file for `--json`, failed uploads included.
@@ -2507,7 +2533,7 @@ pub async fn upload_dir(
         .collect();
     if opts.dry_run {
         let n = |k| planned.get(k).copied().unwrap_or(0);
-        eprintln!(
+        crate::info!(
             "Dry run: {} to upload, {} to update, {} to resume, {} unchanged, {} older locally, \
              {}{} empty image(s), {} beyond O2 Cloud's limits; nothing was changed.",
             n("upload"),
@@ -2547,28 +2573,28 @@ pub async fn upload_dir(
     crate::cache::note_uploaded(&auth.msisdn, &uploaded_ids);
     let too_big = rejected.iter().filter(|(_, is_dir, _)| !is_dir).count();
     if too_big > 0 {
-        eprintln!(
+        crate::warn!(
             "⚠ {} file(s) not uploaded: beyond O2 Cloud's limits on names or folder depth",
             too_big
         );
     }
     if skipped_entries > 0 {
-        eprintln!(
+        crate::info!(
             "  (skipped {} hidden or system files/dirs: .git, .DS_Store, Thumbs.db, etc.)",
             skipped_entries
         );
     }
     if skipped > 0 {
-        eprintln!("  ({} file(s) were already uploaded)", skipped);
+        crate::info!("  ({} file(s) were already uploaded)", skipped);
     }
     if older > 0 {
-        eprintln!(
+        crate::info!(
             "  ({} file(s) are older locally than in the cloud; left alone)",
             older
         );
     }
     if conflicts > 0 {
-        eprintln!(
+        crate::warn!(
             "⚠ {} file(s) have another size than in the cloud and weren't uploaded; \
              run again with --on-conflict overwrite to replace the cloud's copies, or \
              --on-conflict skip to leave them",
@@ -2576,29 +2602,29 @@ pub async fn upload_dir(
         );
     }
     if differs > 0 {
-        eprintln!(
+        crate::info!(
             "  ({} file(s) have another size than in the cloud; left alone. \
              --on-conflict overwrite replaces the cloud's copies)",
             differs
         );
     }
     if updated > 0 {
-        eprintln!(
+        crate::info!(
             "↻ Updated {} changed file(s); their old versions are in the trash",
             updated
         );
     }
     if empty_images > 0 {
-        eprintln!(
+        crate::info!(
             "  ({} empty image(s) skipped: O2 Cloud rejects empty .{} files)",
             empty_images,
             REJECTED_IF_EMPTY.join(", .")
         );
     }
     if failed > 0 {
-        eprintln!("⚠ {} file(s) failed to upload", failed);
+        crate::warn!("⚠ {} file(s) failed to upload", failed);
     }
-    eprintln!(
+    crate::info!(
         "{} Uploaded {} file(s) from {}{}",
         if failed + too_big + not_done > 0 {
             "⚠"
@@ -2614,7 +2640,7 @@ pub async fn upload_dir(
         }
     );
     if not_done > 0 {
-        eprintln!(
+        crate::warn!(
             "✗ {} file(s) not uploaded: the session expired. Run the same command \
              with --skip-existing to log in and carry on.",
             not_done
@@ -2744,11 +2770,11 @@ async fn ensure_folder(
         .iter()
         .find(|f| f.name == name && f.parentid == parent)
     {
-        eprintln!("  📁 {}/ (exists id:{})", name, f.id);
+        crate::detail!("  📁 {}/ (exists id:{})", name, f.id);
         return Ok(f.id);
     }
     let id = client.create_folder(name, parent, auth).await?;
-    eprintln!("  📁 {}/ (created id:{})", name, id);
+    crate::detail!("  📁 {}/ (created id:{})", name, id);
     Ok(id)
 }
 
@@ -2863,7 +2889,7 @@ fn walk_dir(
             EntryKind::Dir => walk_dir(&path, entries, skipped)?,
             EntryKind::File => entries.push((path, false)),
             EntryKind::SymlinkedDir => {
-                eprintln!("  ⚠ Skipping symlinked directory {}", path.display())
+                crate::warn!("  ⚠ Skipping symlinked directory {}", path.display())
             }
         }
     }
@@ -2983,10 +3009,10 @@ async fn zip_and_upload(
     opts: &UploadOptions,
     json: bool,
 ) -> Result<(), O2Error> {
-    eprintln!("→ Zipping {}...", local_dir.display());
+    crate::info!("→ Zipping {}...", local_dir.display());
     let (dir, zip_path) = (local_dir.to_path_buf(), tmp_zip.to_path_buf());
     let total_size = spawn_blocking_io(move || build_zip(&dir, &zip_path)).await?;
-    eprintln!(
+    crate::info!(
         "  Created {} ({})",
         tmp_zip.display(),
         format_size(total_size)
@@ -3041,7 +3067,7 @@ fn add_dir_to_zip(
         match entry_kind(&entry) {
             EntryKind::Dir => add_dir_to_zip(zip, base, &path, options)?,
             EntryKind::SymlinkedDir => {
-                eprintln!("  ⚠ Skipping symlinked directory {}", path.display())
+                crate::warn!("  ⚠ Skipping symlinked directory {}", path.display())
             }
             EntryKind::File => {
                 // ZIP entries always use `/` as the separator, regardless of
@@ -3178,14 +3204,15 @@ pub async fn download_file(
         crate::api::create_new_file(&output_path).await?
     };
     let have = file.metadata().await?.len();
+    let bar = crate::ui::start("Downloading", 1, size.unwrap_or(0).saturating_sub(have));
     match (resuming, pieces.len()) {
-        (true, _) => eprintln!(
+        (true, _) => crate::info!(
             "→ Resuming {} from {}...",
             output_path.display(),
             format_size(have)
         ),
-        (false, 1) => eprintln!("→ Downloading media {}...", ids[0]),
-        (false, n) => eprintln!("→ Downloading {} parts ({})...", n, ids[0]),
+        (false, 1) => crate::info!("→ Downloading media {}...", ids[0]),
+        (false, n) => crate::info!("→ Downloading {} parts ({})...", n, ids[0]),
     }
     // The listing's URL for a single file; parts get a fresh one each,
     // as they may expire during a long join.
@@ -3202,16 +3229,17 @@ pub async fn download_file(
         download_dir::fetch_pieces(client, auth, &pieces, size, &mut file, &output_path, &urls)
             .await
             .inspect_err(|_| {
-                eprintln!(
+                crate::warn!(
                     "  (the part downloaded stays in {}: run the same command again to resume)",
                     output_path.display()
                 );
             })?;
+    drop(bar);
     let mtime = pieces[0].modificationdate.or(pieces[0].creationdate);
     download_dir::finish(file, mtime, &output_path).await?;
     let _ = std::fs::remove_file(&marker);
 
-    eprintln!(
+    crate::info!(
         "✓ Downloaded {} to {}",
         format_size(bytes_written),
         output_path.display()
@@ -3433,9 +3461,9 @@ pub async fn delete_target(
         Item::File(item) => delete_file(client, auth, item).await,
         Item::Parts(name, parts) => {
             let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
-            eprintln!("→ Deleting {} ({} parts)...", name, ids.len());
+            crate::info!("→ Deleting {} ({} parts)...", name, ids.len());
             delete_files_batched(client, auth, &ids).await?;
-            eprintln!("✓ Deleted {} ({} parts)", name, ids.len());
+            crate::info!("✓ Deleted {} ({} parts)", name, ids.len());
             Ok(())
         }
     }
@@ -3700,7 +3728,7 @@ async fn listed_media(
             return Ok(media);
         }
         if delay == NEW_UPLOAD_FIRST_POLL {
-            eprintln!(
+            crate::info!(
                 "  {} isn't listed yet; waiting up to {} s in case it was just uploaded...",
                 id,
                 NEW_UPLOAD_WAIT.as_secs()
@@ -3816,7 +3844,7 @@ pub async fn share(
             let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
             let path = file_path(parts[0], &folders, &folder_name);
             let path = path.strip_suffix(".001").unwrap_or(&path).to_string();
-            eprintln!(
+            crate::info!(
                 "  {} is in {} parts: the link has them all, to download and join \
                  (`cat {}.0* > {}`, or 7-Zip)",
                 name,
@@ -3828,7 +3856,7 @@ pub async fn share(
         }
     };
 
-    eprintln!(
+    crate::info!(
         "✓ Public link created for {}{} — anyone with it can access it:",
         what,
         if is_folder { "/" } else { "" }
@@ -3844,9 +3872,10 @@ pub async fn share(
         println!("{}", link.url);
     }
     if is_folder {
-        eprintln!(
+        crate::info!(
             "  (link {}; remove it with `o2cloud unshare {}`)",
-            link.id, link.id
+            link.id,
+            link.id
         );
     }
     Ok(())
@@ -3917,7 +3946,7 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
     if let Ok(id) = target.parse::<u64>() {
         if links.iter().any(|l| l.id == id) {
             client.delete_links(&[id], auth).await?;
-            eprintln!("✓ Removed public link {}", id);
+            crate::info!("✓ Removed public link {}", id);
             return Ok(());
         }
     }
@@ -3940,7 +3969,7 @@ pub async fn unshare(client: &O2Client, auth: &AuthConfig, target: &str) -> Resu
                 return Err(O2Error::NotFound(format!("{} is not shared", path)));
             }
             client.delete_links(&ids, auth).await?;
-            eprintln!("✓ {} is no longer shared", path);
+            crate::info!("✓ {} is no longer shared", path);
             Ok(())
         }
         Item::File(_) | Item::Parts(..) => Err(O2Error::Invalid(
@@ -3975,7 +4004,7 @@ pub async fn move_item(
             let dest_id = resolve_target(Some(destination.to_string()), &folders, &folder_name)?;
             let dest_path = resolve_path(dest_id, &folder_name, &folders);
             if parts[0].folderid == Some(dest_id) {
-                eprintln!("{} is already in {}", name, dest_path);
+                crate::info!("{} is already in {}", name, dest_path);
                 return Ok(());
             }
             let ids: Vec<u64> = parts.iter().map(|p| p.id).collect();
@@ -3995,7 +4024,7 @@ pub async fn move_item(
                 |p| (part(p), serde_json::json!({ "folderid": p.folderid })),
             )
             .await?;
-            eprintln!("✓ Moved {} ({} parts) → {}", name, parts.len(), dest_path);
+            crate::info!("✓ Moved {} ({} parts) → {}", name, parts.len(), dest_path);
             return Ok(());
         }
     };
@@ -4004,7 +4033,7 @@ pub async fn move_item(
     let from = file_path(item, &folders, &folder_name);
 
     if item.folderid == Some(dest_id) {
-        eprintln!("{} is already in {}", from, dest_path);
+        crate::info!("{} is already in {}", from, dest_path);
         return Ok(());
     }
     if files_in(client, auth, Some(dest_id), &media, complete)
@@ -4027,7 +4056,7 @@ pub async fn move_item(
             auth,
         )
         .await?;
-    eprintln!("✓ Moved {} → {}", from, dest_path);
+    crate::info!("✓ Moved {} → {}", from, dest_path);
     Ok(())
 }
 
@@ -4052,7 +4081,7 @@ async fn move_folder(
     let dest_path = resolve_path(dest_id, folder_name, folders);
 
     if folder.parentid == dest_id {
-        eprintln!("{}/ is already in {}", from, dest_path);
+        crate::info!("{}/ is already in {}", from, dest_path);
         return Ok(());
     }
     if subtree_ids(folder_id, folders).contains(&dest_id) {
@@ -4074,7 +4103,7 @@ async fn move_folder(
     client
         .update_folder(folder_id, &folder.name, dest_id, auth)
         .await?;
-    eprintln!("✓ Moved {}/ → {}", from, dest_path);
+    crate::info!("✓ Moved {}/ → {}", from, dest_path);
     Ok(())
 }
 
@@ -4155,7 +4184,7 @@ pub async fn rename_item(
                 },
             )
             .await?;
-            eprintln!("✓ Renamed {} → {} ({} parts)", name, new_name, parts.len());
+            crate::info!("✓ Renamed {} → {} ({} parts)", name, new_name, parts.len());
             return Ok(());
         }
     };
@@ -4189,7 +4218,7 @@ pub async fn rename_item(
             auth,
         )
         .await?;
-    eprintln!("✓ Renamed {} → {}", from, new_name);
+    crate::info!("✓ Renamed {} → {}", from, new_name);
     Ok(())
 }
 
@@ -4212,7 +4241,7 @@ async fn rename_folder(
         .ok_or_else(|| O2Error::NotFound(format!("folder {}", folder_id)))?;
     let from = resolve_path(folder_id, folder_name, folders);
     if folder.name == new_name {
-        eprintln!("{}/ is already called '{}'", from, new_name);
+        crate::info!("{}/ is already called '{}'", from, new_name);
         return Ok(());
     }
     if folders
@@ -4228,7 +4257,7 @@ async fn rename_folder(
     client
         .update_folder(folder_id, new_name, folder.parentid, auth)
         .await?;
-    eprintln!("✓ Renamed {}/ → {}/", from, new_name);
+    crate::info!("✓ Renamed {}/ → {}/", from, new_name);
     Ok(())
 }
 
@@ -4296,7 +4325,7 @@ pub async fn copy_item(
             } else {
                 format!("{}/{}", dest_path, name)
             };
-            eprintln!("✓ Copied {} ({} parts) → {}", base, parts.len(), to);
+            crate::info!("✓ Copied {} ({} parts) → {}", base, parts.len(), to);
             if json {
                 print_json(&serde_json::json!({
                     "parts": ids,
@@ -4331,7 +4360,7 @@ pub async fn copy_item(
     } else {
         format!("{}/{}", dest_path, name)
     };
-    eprintln!("✓ Copied {} → {} (id:{})", from, to, id);
+    crate::info!("✓ Copied {} → {} (id:{})", from, to, id);
     if json {
         print_json(&serde_json::json!({
             "id": id,
@@ -4397,13 +4426,13 @@ pub async fn make_folder(
             }
             None => {
                 current = client.create_folder(part, current, auth).await?;
-                eprintln!("✓ Created folder {}/ (id:{})", shown, current);
+                crate::info!("✓ Created folder {}/ (id:{})", shown, current);
             }
         }
     }
     let created = !folders.iter().any(|f| f.id == current);
     if !created {
-        eprintln!("{}/ already exists (id:{})", shown, current);
+        crate::info!("{}/ already exists (id:{})", shown, current);
     }
     if json {
         print_json(&serde_json::json!({
@@ -4628,7 +4657,7 @@ async fn delete_folder(
 
     // Delete the folder itself
     client.delete_folder(folder_id, auth).await?;
-    eprintln!("✓ Deleted folder {}/ (id:{})", name, folder_id);
+    crate::info!("✓ Deleted folder {}/ (id:{})", name, folder_id);
     Ok(())
 }
 
@@ -4698,9 +4727,9 @@ async fn delete_file(
     let media_id = item.id;
     let name = item.name.as_deref().unwrap_or("?");
 
-    eprintln!("→ Deleting {} ({})...", name, media_id);
+    crate::info!("→ Deleting {} ({})...", name, media_id);
     client.delete_files(&[media_id], auth).await?;
-    eprintln!("✓ Deleted {} ({})", name, media_id);
+    crate::info!("✓ Deleted {} ({})", name, media_id);
     Ok(())
 }
 

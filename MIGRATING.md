@@ -11,6 +11,7 @@
 | [Exit codes](#exit-codes) | Every error exits with `1` | `2`–`7` by kind of error, `1` for anything else | Treat any non-zero code as an error, as before, or use the new codes |
 | [Errors with `--json`](#errors-with---json) | Only `Error: …` on stderr | Also `{"error": {…}}` on stdout | Check the exit code before reading stdout as a result |
 | [Session expired](#session-expired-and-the-login-window) | Opens the login window in the middle of any command | Opens it by itself only at a terminal; otherwise exit code `4` | Run `o2cloud login` when you get `4` |
+| [Messages](#fewer-lines-on-stderr) | A line per file on stderr | A progress bar and a summary | `-v` for a line per file; `--json` for results |
 | [A file already in the cloud](#files-already-in-the-cloud) | Uploaded again; O2 Cloud names it `name (1)` | Same size: skipped. Another size: a conflict (`--on-conflict`) | Add `--on-conflict duplicate` for the old behaviour, or handle exit code `5` |
 
 What doesn't change:
@@ -98,6 +99,12 @@ A file in parts has `parts` (a list of IDs) instead of `id`.
 - **For the 0.x behaviour,** add `--on-conflict duplicate`.
 - **In an app,** don't pass `--on-conflict` the first time. On exit code `5`, show the user each `conflict` entry ("you have a.jpg, 2.4 MB, 02/06/2024; the cloud has 2.1 MB, 01/05/2024: overwrite or skip?"). Then run it again with `--on-conflict overwrite` or `--on-conflict skip`. You can run it once per file for answers that differ.
 - **In a script** that relied on `--skip-existing`, nothing changes.
+
+## Fewer lines on stderr
+
+0.x printed a line for every file of `upload-dir` and `download-dir` (`[12/300] 📄 …`, `= … skipped`, each part…). 1.0 shows a progress bar at a terminal, or a status line a minute when stderr goes to a file, plus warnings and the summary.
+
+**What to do:** add `-v` to get the line per file again. Don't parse stderr for results: use `--json`. `-q` leaves only warnings and errors.
 
 ## Error messages end with the run's ID
 

@@ -26,6 +26,12 @@ See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
   options in the logged command line.
 
 ### Changed (breaking)
+- Long transfers show a progress bar (files, bytes, speed, time left) on
+  one line at a terminal, or a status line a minute in a log file,
+  instead of a line per file. `-v` / `--verbose` brings back a line for
+  each file (uploaded, skipped, each part…), and `-q` / `--quiet` shows
+  only warnings and errors. Warnings (failures, conflicts, files left
+  out) always show.
 - Exit codes say what went wrong: 2 a request it won't carry out as
   given, 3 not found, 4 not logged in or session expired, 5 conflict
   (something with that name is already there), 6 some files of a run
