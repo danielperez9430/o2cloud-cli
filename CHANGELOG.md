@@ -2,9 +2,14 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
-## [Unreleased] — 1.0.0
+## [1.0.0] — 2026-11-26
 
-See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
+The first stable version: safer defaults (uploading twice never makes
+copies; conflicts are asked about or reported), exit codes and JSON
+errors that scripts and apps can rely on, live progress for apps
+(`--json-lines`), a progress bar, and logs plus `debug-report` for bug
+reports, with session keys and personal names kept out of them. See
+[MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
 
 ### Added
 - `upload` takes several files, and the folder to put them in as the
