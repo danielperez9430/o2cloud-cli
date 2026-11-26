@@ -123,6 +123,24 @@ Ejecuta `o2cloud <comando> --help` para ver todas las opciones.
 { "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
 ```
 
+**Para apps: `--json-lines`.** `upload`, `upload-dir`, `upload-zip`, `download` y `download-dir` pueden escribir eventos según ocurren, un objeto JSON por línea en stdout:
+
+```json
+{"event":"start","command":"upload-dir","files":3,"bytes":40000004,"schema":1,"run":"3fa9c1d2"}
+{"event":"progress","local":"big.bin","bytes":8126464,"size":20000000}
+{"event":"file","local":"big.bin","action":"uploaded","ids":[1615362889],"id":1615362889,"size":20000000,"sha256":"9f2c…"}
+{"event":"summary","files":3,"uploaded":3,"skipped":0,"conflicts":0,"failed":0}
+```
+
+- `start` abre la ejecución, con `files`, `bytes` y la versión del formato, `schema`.
+- `progress` sale como mucho cuatro veces por segundo por archivo, con los bytes movidos hasta ese momento.
+- `file` es la misma entrada que da `--json`. Lleva `ids` (siempre una lista) y, si el archivo se subió entero en esta ejecución, su `sha256`, calculado mientras se lee para enviarlo.
+- `retry` avisa de que el servidor estaba ocupado o fallando y la petición se repite.
+- `summary` da los totales.
+- `error` cierra una ejecución que falló, igual que con `--json`.
+
+Los códigos de salida son los mismos que sin la opción.
+
 Códigos de salida: `0` hecho; `2` una petición que no hará tal como se pide (argumentos incorrectos, un nombre ambiguo, un cambio que O2 Cloud no permite); `3` no encontrado; `4` sin sesión o sesión caducada (`code` `not_logged_in` / `session_expired`; entra con `o2cloud login`); `5` conflicto, ya hay algo con ese nombre (`conflict`); `6` fallaron algunos archivos y el resto se hizo (`partial_failure`; relánzalo con `--skip-existing`); `7` falló la red o O2 Cloud (`network`, `server_error`, `bad_response`; vale la pena reintentar más tarde); `1` cualquier otra cosa. `retryable` es `true` para 6 y 7.
 
 Cuando la sesión ha caducado, la ventana de login solo se abre sola si estás en un terminal. Un script o una app recibe el código 4 y entra con `o2cloud login` cuando decida (con `O2CLOUD_LOGIN_WINDOW=1` se abre igualmente).

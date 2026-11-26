@@ -1340,6 +1340,7 @@ async fn upload_local_file(
             crate::detail!("  = {} is already there (id: {}), skipped", piece_name, id);
             uploaded.ids.push(*id);
             uploaded.skipped += 1;
+            crate::events::hash_gap();
             continue;
         }
         if split {
@@ -1739,6 +1740,13 @@ pub async fn upload_file(
         Some(id) => id,
         None => root_folder_id(client, auth).await?,
     };
+    crate::events::emit(
+        "start",
+        serde_json::json!({
+            "command": "upload", "files": 1, "bytes": size,
+            "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
+        }),
+    );
     let (existing, mdates) = if needs_listing(opts, size) {
         let media = client.get_folder_media(folder_id, auth).await?;
         let mdates: HashMap<u64, u64> = media
@@ -1798,19 +1806,19 @@ pub async fn upload_file(
             }
             OnConflict::Skip => {
                 crate::info!("≠ {} is already there with another size: left alone", name);
-                if json {
+                if json || crate::events::on() {
                     out["action"] = "differs".into();
                     if *parts {
                         out["parts"] = cloud.clone().into();
                     } else {
                         out["id"] = cloud.first().copied().into();
                     }
-                    print_json(&out);
+                    output_entry(json, &out);
                 }
                 return Ok(());
             }
             _ => {
-                if json {
+                if json || crate::events::on() {
                     out["action"] = "conflict".into();
                     out["modified"] = format_date_iso(Some(local_ms));
                     let mut there = serde_json::json!({
@@ -1823,7 +1831,7 @@ pub async fn upload_file(
                         there["id"] = cloud.first().copied().into();
                     }
                     out["cloud"] = there;
-                    print_json(&out);
+                    output_entry(json, &out);
                 }
                 return Err(O2Error::Conflict(format!(
                     "this folder already has {} with another size ({} there, {} here): not \
@@ -1839,40 +1847,45 @@ pub async fn upload_file(
     }
 
     let bar = crate::ui::start("Uploading", 1, size);
-    let mut replaced = None;
-    let uploaded = if let Decision::Changed { old } = decision {
-        crate::info!(
-            "→ Replacing {} in the cloud with {} ({})...",
-            name,
-            local_path.display(),
-            format_size(size)
-        );
-        let up = replace_file(
-            client, auth, local_path, &name, size, modified, folder_id, opts, &old,
-        )
-        .await?;
-        replaced = Some(old);
-        up
-    } else {
-        crate::info!(
-            "→ Uploading {} ({})...",
-            local_path.display(),
-            format_size(size)
-        );
-        upload_local_file(
-            client,
-            auth,
-            local_path,
-            &name,
-            size,
-            modified,
-            folder_id,
-            &existing,
-            opts,
-            &mut Vec::new(),
-        )
-        .await?
-    };
+    let key = serde_json::json!({ "name": name });
+    let (uploaded, replaced, sha256) = crate::events::track(key, size, async {
+        let mut replaced = None;
+        let uploaded = if let Decision::Changed { old } = decision {
+            crate::info!(
+                "→ Replacing {} in the cloud with {} ({})...",
+                name,
+                local_path.display(),
+                format_size(size)
+            );
+            let up = replace_file(
+                client, auth, local_path, &name, size, modified, folder_id, opts, &old,
+            )
+            .await?;
+            replaced = Some(old);
+            up
+        } else {
+            crate::info!(
+                "→ Uploading {} ({})...",
+                local_path.display(),
+                format_size(size)
+            );
+            upload_local_file(
+                client,
+                auth,
+                local_path,
+                &name,
+                size,
+                modified,
+                folder_id,
+                &existing,
+                opts,
+                &mut Vec::new(),
+            )
+            .await?
+        };
+        Ok::<_, O2Error>((uploaded, replaced, crate::events::sha256(size)))
+    })
+    .await?;
 
     drop(bar);
     crate::cache::note_uploaded(&auth.msisdn, &uploaded.ids);
@@ -1894,12 +1907,13 @@ pub async fn upload_file(
             );
         }
     }
-    if json {
+    if json || crate::events::on() {
         let mut out = serde_json::json!({
             "name": name,
             "folderid": folder_id,
             "size": size,
             "skipped": all_skipped,
+            "ids": uploaded.ids,
         });
         if uploaded.parts > 0 {
             out["parts"] = uploaded.ids.clone().into();
@@ -1909,10 +1923,26 @@ pub async fn upload_file(
         if let Some(old) = replaced {
             out["action"] = "updated".into();
             out["replaced"] = old.into();
+        } else if crate::events::on() {
+            out["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
         }
-        print_json(&out);
+        if let Some(sha) = sha256 {
+            out["sha256"] = sha.into();
+        }
+        output_entry(json, &out);
+        crate::events::emit("summary", serde_json::json!({ "files": 1 }));
     }
     Ok(())
+}
+
+/// A single command's result: printed with `--json`, or as a `file`
+/// event with `--json-lines`.
+fn output_entry(json: bool, entry: &serde_json::Value) {
+    if crate::events::on() {
+        crate::events::emit("file", entry.clone());
+    } else if json {
+        print_json(entry);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -2050,6 +2080,13 @@ pub async fn upload_dir(
         }
     }
     let file_count = entries.iter().filter(|(_, is_dir)| !is_dir).count();
+    crate::events::emit(
+        "start",
+        serde_json::json!({
+            "command": "upload-dir", "files": file_count, "bytes": total_size,
+            "dry_run": opts.dry_run, "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
+        }),
+    );
     crate::info!(
         "→ {} {} ({}) — {} files, {} dirs{}...",
         if opts.dry_run {
@@ -2196,211 +2233,231 @@ pub async fn upload_dir(
     );
     let mut results: Vec<(usize, serde_json::Value, Result<FileOutcome, O2Error>)> =
         futures_util::stream::iter(files)
-            .map(|(i, file_path, parent_o2)| async move {
-                let name = file_path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                if expired.load(std::sync::atomic::Ordering::Relaxed) {
-                    let result = serde_json::json!({
+            .map(|(i, file_path, parent_o2)| {
+                let key = serde_json::json!({ "local": local_path_in(local_dir, file_path) });
+                crate::events::track(key, 0, async move {
+                    let name = file_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    if expired.load(std::sync::atomic::Ordering::Relaxed) {
+                        let result = serde_json::json!({
+                            "local": local_path_in(local_dir, file_path),
+                            "name": name,
+                            "folderid": parent_o2,
+                        });
+                        return (i, result, Err(O2Error::SessionExpired));
+                    }
+                    let file_meta = tokio::fs::metadata(file_path).await.ok();
+                    let file_meta_ok = file_meta.is_some();
+                    let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let modified = file_meta.and_then(|m| m.modified().ok());
+                    crate::events::set_size(size);
+
+                    if !opts.dry_run {
+                        crate::detail!(
+                            "  [{}/{}] 📄 {} ({})",
+                            i + 1,
+                            file_count,
+                            name,
+                            format_size(size)
+                        );
+                    }
+
+                    let mut result = serde_json::json!({
                         "local": local_path_in(local_dir, file_path),
                         "name": name,
                         "folderid": parent_o2,
+                        "size": size,
                     });
-                    return (i, result, Err(O2Error::SessionExpired));
-                }
-                let file_meta = tokio::fs::metadata(file_path).await.ok();
-                let file_meta_ok = file_meta.is_some();
-                let size = file_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified = file_meta.and_then(|m| m.modified().ok());
-
-                if !opts.dry_run {
-                    crate::detail!(
-                        "  [{}/{}] 📄 {} ({})",
-                        i + 1,
-                        file_count,
-                        name,
-                        format_size(size)
-                    );
-                }
-
-                let mut result = serde_json::json!({
-                    "local": local_path_in(local_dir, file_path),
-                    "name": name,
-                    "folderid": parent_o2,
-                    "size": size,
-                });
-                if file_meta_ok && is_empty_image(&name, size) {
-                    crate::detail!(
-                        "  ∅ {} is empty: skipped (O2 Cloud rejects empty images)",
-                        name
-                    );
-                    result["empty"] = true.into();
-                    if opts.dry_run {
-                        result["dry_run"] = true.into();
+                    if file_meta_ok && is_empty_image(&name, size) {
+                        crate::detail!(
+                            "  ∅ {} is empty: skipped (O2 Cloud rejects empty images)",
+                            name
+                        );
+                        result["empty"] = true.into();
+                        if opts.dry_run {
+                            result["dry_run"] = true.into();
+                        }
+                        let empty = Uploaded {
+                            ids: Vec::new(),
+                            parts: 0,
+                            skipped: 0,
+                            empty: true,
+                        };
+                        return (i, result, Ok(FileOutcome::Uploaded(empty)));
                     }
-                    let empty = Uploaded {
-                        ids: Vec::new(),
-                        parts: 0,
-                        skipped: 0,
-                        empty: true,
+                    // What was answered for this file, if asked.
+                    let policy = answers.get(&i).copied().unwrap_or(opts.on_conflict);
+                    let file_opts = UploadOptions {
+                        on_conflict: policy,
+                        ..opts.clone()
                     };
-                    return (i, result, Ok(FileOutcome::Uploaded(empty)));
-                }
-                // What was answered for this file, if asked.
-                let policy = answers.get(&i).copied().unwrap_or(opts.on_conflict);
-                let file_opts = UploadOptions {
-                    on_conflict: policy,
-                    ..opts.clone()
-                };
-                let opts = &file_opts;
-                let local_ms = modified.map(mtime_ms).unwrap_or(0);
-                let decision = (opts.skip_existing || opts.dry_run).then(|| {
-                    let siblings = file_path.parent().and_then(|p| local_names.get(p));
-                    let none = HashSet::new();
-                    let siblings = siblings.unwrap_or(&none);
-                    decide(
-                        &name, size, local_ms, parent_o2, existing, mdates, siblings, opts,
-                    )
-                });
-                let local = local_path_in(local_dir, file_path);
-                if crate::log::enabled(crate::log::Level::Debug) {
-                    let (label, cloud) = match &decision {
-                        Some(Decision::Changed { old }) => ("update", old.clone()),
-                        Some(Decision::Older { cloud }) => ("older", cloud.clone()),
-                        Some(Decision::Differs { cloud, .. }) => ("differs", cloud.clone()),
-                        Some(d) => (d.label(), Vec::new()),
-                        None => ("upload", Vec::new()),
-                    };
-                    let cloud_ms: Vec<Option<u64>> =
-                        cloud.iter().map(|id| mdates.get(id).copied()).collect();
-                    crate::log::debug(
-                        "decide",
-                        label,
-                        serde_json::json!({
-                            "local": local, "size": size, "local_ms": local_ms,
-                            "folder": parent_o2, "cloud": cloud, "cloud_ms": cloud_ms,
-                            "policy": format!("{:?}", policy).to_lowercase(),
-                        }),
-                    );
-                }
-                if let (true, Some(decision)) = (opts.dry_run, &decision) {
-                    match &decision {
-                        Decision::New => crate::detail!("  + {}", local),
-                        Decision::Changed { .. } => {
-                            crate::detail!("  ↻ {} (changed locally)", local)
-                        }
-                        Decision::Resume => crate::detail!("  … {} (parts missing)", local),
-                        Decision::Differs { .. } if policy == OnConflict::Skip => {
-                            crate::detail!(
-                                "  ≠ {} (another size than in the cloud: left alone)",
-                                local
-                            )
-                        }
-                        Decision::Differs { .. } => crate::detail!(
-                            "  ≠ {} (another size than in the cloud: a conflict, see \
+                    let opts = &file_opts;
+                    let local_ms = modified.map(mtime_ms).unwrap_or(0);
+                    let decision = (opts.skip_existing || opts.dry_run).then(|| {
+                        let siblings = file_path.parent().and_then(|p| local_names.get(p));
+                        let none = HashSet::new();
+                        let siblings = siblings.unwrap_or(&none);
+                        decide(
+                            &name, size, local_ms, parent_o2, existing, mdates, siblings, opts,
+                        )
+                    });
+                    let local = local_path_in(local_dir, file_path);
+                    if crate::log::enabled(crate::log::Level::Debug) {
+                        let (label, cloud) = match &decision {
+                            Some(Decision::Changed { old }) => ("update", old.clone()),
+                            Some(Decision::Older { cloud }) => ("older", cloud.clone()),
+                            Some(Decision::Differs { cloud, .. }) => ("differs", cloud.clone()),
+                            Some(d) => (d.label(), Vec::new()),
+                            None => ("upload", Vec::new()),
+                        };
+                        let cloud_ms: Vec<Option<u64>> =
+                            cloud.iter().map(|id| mdates.get(id).copied()).collect();
+                        crate::log::debug(
+                            "decide",
+                            label,
+                            serde_json::json!({
+                                "local": local, "size": size, "local_ms": local_ms,
+                                "folder": parent_o2, "cloud": cloud, "cloud_ms": cloud_ms,
+                                "policy": format!("{:?}", policy).to_lowercase(),
+                            }),
+                        );
+                    }
+                    if let (true, Some(decision)) = (opts.dry_run, &decision) {
+                        match &decision {
+                            Decision::New => crate::detail!("  + {}", local),
+                            Decision::Changed { .. } => {
+                                crate::detail!("  ↻ {} (changed locally)", local)
+                            }
+                            Decision::Resume => crate::detail!("  … {} (parts missing)", local),
+                            Decision::Differs { .. } if policy == OnConflict::Skip => {
+                                crate::detail!(
+                                    "  ≠ {} (another size than in the cloud: left alone)",
+                                    local
+                                )
+                            }
+                            Decision::Differs { .. } => crate::detail!(
+                                "  ≠ {} (another size than in the cloud: a conflict, see \
                              --on-conflict)",
-                            local
-                        ),
-                        _ => {}
-                    }
-                    result["action"] = decision.label().into();
-                    result["dry_run"] = true.into();
-                    match decision {
-                        Decision::Changed { old } => result["replaces"] = old.clone().into(),
-                        // The cloud's copy, as in the real run.
-                        Decision::Older { cloud } if cloud.len() > 1 => {
-                            result["parts"] = cloud.clone().into()
+                                local
+                            ),
+                            _ => {}
                         }
-                        Decision::Differs {
-                            cloud, parts: true, ..
-                        } => result["parts"] = cloud.clone().into(),
-                        Decision::Older { cloud } | Decision::Differs { cloud, .. }
-                            if !cloud.is_empty() =>
+                        result["action"] = decision.label().into();
+                        result["dry_run"] = true.into();
+                        match decision {
+                            Decision::Changed { old } => result["replaces"] = old.clone().into(),
+                            // The cloud's copy, as in the real run.
+                            Decision::Older { cloud } if cloud.len() > 1 => {
+                                result["parts"] = cloud.clone().into()
+                            }
+                            Decision::Differs {
+                                cloud, parts: true, ..
+                            } => result["parts"] = cloud.clone().into(),
+                            Decision::Older { cloud } | Decision::Differs { cloud, .. }
+                                if !cloud.is_empty() =>
+                            {
+                                result["id"] = cloud[0].into()
+                            }
+                            _ => {}
+                        }
+                        let label = match decision {
+                            Decision::Differs { .. } if policy != OnConflict::Skip => {
+                                result["action"] = "conflict".into();
+                                "conflict"
+                            }
+                            d => d.label(),
+                        };
+                        return (i, result, Ok(FileOutcome::Planned(label)));
+                    }
+                    let folder = parent_o2.unwrap_or(root_parent);
+                    let uploaded = match decision {
+                        Some(Decision::Changed { old }) => {
+                            crate::detail!(
+                                "  ↻ {} changed locally: replacing the cloud's copy",
+                                local
+                            );
+                            replace_file(
+                                client, auth, file_path, &name, size, modified, folder, opts, &old,
+                            )
+                            .await
+                            .map(|up| FileOutcome::Updated(up, old))
+                        }
+                        Some(Decision::Older { cloud }) => {
+                            crate::detail!(
+                                "  = {} is older locally than in the cloud: left alone",
+                                local
+                            );
+                            Ok(FileOutcome::Older(cloud))
+                        }
+                        Some(Decision::Differs { cloud, parts, .. })
+                            if policy == OnConflict::Skip =>
                         {
-                            result["id"] = cloud[0].into()
+                            crate::detail!(
+                                "  ≠ {} has another size than in the cloud: left alone",
+                                local
+                            );
+                            Ok(FileOutcome::Differs(cloud, parts))
                         }
-                        _ => {}
-                    }
-                    let label = match decision {
-                        Decision::Differs { .. } if policy != OnConflict::Skip => {
-                            result["action"] = "conflict".into();
-                            "conflict"
+                        Some(Decision::Differs {
+                            cloud,
+                            parts,
+                            size: cloud_size,
+                        }) => {
+                            crate::warn!(
+                                "  ≠ {} has another size than in the cloud ({} there, {} here): \
+                             not uploaded",
+                                local,
+                                format_size(cloud_size),
+                                format_size(size)
+                            );
+                            let cloud_ms = cloud.first().and_then(|id| mdates.get(id).copied());
+                            result["modified"] = format_date_iso(Some(local_ms));
+                            Ok(FileOutcome::Conflict(cloud, parts, cloud_size, cloud_ms))
                         }
-                        d => d.label(),
-                    };
-                    return (i, result, Ok(FileOutcome::Planned(label)));
-                }
-                let folder = parent_o2.unwrap_or(root_parent);
-                let uploaded = match decision {
-                    Some(Decision::Changed { old }) => {
-                        crate::detail!("  ↻ {} changed locally: replacing the cloud's copy", local);
-                        replace_file(
-                            client, auth, file_path, &name, size, modified, folder, opts, &old,
+                        _ => upload_local_file(
+                            client,
+                            auth,
+                            file_path,
+                            &name,
+                            size,
+                            modified,
+                            folder,
+                            existing,
+                            opts,
+                            &mut Vec::new(),
                         )
                         .await
-                        .map(|up| FileOutcome::Updated(up, old))
+                        .map(FileOutcome::Uploaded),
+                    };
+                    match &uploaded {
+                        Err(O2Error::SessionExpired) => {
+                            if !expired.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                crate::warn!("  ✗ The session expired while uploading {}", name);
+                            }
+                        }
+                        Err(e) => crate::warn!("  ⚠ Upload failed for {}: {}", name, e),
+                        Ok(_) => {}
                     }
-                    Some(Decision::Older { cloud }) => {
-                        crate::detail!(
-                            "  = {} is older locally than in the cloud: left alone",
-                            local
-                        );
-                        Ok(FileOutcome::Older(cloud))
-                    }
-                    Some(Decision::Differs { cloud, parts, .. }) if policy == OnConflict::Skip => {
-                        crate::detail!(
-                            "  ≠ {} has another size than in the cloud: left alone",
-                            local
-                        );
-                        Ok(FileOutcome::Differs(cloud, parts))
-                    }
-                    Some(Decision::Differs {
-                        cloud,
-                        parts,
-                        size: cloud_size,
-                    }) => {
-                        crate::warn!(
-                            "  ≠ {} has another size than in the cloud ({} there, {} here): \
-                             not uploaded",
-                            local,
-                            format_size(cloud_size),
-                            format_size(size)
-                        );
-                        let cloud_ms = cloud.first().and_then(|id| mdates.get(id).copied());
-                        result["modified"] = format_date_iso(Some(local_ms));
-                        Ok(FileOutcome::Conflict(cloud, parts, cloud_size, cloud_ms))
-                    }
-                    _ => upload_local_file(
-                        client,
-                        auth,
-                        file_path,
-                        &name,
-                        size,
-                        modified,
-                        folder,
-                        existing,
-                        opts,
-                        &mut Vec::new(),
-                    )
-                    .await
-                    .map(FileOutcome::Uploaded),
-                };
-                match &uploaded {
-                    Err(O2Error::SessionExpired) => {
-                        if !expired.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            crate::warn!("  ✗ The session expired while uploading {}", name);
+                    // What was sent, whole, in this run.
+                    if matches!(
+                        &uploaded,
+                        Ok(FileOutcome::Updated(..)) | Ok(FileOutcome::Uploaded(_))
+                    ) {
+                        if let Some(sha) = crate::events::sha256(size) {
+                            result["sha256"] = sha.into();
                         }
                     }
-                    Err(e) => crate::warn!("  ⚠ Upload failed for {}: {}", name, e),
-                    Ok(_) => {}
-                }
-                (i, result, uploaded)
+                    (i, result, uploaded)
+                })
             })
             // Each file, as it finishes, for the progress bar.
             .map(|file| async move {
-                let done = file.await;
+                let mut done = file.await;
+                describe(&mut done.1, &done.2);
+                crate::events::emit("file", done.1.clone());
                 let (_, result, outcome) = &done;
                 let moved = match outcome {
                     Ok(FileOutcome::Updated(..)) => true,
@@ -2423,92 +2480,29 @@ pub async fn upload_dir(
     // What this run put in the cloud, for the next listing (see below).
     let mut uploaded_ids: Vec<u64> = Vec::new();
     let mut planned: HashMap<&'static str, usize> = HashMap::new();
-    let set_ids = |result: &mut serde_json::Value, up: &Uploaded| {
-        if up.parts > 0 {
-            result["parts"] = up.ids.clone().into();
-        } else {
-            result["id"] = up.ids[0].into();
-        }
-    };
     let results: Vec<serde_json::Value> = results
         .into_iter()
-        .map(|(_, mut result, uploaded)| {
-            match uploaded {
-                Ok(FileOutcome::Uploaded(up)) if up.empty => {
-                    result["skipped"] = true.into();
-                    result["action"] = "empty".into();
-                    empty_images += 1;
-                }
+        .map(|(_, result, uploaded)| {
+            match &uploaded {
+                Ok(FileOutcome::Uploaded(up)) if up.empty => empty_images += 1,
                 Ok(FileOutcome::Uploaded(up)) => {
-                    let all_skipped = up.skipped == up.ids.len();
-                    if all_skipped {
+                    if up.skipped == up.ids.len() {
                         skipped += 1;
                     } else {
                         succeeded += 1;
                     }
-                    result["skipped"] = all_skipped.into();
-                    result["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
-                    set_ids(&mut result, &up);
                     uploaded_ids.extend(&up.ids);
                 }
-                Ok(FileOutcome::Updated(up, old)) => {
+                Ok(FileOutcome::Updated(up, _)) => {
                     updated += 1;
-                    result["skipped"] = false.into();
-                    result["action"] = "updated".into();
-                    result["replaced"] = old.into();
-                    set_ids(&mut result, &up);
                     uploaded_ids.extend(&up.ids);
                 }
-                Ok(outcome @ (FileOutcome::Older(_) | FileOutcome::Differs(..))) => {
-                    let (label, cloud, in_parts) = match outcome {
-                        FileOutcome::Older(cloud) => {
-                            older += 1;
-                            let in_parts = cloud.len() > 1;
-                            ("older", cloud, in_parts)
-                        }
-                        FileOutcome::Differs(cloud, in_parts) => {
-                            differs += 1;
-                            ("differs", cloud, in_parts)
-                        }
-                        _ => unreachable!(),
-                    };
-                    result["skipped"] = true.into();
-                    result["action"] = label.into();
-                    // The cloud's copy, as `skipped` entries have.
-                    if in_parts {
-                        result["parts"] = cloud.into();
-                    } else if let Some(id) = cloud.first() {
-                        result["id"] = (*id).into();
-                    }
-                }
-                Ok(FileOutcome::Planned(label)) => {
-                    *planned.entry(label).or_default() += 1;
-                }
-                Ok(FileOutcome::Conflict(cloud, in_parts, cloud_size, cloud_ms)) => {
-                    conflicts += 1;
-                    result["skipped"] = true.into();
-                    result["action"] = "conflict".into();
-                    let mut there = serde_json::json!({
-                        "size": cloud_size,
-                        "modified": format_date_iso(cloud_ms),
-                    });
-                    if in_parts {
-                        there["parts"] = cloud.into();
-                    } else if let Some(id) = cloud.first() {
-                        there["id"] = (*id).into();
-                    }
-                    result["cloud"] = there;
-                }
-                Err(O2Error::SessionExpired) => {
-                    result["error"] = O2Error::SessionExpired.to_string().into();
-                    result["action"] = "failed".into();
-                    not_done += 1;
-                }
-                Err(e) => {
-                    result["error"] = e.to_string().into();
-                    result["action"] = "failed".into();
-                    failed += 1;
-                }
+                Ok(FileOutcome::Older(_)) => older += 1,
+                Ok(FileOutcome::Differs(..)) => differs += 1,
+                Ok(FileOutcome::Planned(label)) => *planned.entry(label).or_default() += 1,
+                Ok(FileOutcome::Conflict(..)) => conflicts += 1,
+                Err(O2Error::SessionExpired) => not_done += 1,
+                Err(_) => failed += 1,
             }
             result
         })
@@ -2531,8 +2525,20 @@ pub async fn upload_dir(
             entry
         })
         .collect();
+    for entry in &beyond_limits {
+        crate::events::emit("file", entry.clone());
+    }
     if opts.dry_run {
         let n = |k| planned.get(k).copied().unwrap_or(0);
+        crate::events::emit(
+            "summary",
+            serde_json::json!({
+                "dry_run": true, "upload": n("upload"), "update": n("update"),
+                "resume": n("resume"), "unchanged": n("unchanged"), "older": n("older"),
+                "differs": n("differs"), "conflicts": n("conflict"), "empty": empty_images,
+                "beyond_limits": beyond_limits.len(),
+            }),
+        );
         crate::info!(
             "Dry run: {} to upload, {} to update, {} to resume, {} unchanged, {} older locally, \
              {}{} empty image(s), {} beyond O2 Cloud's limits; nothing was changed.",
@@ -2557,6 +2563,15 @@ pub async fn upload_dir(
         return Ok(());
     }
 
+    crate::events::emit(
+        "summary",
+        serde_json::json!({
+            "files": file_count, "uploaded": succeeded, "skipped": skipped,
+            "updated": updated, "older": older, "differs": differs, "conflicts": conflicts,
+            "empty": empty_images, "failed": failed + rejected.iter().filter(|r| !r.1).count(),
+            "not_done": not_done,
+        }),
+    );
     crate::log::info(
         "upload-dir",
         "done",
@@ -2670,6 +2685,72 @@ pub async fn upload_dir(
         )));
     }
     Ok(())
+}
+
+/// Fill in an `upload-dir` entry from what became of its file: `action`,
+/// `skipped`, the IDs (`id` or `parts`, and `ids` always), and what
+/// else the outcome says (`replaced`, `cloud`, `error`).
+fn describe(result: &mut serde_json::Value, outcome: &Result<FileOutcome, O2Error>) {
+    let set_ids = |result: &mut serde_json::Value, ids: &[u64], in_parts: bool| {
+        if in_parts {
+            result["parts"] = ids.to_vec().into();
+        } else if let Some(id) = ids.first() {
+            result["id"] = (*id).into();
+        }
+    };
+    match outcome {
+        Ok(FileOutcome::Uploaded(up)) if up.empty => {
+            result["skipped"] = true.into();
+            result["action"] = "empty".into();
+        }
+        Ok(FileOutcome::Uploaded(up)) => {
+            let all_skipped = up.skipped == up.ids.len();
+            result["skipped"] = all_skipped.into();
+            result["action"] = if all_skipped { "skipped" } else { "uploaded" }.into();
+            set_ids(result, &up.ids, up.parts > 0);
+        }
+        Ok(FileOutcome::Updated(up, old)) => {
+            result["skipped"] = false.into();
+            result["action"] = "updated".into();
+            result["replaced"] = old.clone().into();
+            set_ids(result, &up.ids, up.parts > 0);
+        }
+        // The cloud's copy, as `skipped` entries have.
+        Ok(FileOutcome::Older(cloud)) => {
+            result["skipped"] = true.into();
+            result["action"] = "older".into();
+            set_ids(result, cloud, cloud.len() > 1);
+        }
+        Ok(FileOutcome::Differs(cloud, in_parts)) => {
+            result["skipped"] = true.into();
+            result["action"] = "differs".into();
+            set_ids(result, cloud, *in_parts);
+        }
+        Ok(FileOutcome::Planned(_)) => {}
+        Ok(FileOutcome::Conflict(cloud, in_parts, cloud_size, cloud_ms)) => {
+            result["skipped"] = true.into();
+            result["action"] = "conflict".into();
+            let mut there = serde_json::json!({
+                "size": cloud_size,
+                "modified": format_date_iso(*cloud_ms),
+            });
+            set_ids(&mut there, cloud, *in_parts);
+            result["cloud"] = there;
+        }
+        Err(e) => {
+            result["error"] = e.to_string().into();
+            result["action"] = "failed".into();
+        }
+    }
+    // Always a list of IDs, whole file or parts.
+    let ids = match (result.get("id"), result.get("parts")) {
+        (Some(id), _) if id.is_u64() => Some(vec![id.clone()]),
+        (_, Some(serde_json::Value::Array(parts))) => Some(parts.clone()),
+        _ => None,
+    };
+    if let Some(ids) = ids {
+        result["ids"] = ids.into();
+    }
 }
 
 /// How many levels below the root folder `id` is (the root is 0).
@@ -3204,6 +3285,13 @@ pub async fn download_file(
         crate::api::create_new_file(&output_path).await?
     };
     let have = file.metadata().await?.len();
+    crate::events::emit(
+        "start",
+        serde_json::json!({
+            "command": "download", "files": 1, "bytes": size,
+            "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
+        }),
+    );
     let bar = crate::ui::start("Downloading", 1, size.unwrap_or(0).saturating_sub(have));
     match (resuming, pieces.len()) {
         (true, _) => crate::info!(
@@ -3225,15 +3313,19 @@ pub async fn download_file(
             .collect(),
         _ => HashMap::new(),
     };
-    let bytes_written =
-        download_dir::fetch_pieces(client, auth, &pieces, size, &mut file, &output_path, &urls)
-            .await
-            .inspect_err(|_| {
-                crate::warn!(
-                    "  (the part downloaded stays in {}: run the same command again to resume)",
-                    output_path.display()
-                );
-            })?;
+    let key = serde_json::json!({ "name": name });
+    let bytes_written = crate::events::track(
+        key,
+        size.unwrap_or(0),
+        download_dir::fetch_pieces(client, auth, &pieces, size, &mut file, &output_path, &urls),
+    )
+    .await
+    .inspect_err(|_| {
+        crate::warn!(
+            "  (the part downloaded stays in {}: run the same command again to resume)",
+            output_path.display()
+        );
+    })?;
     drop(bar);
     let mtime = pieces[0].modificationdate.or(pieces[0].creationdate);
     download_dir::finish(file, mtime, &output_path).await?;
@@ -3244,19 +3336,24 @@ pub async fn download_file(
         format_size(bytes_written),
         output_path.display()
     );
-    if json {
+    if json || crate::events::on() {
         let path = output_path.canonicalize().unwrap_or(output_path);
         let mut out = serde_json::json!({
             "name": name,
             "path": path.display().to_string(),
             "size": bytes_written,
+            "ids": ids,
         });
         if ids.len() > 1 {
             out["parts"] = ids.into();
         } else {
             out["id"] = ids[0].into();
         }
-        print_json(&out);
+        if crate::events::on() {
+            out["action"] = "downloaded".into();
+        }
+        output_entry(json, &out);
+        crate::events::emit("summary", serde_json::json!({ "files": 1 }));
     }
     Ok(())
 }

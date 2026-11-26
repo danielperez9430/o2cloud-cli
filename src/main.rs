@@ -3,6 +3,7 @@ mod auth;
 mod cache;
 mod config;
 mod error;
+mod events;
 mod jpeg;
 mod log;
 mod ops;
@@ -42,6 +43,13 @@ struct Cli {
     /// Show only warnings and errors
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
+
+    /// For apps: print events as they happen, one JSON object per line
+    /// (start, progress, file, retry, summary, error), instead of one
+    /// JSON value at the end. For upload, upload-dir, upload-zip,
+    /// download and download-dir
+    #[arg(long, global = true)]
+    json_lines: bool,
 }
 
 /// Options shared by the upload commands.
@@ -564,6 +572,27 @@ async fn require_client_and_auth() -> Result<(api::O2Client, config::AuthConfig)
     Ok((new_client, new_auth))
 }
 
+/// Why `--json-lines` can't be used with this command line, if it can't.
+fn json_lines_problem(cli: &Cli) -> Option<&'static str> {
+    if !cli.json_lines {
+        return None;
+    }
+    if std::env::args().any(|a| a == "--json") {
+        return Some("use --json or --json-lines, not both");
+    }
+    match cli.command {
+        Commands::Upload { .. }
+        | Commands::UploadDir { .. }
+        | Commands::UploadZip { .. }
+        | Commands::Download { .. }
+        | Commands::DownloadDir { .. } => None,
+        _ => Some(
+            "--json-lines is for upload, upload-dir, upload-zip, download and download-dir; \
+             use --json with other commands",
+        ),
+    }
+}
+
 /// Whether someone at a terminal runs the CLI (stdin is one), or
 /// `O2CLOUD_LOGIN_WINDOW=1` says to behave as if so.
 fn interactive() -> bool {
@@ -973,6 +1002,9 @@ async fn main() {
     let cli = Cli::parse();
     log::init(cli.debug);
     ui::set_level(cli.quiet, cli.verbose);
+    if cli.json_lines {
+        events::enable();
+    }
     // A crash leaves a report next to the run logs.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1005,7 +1037,10 @@ async fn main() {
             "interactive": ops::can_ask(),
         }),
     );
-    let result = run(cli).await;
+    let result = match json_lines_problem(&cli) {
+        Some(problem) => Err(O2Error::Invalid(problem.into())),
+        None => run(cli).await,
+    };
     if api::tracing() {
         eprintln!("[trace] {} requests", api::requests_sent());
     }
@@ -1032,7 +1067,9 @@ async fn main() {
         }
         // With --json, the error as JSON on stdout too, where the result
         // would have gone.
-        if std::env::args().any(|a| a == "--json")
+        if events::on() {
+            events::emit("error", e.to_json()["error"].clone());
+        } else if std::env::args().any(|a| a == "--json")
             && !ops::PRINTED_JSON.load(std::sync::atomic::Ordering::Relaxed)
         {
             println!("{}", e.to_json());

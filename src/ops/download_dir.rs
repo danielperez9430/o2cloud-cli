@@ -94,6 +94,13 @@ pub async fn download_dir(
     );
 
     let total: u64 = jobs.iter().filter_map(|j| j.size).sum();
+    crate::events::emit(
+        "start",
+        serde_json::json!({
+            "command": "download-dir", "files": jobs.len(), "bytes": total,
+            "dry_run": opts.dry_run, "schema": crate::events::SCHEMA, "run": crate::log::run_id(),
+        }),
+    );
     crate::info!(
         "→ {} {} ({}) — {} files, {} folders, into {}",
         if opts.dry_run {
@@ -145,6 +152,7 @@ pub async fn download_dir(
                 }
             };
             entry["action"] = action.into();
+            crate::events::emit("file", entry.clone());
             if json {
                 entries.push(entry);
             }
@@ -157,6 +165,13 @@ pub async fn download_dir(
             there,
             in_the_way,
             format_size(to_get)
+        );
+        crate::events::emit(
+            "summary",
+            serde_json::json!({
+                "dry_run": true, "download": new, "resume": resume, "skipped": there,
+                "in_the_way": in_the_way, "bytes": to_get,
+            }),
         );
         if json {
             print_json(&serde_json::Value::Array(entries));
@@ -189,8 +204,9 @@ pub async fn download_dir(
         .map(|job| already_there(job, &out_root, opts))
         .collect();
     for (job, outcome) in jobs.iter().zip(&outcomes) {
-        if outcome.is_some() {
+        if let Some(outcome) = outcome {
             crate::ui::file_done(job.size.unwrap_or(0), false);
+            crate::events::emit("file", described(job, &out_root, Some(outcome)));
         }
     }
     let pending: Vec<(usize, &Job)> = jobs
@@ -222,7 +238,16 @@ pub async fn download_dir(
                     if stop.load(Ordering::Relaxed) {
                         return (i, Outcome::Failed(O2Error::SessionExpired));
                     }
-                    let outcome = download_job(client, auth, job, out_root, urls, i, count).await;
+                    let key = serde_json::json!({ "local": job_json(job, out_root)["local"] });
+                    let outcome = crate::events::track(
+                        key,
+                        job.size.unwrap_or(0),
+                        download_job(client, auth, job, out_root, urls, i, count),
+                    )
+                    .await;
+                    if crate::events::on() {
+                        crate::events::emit("file", described(job, out_root, Some(&outcome)));
+                    }
                     if let Outcome::Failed(e) = &outcome {
                         let fatal = matches!(e, O2Error::SessionExpired)
                             || matches!(e, O2Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull);
@@ -252,33 +277,31 @@ pub async fn download_dir(
     let (mut done, mut bytes, mut skipped, mut failed) = (0usize, 0u64, 0usize, 0usize);
     let mut entries = Vec::new();
     for (i, job) in jobs.iter().enumerate() {
-        let mut entry = job_json(job, &out_root);
         match &outcomes[i] {
             Some(Outcome::Downloaded(n)) => {
                 done += 1;
                 bytes += n;
-                entry["action"] = "downloaded".into();
             }
-            Some(Outcome::Skipped) => {
-                skipped += 1;
-                entry["action"] = "skipped".into();
-            }
-            Some(Outcome::Failed(e)) => {
-                failed += 1;
-                entry["action"] = "failed".into();
-                entry["error"] = e.to_string().into();
-            }
+            Some(Outcome::Skipped) => skipped += 1,
+            Some(Outcome::Failed(_)) => failed += 1,
             None => {
                 failed += 1;
-                entry["action"] = "failed".into();
-                entry["error"] = "not started: the run stopped".into();
+                // Never started: said once here.
+                crate::events::emit("file", described(job, &out_root, None));
             }
         }
         if json {
-            entries.push(entry);
+            entries.push(described(job, &out_root, outcomes[i].as_ref()));
         }
     }
 
+    crate::events::emit(
+        "summary",
+        serde_json::json!({
+            "files": count, "downloaded": done, "bytes": bytes, "skipped": skipped,
+            "failed": failed,
+        }),
+    );
     crate::log::info(
         "download-dir",
         "done",
@@ -742,6 +765,25 @@ pub(super) async fn finish(
     Ok(())
 }
 
+/// A job's `--json` entry with what became of it (`None`: it never
+/// started, because the run stopped).
+fn described(job: &Job<'_>, out_root: &Path, outcome: Option<&Outcome>) -> serde_json::Value {
+    let mut entry = job_json(job, out_root);
+    match outcome {
+        Some(Outcome::Downloaded(_)) => entry["action"] = "downloaded".into(),
+        Some(Outcome::Skipped) => entry["action"] = "skipped".into(),
+        Some(Outcome::Failed(e)) => {
+            entry["action"] = "failed".into();
+            entry["error"] = e.to_string().into();
+        }
+        None => {
+            entry["action"] = "failed".into();
+            entry["error"] = "not started: the run stopped".into();
+        }
+    }
+    entry
+}
+
 fn job_json(job: &Job<'_>, out_root: &Path) -> serde_json::Value {
     let local: Vec<String> = job
         .local
@@ -756,11 +798,13 @@ fn job_json(job: &Job<'_>, out_root: &Path) -> serde_json::Value {
         "folderid": job.pieces[0].folderid,
         "size": job.size,
     });
-    if job.pieces.len() > 1 {
-        entry["parts"] = job.pieces.iter().map(|p| p.id).collect::<Vec<_>>().into();
+    let ids: Vec<u64> = job.pieces.iter().map(|p| p.id).collect();
+    if ids.len() > 1 {
+        entry["parts"] = ids.clone().into();
     } else {
-        entry["id"] = job.pieces[0].id.into();
+        entry["id"] = ids[0].into();
     }
+    entry["ids"] = ids.into();
     if job.renamed {
         entry["renamed"] = true.into();
     }

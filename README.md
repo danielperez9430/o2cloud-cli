@@ -118,6 +118,24 @@ Run `o2cloud <command> --help` for all the options.
 { "error": { "code": "session_expired", "message": "Session expired: …", "retryable": false, "exit_code": 4 } }
 ```
 
+**For apps: `--json-lines`.** `upload`, `upload-dir`, `upload-zip`, `download` and `download-dir` can print events as they happen instead, one JSON object per line on stdout:
+
+```json
+{"event":"start","command":"upload-dir","files":3,"bytes":40000004,"schema":1,"run":"3fa9c1d2"}
+{"event":"progress","local":"big.bin","bytes":8126464,"size":20000000}
+{"event":"file","local":"big.bin","action":"uploaded","ids":[1615362889],"id":1615362889,"size":20000000,"sha256":"9f2c…"}
+{"event":"summary","files":3,"uploaded":3,"skipped":0,"conflicts":0,"failed":0}
+```
+
+- `start` opens the run, with `files`, `bytes` and the format's version, `schema`.
+- `progress` comes at most four times a second per file, with the bytes moved so far.
+- `file` is the same entry `--json` gives. It has `ids` (always a list) and, for a file uploaded whole in this run, its `sha256`, computed while it's read to be sent.
+- `retry` says the server was busy or failing and the request goes again.
+- `summary` gives the counts.
+- `error` closes a run that failed, as in `--json`.
+
+Exit codes are the same as without the flag.
+
 Exit codes: `0` done; `2` a request it won't carry out as given (bad arguments, an ambiguous name, a change O2 Cloud doesn't allow); `3` not found; `4` not logged in or session expired (`code` `not_logged_in` / `session_expired`; log in with `o2cloud login`); `5` conflict, something with that name is already there (`conflict`); `6` some files of a run failed and the rest were done (`partial_failure`; run it again with `--skip-existing`); `7` the network or O2 Cloud failed (`network`, `server_error`, `bad_response`; worth trying again later); `1` anything else. `retryable` is `true` for 6 and 7.
 
 When the session has expired, the login window only opens by itself if you're at a terminal. A script or an app gets exit code 4 instead, and logs in with `o2cloud login` when it chooses (set `O2CLOUD_LOGIN_WINDOW=1` to open it anyway).
