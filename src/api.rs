@@ -196,7 +196,7 @@ const VALIDATION_RETRIES: u32 = 8;
 const VALIDATION_RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 /// Whether `err` is SAPI's "media not validated yet" (`MED-1017`).
-fn is_validating(err: &O2Error) -> bool {
+pub(crate) fn is_validating(err: &O2Error) -> bool {
     matches!(err, O2Error::Api(msg) if msg.contains("MED-1017"))
 }
 

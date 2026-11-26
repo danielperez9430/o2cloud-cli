@@ -133,6 +133,7 @@ Run `o2cloud <command> --help` for all the options.
 - `progress` comes at most four times a second per file, with the bytes moved so far.
 - `file` is the same entry `--json` gives. It has `ids` (always a list) and, for a file uploaded whole in this run, its `sha256`, computed while it's read to be sent.
 - `retry` says the server was busy, failing or still processing a file, and the request (or an upload) goes again.
+- `waiting` says a replacement is waiting for O2 Cloud to finish checking the cloud copy (one uploaded moments ago), up to 2 minutes, with the file's `name`.
 - `summary` gives the counts.
 - `error` closes a run that failed, as in `--json`.
 
