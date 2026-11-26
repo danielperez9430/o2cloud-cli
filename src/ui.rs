@@ -52,6 +52,13 @@ pub fn level() -> u8 {
 
 /// Count `n` bytes of a file moved (called by the API layer as data goes).
 pub fn add_bytes(n: u64) {
+    count_bytes(n);
+    crate::events::moved(n);
+}
+
+/// Count `n` bytes for the bar only (`--json-lines` progress is counted
+/// by the caller).
+pub fn count_bytes(n: u64) {
     BYTES.fetch_add(n, Ordering::Relaxed);
 }
 

@@ -819,6 +819,12 @@ impl O2Client {
             }
             let wait = busy_wait(&resp, retry);
             retry += 1;
+            crate::events::emit(
+                "retry",
+                serde_json::json!({
+                    "status": resp.status().as_u16(), "attempt": retry, "wait_ms": wait.as_millis() as u64,
+                }),
+            );
             crate::log::info(
                 "retry",
                 "server busy or failing; trying again",
@@ -1910,7 +1916,10 @@ impl O2Client {
         // retried here by reading the file again. Either status means the
         // upload was turned away, so a retry can't make a duplicate.
         let mut retry = 0;
+        // What `--json-lines` hashed before this piece, to start again from.
+        let hashed = crate::events::hash_snapshot();
         let resp = loop {
+            crate::events::hash_restore(&hashed);
             let resp = self
                 .send_upload(&url, meta, &metadata, path, offset, auth)
                 .await?;
@@ -1976,12 +1985,18 @@ impl O2Client {
                 .await
                 .map_err(open_err)?;
         }
-        // Counted for the progress bar as it's read to be sent.
+        // Counted for the progress bar (and `--json-lines`: progress and
+        // SHA-256) as it's read to be sent. The HTTP client reads it in a
+        // task of its own, so the file being tracked is taken along.
+        let tracked = crate::events::current();
         let stream = futures_util::StreamExt::inspect(
             tokio_util::io::ReaderStream::new(file.take(meta.size)),
-            |chunk| {
+            move |chunk| {
                 if let Ok(bytes) = chunk {
-                    crate::ui::add_bytes(bytes.len() as u64);
+                    crate::ui::count_bytes(bytes.len() as u64);
+                    if let Some(file) = &tracked {
+                        file.sent(bytes);
+                    }
                 }
             },
         );
