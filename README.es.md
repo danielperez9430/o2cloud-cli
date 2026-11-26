@@ -95,12 +95,12 @@ $ o2cloud upload-dir ./vacaciones --folder 12345678
 | 🚪 `logout` | Borra la sesión guardada |
 | 📂 `ls [carpeta]` | Lista una carpeta (`-t` en árbol, `-a` todos los archivos, `-l` fechas, `-s` orden, `-n` filtro, `--folder-only`, `--no-folder`, `--json`) |
 | 🔍 `find <texto>` | Busca archivos y carpetas por nombre |
-| ⬆️ `upload <archivo>` | Sube un archivo (`--folder <id>` para elegir dónde, `--on-conflict` para uno que ya está con otro tamaño) |
+| ⬆️ `upload <archivo>… [/carpeta]` | Sube archivos (el último argumento, o `--folder`, dice dónde: un ID o una ruta como `/Fotos/2024`; `--on-conflict` para uno que ya está con otro tamaño) |
 | 📁 `upload-dir <dir>` | Sube una carpeta con todo su contenido (`-j <n>` archivos a la vez, 2 por defecto; `--ext jpg,mp4` para solo esas extensiones; `--update` para reemplazar también los que cambiaron en local; `--dry-run` para ver solo lo que haría) |
 | 🗜️ `upload-zip <dir>` | Comprime una carpeta y sube el `.zip` |
 | ⬇️ `download <archivo>` | Descarga un archivo (`-o` para elegir la ruta local) |
-| 📥 `download-dir <carpeta>` | Descarga una carpeta con todo su contenido, o `/` para toda la cuenta (`-o <dir>`, `-j <n>`, `--skip-existing` para reanudar, `--ext`, `--dry-run`) |
-| 🗑️ `rm <archivo o carpeta>` | Lo manda a la papelera (`-r` para carpetas, `-y` para no pedir confirmación) |
+| 📥 `download-dir <carpeta>` | Descarga una carpeta con todo su contenido, o `/` para toda la cuenta (`-o <dir>`, `-j <n>`, `--ext`, `--dry-run`) |
+| 🗑️ `rm <archivo o carpeta>…` | Lo manda a la papelera (uno o varios; `-r` para carpetas, `-y` para no pedir confirmación) |
 | 🔗 `share <archivo o carpeta>` | Crea un enlace público e imprime su URL |
 | 📋 `shares` | Lista las carpetas compartidas |
 | 🚫 `unshare <carpeta>` | Quita el enlace público de una carpeta |

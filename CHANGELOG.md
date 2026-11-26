@@ -7,6 +7,12 @@ All notable changes to o2cloud-cli will be documented in this file.
 See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
 
 ### Added
+- `upload` takes several files, and the folder to put them in as the
+  last argument (`upload a.jpg b.jpg /Photos/2024`); `--folder` of
+  `upload`, `upload-dir` and `upload-zip` takes a path as well as an ID.
+  With `--json`, one file still gives one object, several a list.
+- `rm` takes several files or folders, and goes on past one it can't
+  delete (exit code 6).
 - `--json-lines` for `upload`, `upload-dir`, `upload-zip`, `download` and
   `download-dir`: events as they happen, one JSON object per line
   (`start`, `progress`, `file`, `retry`, `summary`, `error`), for apps
@@ -35,6 +41,11 @@ See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
   options in the logged command line.
 
 ### Changed (breaking)
+- `download-dir` always skips files already there with the same size
+  (and resumes cut downloads); `--skip-existing` is still accepted.
+- `upload --json` entries always have `action` (`uploaded`, `skipped`,
+  `updated`, `differs`, `conflict`), and `download --json` has
+  `"action": "downloaded"`.
 - Long transfers show a progress bar (files, bytes, speed, time left) on
   one line at a terminal, or a status line a minute in a log file,
   instead of a line per file. `-v` / `--verbose` brings back a line for

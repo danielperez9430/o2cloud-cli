@@ -216,12 +216,16 @@ enum Commands {
     /// Upload a file to O2 Cloud (files over 4 GB go up in parts,
     /// name.001, name.002, …, which `download name` joins again)
     Upload {
-        /// Local file path
-        path: String,
+        /// Local files to upload. The last one can instead be the folder
+        /// in the cloud to put them in, as a path starting with `/`
+        /// (`upload a.jpg b.jpg /Photos/2024`), like --folder
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<String>,
 
-        /// Target folder ID (omit for root)
+        /// Target folder: its ID or path, e.g. /Photos/2024 (omit for the
+        /// root)
         #[arg(short, long)]
-        folder: Option<u64>,
+        folder: Option<String>,
 
         #[command(flatten)]
         upload: UploadFlags,
@@ -236,9 +240,10 @@ enum Commands {
         /// Local directory path
         path: String,
 
-        /// Target folder ID (omit for root)
+        /// Target folder: its ID or path, e.g. /Photos/2024 (omit for the
+        /// root)
         #[arg(short, long)]
-        folder: Option<u64>,
+        folder: Option<String>,
 
         #[command(flatten)]
         upload: UploadFlags,
@@ -275,9 +280,10 @@ enum Commands {
         /// Local directory path
         path: String,
 
-        /// Target folder ID (omit for root)
+        /// Target folder: its ID or path, e.g. /Photos/2024 (omit for the
+        /// root)
         #[arg(short, long)]
-        folder: Option<u64>,
+        folder: Option<String>,
 
         #[command(flatten)]
         upload: UploadFlags,
@@ -289,8 +295,9 @@ enum Commands {
 
     /// Delete a file or folder (move to trash)
     Rm {
-        /// File/folder ID or path (e.g. 1234567890 or /Photos)
-        target: String,
+        /// Files or folders: IDs or paths (e.g. 1234567890 /Photos/a.jpg)
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
 
         /// Recursive: delete folder and all its contents
         #[arg(short, long)]
@@ -440,9 +447,10 @@ enum Commands {
         #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=8))]
         jobs: u16,
 
-        /// Skip files already there with the same size, and resume cut
-        /// downloads (nothing is ever overwritten)
-        #[arg(long)]
+        /// Kept for scripts from before 1.0: files already there with the
+        /// same size are always skipped now, and cut downloads resumed
+        /// (nothing local is ever overwritten)
+        #[arg(long, hide = true)]
         skip_existing: bool,
 
         /// Only files with these extensions (comma-separated or repeated,
@@ -809,6 +817,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 ));
             }
             let (client, auth) = require_client_and_auth().await?;
+            let folder = ops::folder_arg(&client, &auth, folder.as_deref()).await?;
             ops::upload_dir(
                 &client,
                 &auth,
@@ -840,6 +849,7 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
             if !local_path.is_dir() {
                 return Err(O2Error::Invalid(format!("not a directory: {}", path)));
             }
+            let folder = ops::folder_arg(&client, &auth, folder.as_deref()).await?;
             ops::upload_zip(
                 &client,
                 &auth,
@@ -852,32 +862,84 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
         }
 
         Commands::Rm {
-            target,
+            targets,
             recursive,
             yes,
         } => {
             let (client, auth) = require_client_and_auth().await?;
-            ops::delete_target(&client, &auth, &target, recursive, yes).await?;
+            // Each in turn, going on past one that fails.
+            let mut first_error = None;
+            let mut failed = 0;
+            for target in &targets {
+                if let Err(e) = ops::delete_target(&client, &auth, target, recursive, yes).await {
+                    if matches!(e, O2Error::SessionExpired) {
+                        return Err(e);
+                    }
+                    if targets.len() > 1 {
+                        crate::warn!("  ⚠ {}: {}", target, e);
+                    }
+                    failed += 1;
+                    first_error.get_or_insert(e);
+                }
+            }
+            match first_error {
+                Some(e) if targets.len() == 1 => return Err(e),
+                Some(_) => {
+                    return Err(O2Error::Partial(format!(
+                        "{} of {} could not be deleted",
+                        failed,
+                        targets.len()
+                    )))
+                }
+                None => {}
+            }
         }
 
         Commands::Upload {
-            path,
+            mut paths,
             folder,
             upload,
             json,
         } => {
-            let (client, auth) = require_client_and_auth().await?;
-            let local_path = PathBuf::from(&path);
-            if !local_path.exists() {
-                return Err(O2Error::NotFound(format!("file not found: {}", path)));
+            // The last one is where to put them if it's a cloud path, not
+            // a local file.
+            let destination = match paths.last() {
+                Some(last)
+                    if paths.len() > 1
+                        && last.starts_with('/')
+                        && !std::path::Path::new(last).is_file() =>
+                {
+                    paths.pop()
+                }
+                _ => None,
+            };
+            if destination.is_some() && folder.is_some() {
+                return Err(O2Error::Invalid(
+                    "give the destination once: as the last argument or with --folder".into(),
+                ));
             }
-            ops::upload_file(
+            let files: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            for (file, given) in files.iter().zip(&paths) {
+                if file.is_dir() {
+                    return Err(O2Error::Invalid(format!(
+                        "{} is a folder: use `o2cloud upload-dir` (or `upload-zip`)",
+                        given
+                    )));
+                }
+                if !file.exists() {
+                    return Err(O2Error::NotFound(format!("file not found: {}", given)));
+                }
+            }
+            let (client, auth) = require_client_and_auth().await?;
+            let folder = ops::folder_arg(&client, &auth, destination.or(folder).as_deref()).await?;
+            ops::upload_files(
                 &client,
                 &auth,
-                &local_path,
+                &files,
                 folder,
                 &upload.options(1),
                 json,
+                "upload",
             )
             .await?;
         }
@@ -955,9 +1017,11 @@ async fn run(cli: Cli) -> Result<(), O2Error> {
                 ));
             }
             let (client, auth) = require_client_and_auth().await?;
+            // Always on since 1.0; the flag stays so old scripts still run.
+            let _ = skip_existing;
             let opts = ops::DownloadDirOptions {
                 jobs: jobs.into(),
-                skip_existing,
+                skip_existing: true,
                 extensions,
                 dry_run,
             };

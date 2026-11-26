@@ -123,4 +123,5 @@ Nothing to change, but worth knowing: instead of polling the size of the file be
 | `upload-dir --json` | `action` | `conflict` |
 | `upload-dir --dry-run --json` | `action` | `conflict` |
 | `upload`, `upload-dir`, `download`, `download-dir` with `--json` | `ids` (new) | Always a list: the file's ID, or its parts' |
-| `upload --json`, `upload-zip --json` | `action` (new; only when it isn't a plain upload) | `differs`, `conflict`, `updated` |
+| `upload --json`, `upload-zip --json` | `action` (new) | `uploaded`, `skipped`, `updated`, `differs`, `conflict` |
+| `download --json` | `action` (new) | `downloaded` |

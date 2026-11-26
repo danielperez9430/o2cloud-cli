@@ -123,4 +123,5 @@ La 1.0 añade valores a campos que la 0.x ya escribía. Un programa que rechace 
 | `upload-dir --json` | `action` | `conflict` |
 | `upload-dir --dry-run --json` | `action` | `conflict` |
 | `upload`, `upload-dir`, `download`, `download-dir` con `--json` | `ids` (nuevo) | Siempre una lista: el ID del archivo, o los de sus partes |
-| `upload --json`, `upload-zip --json` | `action` (nuevo; solo cuando no es una subida normal) | `differs`, `conflict`, `updated` |
+| `upload --json`, `upload-zip --json` | `action` (nuevo) | `uploaded`, `skipped`, `updated`, `differs`, `conflict` |
+| `download --json` | `action` (nuevo) | `downloaded` |
