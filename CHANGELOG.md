@@ -2,6 +2,24 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.2.0] — 2026-11-26
+
+### Added
+- `o2cloud media photos|videos|music|documents`: the account's files of
+  one kind, wherever they are, as O2 Cloud's website groups them
+  (Música, Documentos…). `--json` gives each file's `path`, `type`,
+  `thumbnail` and `preview`, `location`, and a song's `duration`.
+- `labels --json`: each label's `thumbnail` (its cover's) and, for
+  places, a `location` (`{"lat", "lon"}`, where its cover was taken, from
+  the photo's GPS data). `labels <label> --json` gives each file its
+  `type`, `location`, `thumbnail` (about 320 px) and `preview` (about
+  1440 px). Thumbnail URLs are signed: they open without the session, for
+  a while, so treat them as private.
+
+### Fixed
+- `labels <label> --json` gave every file a `null` path: O2 Cloud sends no
+  folder for files asked for by ID, so it now comes from the listing.
+
 ## [1.1.0] — 2026-11-26
 
 ### Added
