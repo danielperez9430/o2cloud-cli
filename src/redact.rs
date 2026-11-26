@@ -192,7 +192,18 @@ pub fn args(args: &[String]) -> Vec<String> {
     };
     let mut out = Vec::with_capacity(args.len());
     let mut mask_next = false;
-    for arg in args {
+    // `-p` is `login`'s old short option for the phone number, and
+    // `mkdir`'s "make parents": masked only before what looks like a phone.
+    let phone_like = |a: &str| {
+        let digits = a.chars().filter(|c| c.is_ascii_digit()).count();
+        digits >= 6 && a.chars().all(|c| c.is_ascii_digit() || "+ -()".contains(c))
+    };
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "-p" && args.get(i + 1).is_some_and(|next| phone_like(next)) {
+            out.push(arg.clone());
+            mask_next = true;
+            continue;
+        }
         if mask_next {
             out.push("<redacted>".to_string());
             mask_next = false;
@@ -314,6 +325,11 @@ mod tests {
             "OCS-55555555",
             "--phone",
             "600111222",
+            "-p",
+            "+34 611 222 333",
+            "mkdir",
+            "-p",
+            "/a/b",
             "upload-dir",
             "./ALBUM",
             "-j",
@@ -331,6 +347,10 @@ mod tests {
             "{r}"
         );
         assert!(r.ends_with("upload-dir ./ALBUM -j 4"), "{r}");
+        assert!(
+            !r.contains("611 222 333") && r.contains("mkdir -p /a/b"),
+            "{r}"
+        );
     }
 
     #[test]

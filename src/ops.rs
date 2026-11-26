@@ -3195,7 +3195,25 @@ pub async fn upload_files(
     // Uploads of the last minutes may not be in a folder's listing yet:
     // then the account's (from the cache), once they show up, so a file
     // sent a moment ago isn't sent again as `name (1)`. Once for all.
-    let listing = if crate::cache::pending_count(&auth.msisdn) > 0 {
+    // Two files with the same name in one command: the second must see the
+    // first, which the folder's listing won't show yet.
+    let names: Vec<String> = files
+        .iter()
+        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let repeated = names
+        .iter()
+        .enumerate()
+        .any(|(i, n)| names[..i].contains(n));
+    let largest = files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .max()
+        .unwrap_or(0);
+    let mut listing = if !needs_listing(opts, largest) {
+        None
+    } else if crate::cache::pending_count(&auth.msisdn) > 0 {
         let (all, unsettled) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
         if unsettled > 0 {
             crate::warn!(
@@ -3205,6 +3223,8 @@ pub async fn upload_files(
             );
         }
         Some(all)
+    } else if repeated {
+        Some(client.get_all_media(auth).await?)
     } else {
         None
     };
@@ -3221,7 +3241,22 @@ pub async fn upload_files(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                // What went up, for the next files of this command.
+                if let (Some(listing), Some(entry)) = (listing.as_mut(), entries.last()) {
+                    let local_ms = std::fs::metadata(file)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .map(mtime_ms);
+                    let item = serde_json::json!({
+                        "id": entry["id"], "name": entry["name"], "folder": entry["folderid"],
+                        "size": entry["size"], "modificationdate": local_ms,
+                    });
+                    if let Ok(item) = serde_json::from_value::<crate::api::MediaItem>(item) {
+                        listing.push(item);
+                    }
+                }
+            }
             Err(O2Error::SessionExpired) => {
                 // This one and the rest weren't uploaded.
                 if !single {
