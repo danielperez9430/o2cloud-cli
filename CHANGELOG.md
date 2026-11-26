@@ -2,6 +2,19 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.2.2] — 2026-11-26
+
+### Fixed
+- `--on-conflict overwrite` (and `upload-dir --update`) could fail when
+  the cloud copy was uploaded moments before and O2 Cloud was still
+  checking it (`MED-1017`), and leave the new version as `name (1)`
+  (#55). Since 1.2.0 an upload no longer waits for O2 Cloud to list the
+  previous one, so the replacement reached it sooner; renaming and
+  deleting it gave up after about 12 s, and O2 Cloud can take longer.
+  Each step of a replacement, and taking it back if something fails, now
+  waits up to 2 minutes for O2 Cloud, saying so (and with a `waiting`
+  event in `--json-lines`).
+
 ## [1.2.1] — 2026-11-26
 
 ### Fixed

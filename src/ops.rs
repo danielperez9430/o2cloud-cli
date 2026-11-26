@@ -1460,6 +1460,63 @@ enum FileOutcome {
     Conflict(Vec<u64>, bool, u64, Option<u64>),
 }
 
+/// How long a replacement waits for O2 Cloud to finish checking a file
+/// it was given moments ago (`MED-1017`): seen live to take over 30 s.
+const VALIDATION_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `call` (a rename or delete in a replacement), waiting while O2 Cloud
+/// still validates the file (`MED-1017`), up to `VALIDATION_PATIENCE`:
+/// the cloud copy being replaced may be an upload of seconds ago.
+async fn when_validated<T, F, Fut>(name: &str, call: F) -> Result<T, O2Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, O2Error>>,
+{
+    waiting_for_validation(
+        name,
+        VALIDATION_PATIENCE,
+        std::time::Duration::from_secs(3),
+        call,
+    )
+    .await
+}
+
+/// `when_validated`, with how long to wait in all and between tries.
+async fn waiting_for_validation<T, F, Fut>(
+    name: &str,
+    patience: std::time::Duration,
+    every: std::time::Duration,
+    mut call: F,
+) -> Result<T, O2Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, O2Error>>,
+{
+    let start = std::time::Instant::now();
+    let mut said = false;
+    loop {
+        match call().await {
+            Err(e) if crate::api::is_validating(&e) && start.elapsed() < patience => {
+                if !said {
+                    crate::info!(
+                        "  … O2 Cloud is still checking the copy of {} uploaded moments ago; \
+                         waiting for it (up to {} s)",
+                        name,
+                        patience.as_secs()
+                    );
+                    said = true;
+                }
+                crate::events::emit(
+                    "waiting",
+                    serde_json::json!({ "name": name, "reason": "validating", "code": "MED-1017" }),
+                );
+                tokio::time::sleep(every).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Upload a changed file and replace the cloud's copy `old` with it.
 ///
 /// The server renames an upload whose name is taken (`a (1).jpg`), and a
@@ -1542,12 +1599,19 @@ async fn replace_stepping_aside(
     let restore = |n: usize| async move {
         for (id, original, tmp) in &aside[..n] {
             let changes = serde_json::json!({ "name": original });
-            let _ = client.update_file(*id, tmp, changes, auth).await;
+            let _ = when_validated(original, || {
+                client.update_file(*id, tmp, changes.clone(), auth)
+            })
+            .await;
         }
     };
     for (k, (id, original, tmp)) in aside.iter().enumerate() {
         let changes = serde_json::json!({ "name": tmp });
-        if let Err(e) = client.update_file(*id, original, changes, auth).await {
+        if let Err(e) = when_validated(original, || {
+            client.update_file(*id, original, changes.clone(), auth)
+        })
+        .await
+        {
             if !matches!(e, O2Error::SessionExpired) {
                 restore(k).await;
             }
@@ -1583,7 +1647,7 @@ async fn replace_stepping_aside(
         Err(e) => {
             if !matches!(e, O2Error::SessionExpired) {
                 if !done.is_empty() {
-                    let _ = client.delete_files(&done, auth).await;
+                    let _ = when_validated(name, || client.delete_files(&done, auth)).await;
                 }
                 restore(aside.len()).await;
             }
@@ -1615,13 +1679,15 @@ async fn replace_stepping_aside(
     }
 
     let old_ids: Vec<u64> = aside.iter().map(|(id, _, _)| *id).collect();
-    if let Err(e) = client.delete_files(&old_ids, auth).await {
+    if let Err(e) = when_validated(name, || client.delete_files(&old_ids, auth)).await {
         if matches!(e, O2Error::SessionExpired) {
             return Err(e);
         }
         // Take the new version back and give the old one its name again,
         // so nothing is left half done.
-        let undone = client.delete_files(&up.ids, auth).await.is_ok();
+        let undone = when_validated(name, || client.delete_files(&up.ids, auth))
+            .await
+            .is_ok();
         if undone {
             restore(aside.len()).await;
         }
@@ -1655,7 +1721,8 @@ async fn rename_new(
     up: &Uploaded,
 ) -> Result<(), O2Error> {
     let changes = serde_json::json!({ "name": want });
-    let mut result = client.update_file(id, want, changes.clone(), auth).await;
+    let mut result =
+        when_validated(name, || client.update_file(id, want, changes.clone(), auth)).await;
     if matches!(result, Err(ref e) if !matches!(e, O2Error::SessionExpired)) {
         result = client.update_file(id, want, changes, auth).await;
     }
@@ -1715,18 +1782,20 @@ async fn replace_then_rename(
         Ok(up) => up,
         Err(e) => {
             if !done.is_empty() && !matches!(e, O2Error::SessionExpired) {
-                let _ = client.delete_files(&done, auth).await;
+                let _ = when_validated(name, || client.delete_files(&done, auth)).await;
             }
             return Err(e);
         }
     };
     let ids: Vec<String> = up.ids.iter().map(u64::to_string).collect();
-    match client.delete_files(old, auth).await {
+    match when_validated(name, || client.delete_files(old, auth)).await {
         Ok(()) => {}
         Err(O2Error::SessionExpired) => return Err(O2Error::SessionExpired),
         // Take the new version back, so nothing is left half done.
         Err(e) => {
-            let undone = client.delete_files(&up.ids, auth).await.is_ok();
+            let undone = when_validated(name, || client.delete_files(&up.ids, auth))
+                .await
+                .is_ok();
             return Err(O2Error::Api(format!(
                 "the old version of {} couldn't be moved to the trash ({}); {}",
                 name,
@@ -5322,6 +5391,57 @@ async fn delete_file(
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn test_waits_while_o2_validates() {
+        use std::time::Duration;
+        let validating = || {
+            O2Error::Api(
+                "Delete failed: Operation forbidden on a media not yet validated (MED-1017)".into(),
+            )
+        };
+        // O2 still checking the file for a while: waited for, then done.
+        let mut tries = 0;
+        let result = waiting_for_validation(
+            "a.txt",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            || {
+                tries += 1;
+                let r = if tries < 4 {
+                    Err(validating())
+                } else {
+                    Ok(tries)
+                };
+                async move { r }
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap(), 4);
+        // Any other error is not waited for.
+        let mut tries = 0;
+        let result: Result<(), O2Error> = waiting_for_validation(
+            "a.txt",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            || {
+                tries += 1;
+                async { Err(O2Error::Api("Delete failed: no such file".into())) }
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(tries, 1);
+        // Still validating after the patience runs out: the error comes back.
+        let result: Result<(), O2Error> = waiting_for_validation(
+            "a.txt",
+            Duration::from_millis(30),
+            Duration::from_millis(10),
+            || async { Err(validating()) },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("MED-1017"));
+    }
     use super::*;
 
     #[test]
