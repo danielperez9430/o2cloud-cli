@@ -62,6 +62,9 @@ pub async fn list_media_kind(
                     "date": format_date_iso(m.creationdate),
                     "path": paths.of(m),
                     "duration": details.duration(),
+                    // Signed, like the thumbnails: it opens (and streams,
+                    // with ranges) without the session, for a while.
+                    "url": m.url.as_deref().map(crate::api::absolute_url),
                 });
                 merge(&mut file, details_json(details));
                 file

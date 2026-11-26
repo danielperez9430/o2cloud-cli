@@ -2808,11 +2808,16 @@ pub struct Thumbnail {
 impl Thumbnail {
     /// The URL to open, with the server in front of O2's relative ones.
     pub fn absolute_url(&self) -> String {
-        if self.url.starts_with("http") {
-            self.url.clone()
-        } else {
-            format!("{}{}", BASE_URL, self.url)
-        }
+        absolute_url(&self.url)
+    }
+}
+
+/// An O2 URL to open: O2 gives most as paths on its own server.
+pub fn absolute_url(url: &str) -> String {
+    if url.starts_with("http") {
+        url.to_string()
+    } else {
+        format!("{}{}", BASE_URL, url)
     }
 }
 
