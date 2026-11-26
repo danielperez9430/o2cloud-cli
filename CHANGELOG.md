@@ -2,6 +2,24 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [0.15.2] — 2026-11-26
+
+### Fixed
+From a review and more tests of 0.15.1's `upload-dir --skip-existing`:
+- A file in parts whose parts in the cloud don't match (it changed size
+  but still has the same number of parts) failed to upload, or was left
+  alone only if older locally. It is now left alone and reported like
+  any file of another size (`differs`), older or not; `--dry-run` no
+  longer says it would upload it.
+- A file is `differs` only when uploading it would take a name already
+  in use: a small file with only `name.001`… in the cloud (or a file
+  that crossed the part size) is uploaded as before 0.15.1.
+- `--json`: a `differs` entry has `parts` only when the cloud copy is in
+  parts; duplicates of the name give the first one's `id`.
+- `--skip-existing --dry-run` (without `--update`) counts a file of the
+  same size that is older locally as `unchanged`, which is what the real
+  run does, instead of `older`.
+
 ## [0.15.1] — 2026-11-26
 
 ### Changed
