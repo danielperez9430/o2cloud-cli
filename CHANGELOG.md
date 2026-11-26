@@ -7,6 +7,15 @@ All notable changes to o2cloud-cli will be documented in this file.
 See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
 
 ### Added
+- `--json-lines` for `upload`, `upload-dir`, `upload-zip`, `download` and
+  `download-dir`: events as they happen, one JSON object per line
+  (`start`, `progress`, `file`, `retry`, `summary`, `error`), for apps
+  that want real progress. Upload `file` events have the file's
+  `sha256`, computed while it's read to be sent (when all of it was
+  sent in this run).
+- `--json` entries of `upload`, `upload-dir`, `download` and
+  `download-dir` have `ids`, always a list (one ID, or the parts'), next
+  to `id` / `parts`.
 - `o2cloud debug-report`: a zip to attach to bug reports, with the
   version, system, settings (no keys), session kind and age, cache
   stats and the logs of the last 3 runs, with file and folder names

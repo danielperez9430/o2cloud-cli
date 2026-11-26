@@ -110,6 +110,10 @@ A file in parts has `parts` (a list of IDs) instead of `id`.
 
 `Error: …` lines now end with ` [run 3fa9c1d2]`, the ID of the run's log (see `debug-report` in the README). If you show or compare error messages, strip it, or use the JSON error's `code` and `message` (the message there has no ID; the ID is in `run`).
 
+## For apps: `--json-lines`
+
+Nothing to change, but worth knowing: instead of polling the size of the file being written, or reading what the CLI has read from the source, an app can pass `--json-lines` and read progress, each file's result (with the upload's `sha256`) and retries as they happen. See the README.
+
 ## New values in existing fields
 
 1.0 adds values to fields that 0.x already printed. A program that rejects unknown values should accept these:
@@ -118,4 +122,5 @@ A file in parts has `parts` (a list of IDs) instead of `id`.
 |---|---|---|
 | `upload-dir --json` | `action` | `conflict` |
 | `upload-dir --dry-run --json` | `action` | `conflict` |
+| `upload`, `upload-dir`, `download`, `download-dir` with `--json` | `ids` (new) | Always a list: the file's ID, or its parts' |
 | `upload --json`, `upload-zip --json` | `action` (new; only when it isn't a plain upload) | `differs`, `conflict`, `updated` |
