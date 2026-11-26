@@ -1717,12 +1717,16 @@ pub async fn folder_arg(
     let Some(arg) = arg else {
         return Ok(None);
     };
-    if let Ok(id) = arg.parse::<u64>() {
-        return Ok(Some(id));
-    }
     let folders = client.get_all_folders(auth).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
+    // A folder's ID, or else a path or name (`2024` can be a folder's
+    // name), as `ls` takes them.
+    if let Ok(id) = arg.parse::<u64>() {
+        if folder_name.contains_key(&id) {
+            return Ok(Some(id));
+        }
+    }
     resolve_target(Some(arg.to_string()), &folders, &folder_name).map(Some)
 }
 
@@ -1746,6 +1750,7 @@ pub async fn upload_file(
     folder_id: Option<u64>,
     opts: &UploadOptions,
     entries: &mut Vec<serde_json::Value>,
+    listing: Option<&[crate::api::MediaItem]>,
 ) -> Result<(), O2Error> {
     // Read file metadata
     let metadata = tokio::fs::metadata(local_path).await.map_err(|e| {
@@ -1776,13 +1781,14 @@ pub async fn upload_file(
         // Uploads of the last minutes may not be in the folder's listing
         // yet: then the account's (from the cache), once they show up, so
         // a file sent a moment ago isn't sent again as `name (1)`.
-        let media = if crate::cache::pending_count(&auth.msisdn) > 0 {
-            let (all, _) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
-            all.into_iter()
+        let media: Vec<crate::api::MediaItem> = match listing {
+            // Settled once for all the files of the command.
+            Some(all) => all
+                .iter()
                 .filter(|m| m.folderid == Some(folder_id))
-                .collect()
-        } else {
-            client.get_folder_media(folder_id, auth).await?
+                .cloned()
+                .collect(),
+            None => client.get_folder_media(folder_id, auth).await?,
         };
         let mdates: HashMap<u64, u64> = media
             .iter()
@@ -1827,6 +1833,7 @@ pub async fn upload_file(
             policy => policy,
         };
         let mut out = serde_json::json!({
+            "local": local_path.display().to_string(),
             "name": name,
             "folderid": folder_id,
             "size": size,
@@ -1944,6 +1951,7 @@ pub async fn upload_file(
     }
     {
         let mut out = serde_json::json!({
+            "local": local_path.display().to_string(),
             "name": name,
             "folderid": folder_id,
             "size": size,
@@ -3183,51 +3191,96 @@ pub async fn upload_files(
     );
     let mut entries = Vec::new();
     let (mut failed, mut conflicts, mut first_error) = (0usize, 0usize, None);
-    for file in files {
+    let single = files.len() == 1;
+    // Uploads of the last minutes may not be in a folder's listing yet:
+    // then the account's (from the cache), once they show up, so a file
+    // sent a moment ago isn't sent again as `name (1)`. Once for all.
+    let listing = if crate::cache::pending_count(&auth.msisdn) > 0 {
+        let (all, unsettled) = client.get_all_media_settled(auth, SETTLE_WAIT).await?;
+        if unsettled > 0 {
+            crate::warn!(
+                "⚠ {} file(s) uploaded moments ago still aren't listed; if any of them is \
+                 one of these, it may be uploaded again as `name (1)`",
+                unsettled
+            );
+        }
+        Some(all)
+    } else {
+        None
+    };
+    for (n, file) in files.iter().enumerate() {
         let before = entries.len();
-        match upload_file(client, auth, file, folder_id, opts, &mut entries).await {
+        match upload_file(
+            client,
+            auth,
+            file,
+            folder_id,
+            opts,
+            &mut entries,
+            listing.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {}
             Err(O2Error::SessionExpired) => {
+                // This one and the rest weren't uploaded.
+                if !single {
+                    for rest in &files[n..] {
+                        let entry = failed_entry(rest, "not uploaded: the session expired");
+                        crate::events::emit("file", entry.clone());
+                        entries.push(entry);
+                    }
+                }
                 first_error = Some(O2Error::SessionExpired);
                 break;
             }
             Err(e) => {
+                let message = crate::redact::text(&e.to_string());
                 if matches!(e, O2Error::Conflict(_)) {
                     conflicts += 1;
                 } else {
                     failed += 1;
-                    if files.len() > 1 {
-                        crate::warn!("  ⚠ {}: {}", file.display(), e);
+                    if !single {
+                        crate::warn!("  ⚠ {}: {}", file.display(), message);
                     }
                 }
-                // A failure says so in its entry; a conflict already has one.
-                if entries.len() == before {
-                    let entry = serde_json::json!({
-                        "local": file.display().to_string(),
-                        "name": file.file_name().map(|n| n.to_string_lossy().into_owned()),
-                        "action": "failed",
-                        "error": e.to_string(),
-                    });
+                // A conflict has its entry already; a failure of one of
+                // several gets one. A single file's failure is the error
+                // itself (`{"error": …}` with --json).
+                if entries.len() == before && !single {
+                    let entry = failed_entry(file, &message);
                     crate::events::emit("file", entry.clone());
                     entries.push(entry);
                 }
+                crate::log::warn(
+                    "upload",
+                    "file failed",
+                    serde_json::json!({ "local": file.display().to_string(), "error": message }),
+                );
                 first_error.get_or_insert(e);
             }
         }
     }
     if json && !crate::events::on() {
-        match entries.as_slice() {
-            [one] if files.len() == 1 => print_json(one),
-            all => print_json(&serde_json::Value::Array(all.to_vec())),
+        match (single, entries.first()) {
+            (true, Some(one)) => print_json(one),
+            (true, None) => {}
+            (false, _) => print_json(&serde_json::Value::Array(entries.clone())),
         }
     }
+    let count = |action: &str| entries.iter().filter(|e| e["action"] == action).count();
     crate::events::emit(
         "summary",
-        serde_json::json!({ "files": files.len(), "conflicts": conflicts, "failed": failed }),
+        serde_json::json!({
+            "files": files.len(), "uploaded": count("uploaded"), "updated": count("updated"),
+            "skipped": count("skipped"), "differs": count("differs"),
+            "conflicts": conflicts, "failed": failed,
+        }),
     );
     match first_error {
         None => Ok(()),
-        Some(e) if files.len() == 1 || matches!(e, O2Error::SessionExpired) => Err(e),
+        Some(e) if single || matches!(e, O2Error::SessionExpired) => Err(e),
+        Some(e) if failed == files.len() => Err(e),
         Some(_) if failed > 0 => Err(O2Error::Partial(format!(
             "{} of {} files failed to upload",
             failed,
@@ -3238,6 +3291,16 @@ pub async fn upload_files(
             conflicts
         ))),
     }
+}
+
+/// The `--json` entry of a file that wasn't uploaded, with why.
+fn failed_entry(file: &Path, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "local": file.display().to_string(),
+        "name": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+        "action": "failed",
+        "error": error,
+    })
 }
 
 /// Write a complete zip archive of `local_dir` to `zip_path`, returning
@@ -3685,20 +3748,20 @@ pub async fn delete_target(
     target: &str,
     recursive: bool,
     assume_yes: bool,
+    folders: &[crate::api::FolderEntry],
 ) -> Result<(), O2Error> {
-    let folders = client.get_all_folders(auth).await?;
     let Lookup { media, .. } =
-        media_for_target(client, auth, target, &folders, Needs::ItemAndFolderContents).await?;
+        media_for_target(client, auth, target, folders, Needs::ItemAndFolderContents).await?;
     let folder_name: HashMap<u64, String> =
         folders.iter().map(|f| (f.id, f.name.clone())).collect();
 
-    match resolve_item(target, &folders, &folder_name, &media)? {
+    match resolve_item(target, folders, &folder_name, &media)? {
         Item::Folder(id) => {
             delete_folder_checked(
                 client,
                 auth,
                 id,
-                &folders,
+                folders,
                 &folder_name,
                 &media,
                 recursive,

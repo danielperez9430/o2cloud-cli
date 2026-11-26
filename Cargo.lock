@@ -50,6 +50,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1986,6 +1995,7 @@ dependencies = [
 name = "o2cloud-cli"
 version = "1.0.0"
 dependencies = [
+ "aho-corasick",
  "base64 0.23.1",
  "clap",
  "dirs",

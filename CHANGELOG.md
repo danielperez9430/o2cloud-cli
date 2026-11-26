@@ -15,7 +15,9 @@ reports, with session keys and personal names kept out of them. See
 - `upload` takes several files, and the folder to put them in as the
   last argument (`upload a.jpg b.jpg /Photos/2024`); `--folder` of
   `upload`, `upload-dir` and `upload-zip` takes a path as well as an ID.
-  With `--json`, one file still gives one object, several a list.
+  With `--json`, one file still gives one object, several a list;
+  entries have `local`, and a single file that fails gives the JSON
+  error instead of an entry.
 - `rm` takes several files or folders, and goes on past one it can't
   delete (exit code 6).
 - `--json-lines` for `upload`, `upload-dir`, `upload-zip`, `download` and

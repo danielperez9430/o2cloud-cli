@@ -257,8 +257,22 @@ fn home_to_tilde(text: &str) -> String {
 /// replaced longest first in every string of every record (messages and
 /// errors too), and in crash reports.
 struct Names {
-    pairs: Vec<(String, String)>,
+    /// Finds every name (and its JSON-escaped form) in one pass.
+    finder: Option<aho_corasick::AhoCorasick>,
+    stand_ins: Vec<String>,
 }
+
+/// Options whose values aren't names (a policy, a number, extensions…),
+/// kept in the report so it says what was run.
+const PLAIN_VALUE_OPTIONS: [&str; 7] = [
+    "--on-conflict",
+    "-j",
+    "--jobs",
+    "--ext",
+    "-s",
+    "--sort",
+    "--part-size",
+];
 
 impl Names {
     fn collect<'a>(texts: impl Iterator<Item = &'a str>, salt: &str) -> Names {
@@ -269,11 +283,17 @@ impl Names {
                     if let Some(fields) = record.get("fields") {
                         names_in(fields, &mut found);
                     }
+                    // Errors and warnings name files the fields don't
+                    // (an ambiguous name's matches, an item given by ID).
+                    if let Some(msg) = record.get("msg").and_then(|m| m.as_str()) {
+                        paths_in_message(msg, &mut found);
+                    }
                 } else if let Some(args) = line.strip_prefix("args: ") {
                     // A crash report's command line.
-                    for arg in args.split_whitespace().skip(1) {
-                        add_arg(arg, &mut found);
-                    }
+                    let args: Vec<&str> = args.split_whitespace().collect();
+                    add_args(&args, &mut found);
+                } else {
+                    paths_in_message(line, &mut found);
                 }
             }
         }
@@ -284,32 +304,37 @@ impl Names {
             .flat_map(|p| p.split(['/', '\\']).map(str::to_string).collect::<Vec<_>>())
             .collect();
         found.extend(parts);
-        let mut pairs: Vec<(String, String)> = found
+        let mut patterns = Vec::new();
+        let mut stand_ins = Vec::new();
+        for name in found
             .into_iter()
             .filter(|n| n.chars().count() > 2 && n != ".." && n.parse::<f64>().is_err())
-            .map(|n| {
-                let stand_in = crate::redact::pseudonym(&home_to_tilde(&n), salt);
-                (n, stand_in)
-            })
-            .collect();
-        pairs.sort_by_key(|(original, _)| std::cmp::Reverse(original.len()));
-        Names { pairs }
+        {
+            let stand_in = crate::redact::pseudonym(&home_to_tilde(&name), salt);
+            // As JSON writes it too (`\\` for `\`).
+            let escaped = name.replace('\\', "\\\\");
+            if escaped != name {
+                patterns.push(escaped);
+                stand_ins.push(stand_in.clone());
+            }
+            patterns.push(name);
+            stand_ins.push(stand_in);
+        }
+        let finder = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .build(&patterns)
+            .ok();
+        Names { finder, stand_ins }
     }
 
-    /// `text` with every name replaced (and the home folder as `~`).
+    /// `text` with every name replaced (and the home folder as `~`), in
+    /// one pass: a stand-in is never rewritten by another name.
     fn text(&self, text: &str) -> String {
-        let mut out = home_to_tilde(text);
-        for (original, stand_in) in &self.pairs {
-            if out.contains(original.as_str()) {
-                out = out.replace(original.as_str(), stand_in);
-            }
-            // As JSON writes it (`\\` for `\`).
-            let escaped = original.replace('\\', "\\\\");
-            if escaped != *original && out.contains(&escaped) {
-                out = out.replace(&escaped, stand_in);
-            }
+        let text = home_to_tilde(text);
+        match &self.finder {
+            Some(finder) => finder.replace_all(&text, &self.stand_ins),
+            None => text,
         }
-        out
     }
 
     /// A run log (JSON lines) with every name replaced in every string.
@@ -347,14 +372,71 @@ fn names_in(value: &serde_json::Value, found: &mut std::collections::BTreeSet<St
                 found.insert(s.clone());
             }
             serde_json::Value::Array(args) if key == "args" => {
-                // The first is the command; the rest that aren't options
-                // or numbers are paths and names.
-                for arg in args.iter().skip(1).filter_map(|a| a.as_str()) {
-                    add_arg(arg, found);
-                }
+                let args: Vec<&str> = args.iter().filter_map(|a| a.as_str()).collect();
+                add_args(&args, found);
             }
             serde_json::Value::Object(_) => names_in(v, found),
             _ => {}
+        }
+    }
+}
+
+/// The names in a command line (without the program): every value but
+/// the command itself and those of `PLAIN_VALUE_OPTIONS`.
+fn add_args(args: &[&str], found: &mut std::collections::BTreeSet<String>) {
+    let mut command_seen = false;
+    let mut plain_next = false;
+    for arg in args {
+        if std::mem::take(&mut plain_next) {
+            continue;
+        }
+        if PLAIN_VALUE_OPTIONS.contains(arg) {
+            plain_next = true;
+            continue;
+        }
+        if let Some((flag, _)) = arg.split_once('=') {
+            if PLAIN_VALUE_OPTIONS.contains(&flag) {
+                continue;
+            }
+        }
+        if !arg.starts_with('-') && !command_seen {
+            command_seen = true;
+            continue;
+        }
+        add_arg(arg, found);
+    }
+}
+
+/// Paths and quoted names in an error or warning message: what's between
+/// quotes ('…' or "…"), and from a `/` that starts a word to the end of
+/// the line or a quote (paths can have spaces). Not URLs (`https://…`).
+fn paths_in_message(msg: &str, found: &mut std::collections::BTreeSet<String>) {
+    for quote in ['\'', '"'] {
+        let mut parts = msg.split(quote);
+        parts.next();
+        while let Some(inside) = parts.next() {
+            if !inside.is_empty() && inside.len() < 300 {
+                found.insert(inside.to_string());
+            }
+            parts.next();
+        }
+    }
+    for line in msg.lines() {
+        let mut start = None;
+        for (i, c) in line.char_indices() {
+            let prev = line[..i].chars().last();
+            if c == '/' && prev.is_none_or(|p| p.is_whitespace() || p == '(') {
+                start = Some(i);
+                break;
+            }
+        }
+        if let Some(start) = start {
+            let rest = &line[start..];
+            let end = rest.find(['\'', '"']).unwrap_or(rest.len());
+            let path = rest[..end].trim_end_matches([' ', ',', '.', ':', ')']);
+            if path.len() > 1 {
+                found.insert(path.to_string());
+            }
         }
     }
 }
@@ -387,7 +469,7 @@ mod tests {
             "\n",
         );
         let crash =
-            "o2cloud 1.0.0\nargs: upload-dir ./Fotos Ana --phone <redacted>\n\npanicked at x";
+            "o2cloud 1.0.0\nargs: -v upload-dir ./Fotos Ana --on-conflict skip --phone <redacted>\n\npanicked at x";
         let names = Names::collect([log, crash].into_iter(), "salt");
         let out = names.log(log) + &names.text(crash);
         for name in ["Ana", "Boda", "Luis", "Nóminas"] {
@@ -402,5 +484,47 @@ mod tests {
             "{out}"
         );
         assert_eq!(names.log(log).lines().count(), 3);
+        // The command and plain option values stay readable.
+        let crash_out = names.text(crash);
+        assert!(crash_out.contains("-v upload-dir"), "{crash_out}");
+        assert!(crash_out.contains("--on-conflict skip"), "{crash_out}");
+    }
+
+    #[test]
+    fn test_names_only_in_messages() {
+        let log = concat!(
+            r#"{"lvl":"error","target":"run","msg":"'a.jpg' is ambiguous — 2 files have that name:\n  1  /Viaje Ana/a.jpg\n  2  /Otro sitio/a.jpg\nUse the ID or the full path.","fields":{"code":"ambiguous"}}"#,
+            "\n",
+            r#"{"lvl":"error","target":"run","msg":"/Compartida Luis is not shared","fields":{"code":"not_found"}}"#,
+            "\n",
+            r#"{"lvl":"info","target":"run","msg":"start","fields":{"args":["rm","a.jpg"],"url":"https://cloud.o2online.es/sapi/media"}}"#,
+        );
+        let names = Names::collect([log].into_iter(), "salt");
+        let out = names.log(log);
+        for name in ["Viaje Ana", "Otro sitio", "Compartida Luis"] {
+            assert!(!out.contains(name), "{name} in {out}");
+        }
+        assert!(out.contains("cloud.o2online.es/sapi/media"), "{out}");
+    }
+
+    #[test]
+    fn test_report_scales() {
+        // 20,000 failed files: the report must take seconds, not minutes.
+        let mut log = String::new();
+        for i in 0..20_000 {
+            log.push_str(&format!(
+                r#"{{"lvl":"warn","target":"upload-dir","msg":"file failed","fields":{{"local":"Album {i}/IMG_{i:05}.jpg","error":"Upload failed (status 500)"}}}}"#
+            ));
+            log.push('\n');
+        }
+        let start = std::time::Instant::now();
+        let names = Names::collect([log.as_str()].into_iter(), "salt");
+        let out = names.log(&log);
+        assert!(!out.contains("IMG_00042"));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

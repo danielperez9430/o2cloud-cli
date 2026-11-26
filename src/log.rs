@@ -277,6 +277,20 @@ pub fn log(level: Level, target: &str, msg: &str, fields: serde_json::Value) {
     }
 }
 
+/// Mark this run's log as in use (its modification time), so a long
+/// transfer's log isn't pruned by other runs even while nothing is
+/// written to it (a capped log, a big file). Called by the progress bar.
+pub fn heartbeat() {
+    if let Some(file) = LOGGER.get().and_then(|l| l.file.as_ref()) {
+        let mut sink = file.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = sink.writer.flush();
+        let _ = sink
+            .writer
+            .get_ref()
+            .set_modified(std::time::SystemTime::now());
+    }
+}
+
 /// Write what's buffered to the file (at exit, and before a crash report).
 pub fn flush() {
     if let Some(file) = LOGGER.get().and_then(|l| l.file.as_ref()) {
@@ -318,7 +332,8 @@ pub fn crash_report(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
     prune(&dir, "crash-", KEEP_CRASHES - 1);
     let stamp = crate::util::system_time_to_compact_iso(std::time::SystemTime::now());
     let path = dir.join(format!("crash-{}-{}.txt", stamp, run_id()));
-    let args: Vec<String> = std::env::args().collect();
+    // Without the program's own path.
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let report = format!(
         "o2cloud {} ({} {})\nrun {}\nargs: {}\n\n{}\n\n{}\n",
         env!("CARGO_PKG_VERSION"),

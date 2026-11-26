@@ -162,10 +162,15 @@ pub fn start(label: &'static str, files: u64, bytes: u64) -> Bar {
     let stopped = stop.clone();
     tokio::spawn(async move {
         let mut last_plain = Instant::now();
+        let mut last_beat = Instant::now();
         loop {
             tokio::time::sleep(TICK).await;
             if stopped.load(Ordering::Relaxed) {
                 break;
+            }
+            if last_beat.elapsed() >= PLAIN_EVERY {
+                last_beat = Instant::now();
+                crate::log::heartbeat();
             }
             if terminal {
                 let text = render(&totals, true);

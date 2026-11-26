@@ -1304,7 +1304,7 @@ impl O2Client {
                 return Ok((media, pending));
             }
             if !said {
-                eprintln!(
+                crate::info!(
                     "→ Waiting for {} file(s) uploaded moments ago to show up in the listing…",
                     pending
                 );
