@@ -67,6 +67,17 @@ pub const MAX_FOLDER_LEVEL: usize = 20;
 
 /// Why O2 Cloud won't take `name` as a file name, if it won't.
 pub fn file_name_problem(name: &str) -> Option<String> {
+    // O2 Cloud drops emoji and the like from names (see `o2_name`); one
+    // made of nothing else ends up with no name, and is rejected.
+    let stored = crate::util::o2_name(name);
+    let stem = stored.rsplit_once('.').map_or(&*stored, |(stem, _)| stem);
+    if stored != name && stem.trim().is_empty() {
+        return Some(
+            "O2 Cloud drops emoji and similar characters from names, and this one has \
+             nothing else before its extension: rename it first"
+                .to_string(),
+        );
+    }
     (name.len() > MAX_FILE_NAME_BYTES).then(|| {
         format!(
             "the name is {} bytes long; O2 Cloud takes file names of up to {} bytes \

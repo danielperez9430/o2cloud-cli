@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::api::{O2Client, UploadMeta};
 use crate::config::AuthConfig;
 use crate::error::O2Error;
-use crate::util::{format_size, format_unix_utc, mime_type_from_name, system_time_to_compact_iso};
+use crate::util::{
+    format_size, format_unix_utc, mime_type_from_name, o2_name, system_time_to_compact_iso,
+};
 
 mod download_dir;
 pub use download_dir::{download_dir, download_label, DownloadDirOptions};
@@ -1109,11 +1111,14 @@ impl ExistingFiles {
         Self::default()
     }
 
+    /// Names are compared as O2 Cloud stores them (see `o2_name`): a local
+    /// `a 😀.txt` is the cloud's `a .txt`.
     fn get(&self, key: &(u64, String)) -> Option<&Vec<(u64, u64)>> {
-        self.files.get(key)
+        self.files.get(&(key.0, o2_name(&key.1).into_owned()))
     }
 
     fn add(&mut self, folder: u64, name: String, size: u64, id: u64) {
+        let name = o2_name(&name).into_owned();
         if let Some((base, n)) = split_part_name(&name) {
             self.parts
                 .entry((folder, base.to_string()))
@@ -1136,6 +1141,7 @@ impl ExistingFiles {
 
     #[cfg(test)]
     fn remove(&mut self, key: &(u64, String)) {
+        let key = &(key.0, o2_name(&key.1).into_owned());
         if self.files.remove(key).is_some() {
             if let Some((base, n)) = split_part_name(&key.1) {
                 if let Some(set) = self.parts.get_mut(&(key.0, base.to_string())) {
@@ -1147,6 +1153,7 @@ impl ExistingFiles {
 
     /// The parts of `name` in `folder`, by part number.
     fn parts_of(&self, folder: u64, name: &str) -> Vec<(usize, &Vec<(u64, u64)>)> {
+        let name = &*o2_name(name);
         let Some(numbers) = self.parts.get(&(folder, name.to_string())) else {
             return Vec::new();
         };
@@ -1322,6 +1329,14 @@ async fn upload_local_file(
 ) -> Result<Uploaded, O2Error> {
     let pieces = upload_pieces(name, size, opts.part_size)?;
     let split = pieces.len() > 1;
+    let stored = o2_name(name);
+    if stored != name {
+        crate::warn!(
+            "  ⚠ {}: O2 Cloud drops emoji and similar characters from names; it is kept as {}",
+            name,
+            stored
+        );
+    }
     if split {
         check_existing_parts(name, &pieces, folder_id, existing, opts.skip_existing)?;
         crate::detail!(
@@ -1390,7 +1405,8 @@ async fn upload_local_file(
                 done.push(id);
                 uploaded.sent.push(crate::cache::CachedItem {
                     id,
-                    name: Some(piece_name.clone()),
+                    // The name O2 Cloud keeps, not the one sent.
+                    name: Some(o2_name(piece_name).into_owned()),
                     folderid: Some(folder_id),
                     size: Some(*len),
                     date: now_ms,
@@ -1736,6 +1752,7 @@ async fn replace_then_rename(
 
 /// The folder `name` inside `parent`, if it exists.
 fn find_folder(folders: &[crate::api::FolderEntry], name: &str, parent: u64) -> Option<u64> {
+    let name = o2_name(name);
     folders
         .iter()
         .find(|f| f.name == name && f.parentid == parent)
@@ -3118,9 +3135,11 @@ async fn ensure_folder(
     name: &str,
     parent: u64,
 ) -> Result<u64, O2Error> {
+    // As O2 Cloud stores it: a local `viaje 📷` is the cloud's `viaje `.
+    let stored = o2_name(name);
     if let Some(f) = existing_folders
         .iter()
-        .find(|f| f.name == name && f.parentid == parent)
+        .find(|f| f.name == stored && f.parentid == parent)
     {
         crate::detail!("  📁 {}/ (exists id:{})", name, f.id);
         return Ok(f.id);

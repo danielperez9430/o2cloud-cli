@@ -2,6 +2,20 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.2.1] — 2026-11-26
+
+### Fixed
+- Files and folders with emoji in their names (😀, 📷, flags…) were
+  uploaded again on every `upload-dir --update` / `--skip-existing`, and
+  O2 Cloud kept each copy as `name (1)`, `name (2)`… O2 Cloud drops every
+  character outside Unicode's Basic Multilingual Plane from names (`foto
+  😀.jpg` becomes `foto .jpg`; checked live), so the local name never
+  matched the cloud's. Names are now compared as O2 Cloud stores them,
+  the upload says how a name will be kept, and a name left with nothing
+  before its extension (`😀.jpg`) is reported instead of failing.
+- Right after an upload, `ls` showed such a file under the name sent
+  rather than the one O2 Cloud keeps.
+
 ## [1.2.0] — 2026-11-26
 
 ### Added

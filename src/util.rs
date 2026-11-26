@@ -166,3 +166,33 @@ mod tests {
         assert_eq!(system_time_to_compact_iso(t), "99991231T235959");
     }
 }
+
+/// `name` as O2 Cloud stores it: without the characters outside Unicode's
+/// Basic Multilingual Plane (emoji such as 😀, flags, 𝔸…), which it drops
+/// from file and folder names (checked live; everything else is kept).
+/// Comparing local names with the cloud's goes through this.
+pub fn o2_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.chars().all(|c| (c as u32) <= 0xFFFF) {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(name.chars().filter(|&c| (c as u32) <= 0xFFFF).collect())
+    }
+}
+
+#[cfg(test)]
+mod o2_name_tests {
+    use super::o2_name;
+
+    #[test]
+    fn test_o2_name() {
+        assert_eq!(o2_name("foto.jpg"), "foto.jpg");
+        assert_eq!(o2_name("canción ❤️ 漢字 ©.txt"), "canción ❤️ 漢字 ©.txt");
+        assert_eq!(o2_name("a 😀.txt"), "a .txt");
+        assert_eq!(o2_name("a📷b.txt"), "ab.txt");
+        assert_eq!(
+            o2_name("a 👨\u{200d}👩\u{200d}👧.txt"),
+            "a \u{200d}\u{200d}.txt"
+        );
+        assert_eq!(o2_name("viaje 🇪🇸"), "viaje ");
+    }
+}
