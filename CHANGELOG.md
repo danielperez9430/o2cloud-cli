@@ -4,6 +4,8 @@ All notable changes to o2cloud-cli will be documented in this file.
 
 ## [Unreleased] — 1.0.0
 
+See [MIGRATING.md](MIGRATING.md) for what to change in scripts and apps.
+
 ### Changed (breaking)
 - Exit codes say what went wrong: 2 a request it won't carry out as
   given, 3 not found, 4 not logged in or session expired, 5 conflict
