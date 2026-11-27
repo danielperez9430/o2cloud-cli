@@ -2,6 +2,24 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.4.0] — 2026-11-27
+
+### Added
+- `fix-jpeg` also finds images whose extension doesn't match what they
+  are, by their first bytes (JPEG, PNG, GIF, WebP, HEIC, AVIF, BMP,
+  TIFF): Instagram's WebP photos named `.jpg`, an iPhone's HEIC photo
+  renamed `.jpg`, a PNG named `.jpg`. Windows can't open them, and O2
+  Cloud rejects a HEIC named `.jpg` (`MED-1050`; WebP and PNG named
+  `.jpg` go up but download with the wrong name). `--apply` renames them
+  to the right extension (a name already taken is left alone and said).
+  Checked live: once renamed, all of them upload and get thumbnails.
+- An upload rejected with `MED-1050` or `MED-1000` because of this says
+  what the file really is and how to rename it.
+
+### Changed
+- `upload-dir --delete` no longer warns about local folders with no
+  files whose cloud folders hold no files either (nothing to keep).
+
 ## [1.3.1] — 2026-11-27
 
 ### Fixed (`upload-dir --update --delete`, from a second independent review)

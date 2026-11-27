@@ -4,6 +4,7 @@ mod cache;
 mod config;
 mod error;
 mod events;
+mod imagetype;
 mod jpeg;
 mod log;
 mod ops;
@@ -406,16 +407,19 @@ enum Commands {
         json: bool,
     },
 
-    /// Find JPEGs whose colour profile O2 Cloud can't read (upload fails
-    /// with MED-1000), and with --apply repair them without touching the
-    /// image. Works on local files only; no login needed
+    /// Find images whose extension doesn't match what they are (a WebP or
+    /// HEIC photo named .jpg: viewers may not open them and O2 Cloud may
+    /// reject them) and JPEGs whose colour profile O2 Cloud can't read
+    /// (upload fails with MED-1000); with --apply, rename the first to the
+    /// right extension and repair the second, without touching the image.
+    /// Works on local files only; no login needed
     FixJpeg {
         /// Files or folders to check (folders are searched recursively)
         #[arg(required = true)]
         paths: Vec<String>,
 
-        /// Repair the files in place (keeping their dates); without it,
-        /// only list them
+        /// Rename and repair the files in place (keeping their dates);
+        /// without it, only list them
         #[arg(long)]
         apply: bool,
 
