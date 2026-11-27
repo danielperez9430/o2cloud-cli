@@ -157,6 +157,19 @@ pub fn provisional_ids(account: &str) -> Vec<u64> {
     })
 }
 
+/// Whether this CLI uploaded to `folder_id` files the server doesn't
+/// list yet.
+pub fn provisional_in(account: &str, folder_id: u64) -> bool {
+    if !enabled() || account.is_empty() {
+        return false;
+    }
+    load(account).is_some_and(|c| {
+        c.provisional
+            .iter()
+            .any(|p| p.folderid == Some(folder_id) && c.pending.iter().any(|(id, _)| *id == p.id))
+    })
+}
+
 /// Save the cache. It is only a speed-up, so failing to save it isn't an
 /// error. It is written to a temporary file first, so a reader never sees
 /// half of it.
