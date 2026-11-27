@@ -24,8 +24,10 @@ All notable changes to o2cloud-cli will be documented in this file.
 - `rm`, `mv`, `download` & co. given a path (`/folder/file`) said "Not
   found" for a file uploaded moments before, though `ls` already listed
   it: the folder's own listing takes 10–60 s to include it, and the
-  parts of a split file one by one. They now find it while this CLI's
-  uploads to that folder are pending.
+  parts of a split file one by one. They now find what this CLI uploaded
+  there in the last few minutes, even without the local file list
+  (first use, a week-old list, `O2CLOUD_CACHE=0`), and not once it's
+  deleted.
 
 ### Documented
 - What O2 Cloud shows as photos, videos and music, by extension (checked
