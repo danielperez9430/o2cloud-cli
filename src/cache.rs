@@ -95,6 +95,7 @@ pub fn load(account: &str) -> Option<MediaCache> {
 /// `provisional`). Nothing is noted without a cache; the next full
 /// listing will do.
 pub fn note_uploaded(account: &str, items: &[CachedItem]) {
+    note_recent(account, items, crate::config::now_unix());
     if !enabled() || account.is_empty() || items.is_empty() {
         return;
     }
@@ -170,6 +171,71 @@ pub fn provisional_in(account: &str, folder_id: u64) -> bool {
     })
 }
 
+/// How long an upload stays in the list of recent ones: well beyond the
+/// 10–60 s the server takes to list it.
+const RECENT_SECS: u64 = 600;
+
+/// A file this CLI uploaded in the last `RECENT_SECS`, kept apart from the
+/// cache so that it's known even without one (first use, an old cache,
+/// `O2CLOUD_CACHE=0`).
+#[derive(Serialize, Deserialize, Clone)]
+struct Recent {
+    account: String,
+    at: u64,
+    item: CachedItem,
+}
+
+/// `<cache dir>/o2cli/recent-uploads.json`
+fn recent_path() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("o2cli").join("recent-uploads.json"))
+}
+
+fn load_recent(now: u64) -> Vec<Recent> {
+    recent_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|j| serde_json::from_slice::<Vec<Recent>>(&j).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| now.saturating_sub(r.at) < RECENT_SECS)
+        .collect()
+}
+
+/// Add `items`, just uploaded to `account`, to the recent uploads.
+fn note_recent(account: &str, items: &[CachedItem], now: u64) {
+    if account.is_empty() || items.is_empty() {
+        return;
+    }
+    let Some(path) = recent_path() else { return };
+    let Some(dir) = path.parent() else { return };
+    let mut recent = load_recent(now);
+    recent.extend(items.iter().map(|i| Recent {
+        account: account.to_string(),
+        at: now,
+        item: i.clone(),
+    }));
+    let Ok(json) = serde_json::to_vec(&recent) else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = dir.join(format!("recent-uploads.{}.tmp", std::process::id()));
+    if crate::config::write_private(&tmp, &json).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The files this CLI uploaded to `folder_id` of `account` in the last
+/// few minutes (as sent), with when (Unix seconds). Some may have been
+/// deleted since: the change log says which.
+pub fn recent_in(account: &str, folder_id: u64) -> Vec<(u64, CachedItem)> {
+    load_recent(crate::config::now_unix())
+        .into_iter()
+        .filter(|r| r.account == account && r.item.folderid == Some(folder_id))
+        .map(|r| (r.at, r.item))
+        .collect()
+}
+
 /// Save the cache. It is only a speed-up, so failing to save it isn't an
 /// error. It is written to a temporary file first, so a reader never sees
 /// half of it.
@@ -191,6 +257,9 @@ pub fn save(cache: &MediaCache) {
 
 /// Delete the cache, if there is one.
 pub fn clear() -> std::io::Result<()> {
+    if let Some(p) = recent_path() {
+        let _ = std::fs::remove_file(p);
+    }
     match path() {
         Some(path) if path.exists() => std::fs::remove_file(path),
         _ => Ok(()),

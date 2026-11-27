@@ -4873,9 +4873,43 @@ async fn media_for_target(
                 // `cache::note_uploaded`): if the file isn't there as such
                 // and uploads to this folder are still pending, the
                 // account's listing (brought up to date first) has it.
-                if !has(name) && crate::cache::provisional_in(&auth.msisdn, folder_id) {
+                if has(name) {
+                    Some(media)
+                } else if crate::cache::provisional_in(&auth.msisdn, folder_id) {
                     None
                 } else {
+                    // Without a cache nothing is provisional, but what
+                    // this CLI uploaded here in the last few minutes under
+                    // that name (or as its parts) is known as sent. The
+                    // server doesn't return it yet, even by ID, but its
+                    // change log already tells which were deleted since.
+                    let recent: Vec<(u64, crate::cache::CachedItem)> =
+                        crate::cache::recent_in(&auth.msisdn, folder_id)
+                            .into_iter()
+                            .filter(|(_, r)| {
+                                r.name
+                                    .as_deref()
+                                    .is_some_and(|n| n == name || part_number(name, n).is_some())
+                                    && !media.iter().any(|m| m.id == r.id)
+                            })
+                            .collect();
+                    let mut media = media;
+                    if let Some(first) = recent.iter().map(|(at, _)| *at).min() {
+                        // A margin for the difference between this clock
+                        // and the server's.
+                        let from = first.saturating_sub(300) * 1000;
+                        let deleted: HashSet<u64> = client
+                            .deleted_since(from, auth)
+                            .await?
+                            .into_iter()
+                            .collect();
+                        media.extend(
+                            recent
+                                .iter()
+                                .filter(|(_, r)| !deleted.contains(&r.id))
+                                .map(|(_, r)| crate::api::MediaItem::from_cached(r)),
+                        );
+                    }
                     Some(media)
                 }
             }

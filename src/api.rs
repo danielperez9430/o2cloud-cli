@@ -1325,6 +1325,12 @@ impl O2Client {
         Ok((changes.changed, changes.unknown.is_some()))
     }
 
+    /// The files deleted since `from` (Unix ms, server time). The change
+    /// log knows of a deletion at once, while listings take a while.
+    pub async fn deleted_since(&self, from: u64, auth: &AuthConfig) -> Result<Vec<u64>, O2Error> {
+        Ok(self.changes_since(from, auth).await?.deleted)
+    }
+
     /// Every file, listed from the server now, without the local cache:
     /// for decisions that delete (`upload-dir --delete`), which mustn't
     /// rest on a change log that might have missed something.
@@ -3075,7 +3081,7 @@ impl MediaItem {
 
     /// A file from the cache. It has no download URL (they expire), so
     /// downloads ask for one.
-    fn from_cached(item: &crate::cache::CachedItem) -> Self {
+    pub fn from_cached(item: &crate::cache::CachedItem) -> Self {
         MediaItem {
             id: item.id,
             name: item.name.clone(),
