@@ -1836,12 +1836,11 @@ fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
     // An image that isn't what its extension says.
     if let O2Error::Api(msg) = &err {
         if msg.contains("MED-1050") || msg.contains("MED-1000") {
-            if let Ok(Some(m)) = crate::imagetype::mismatch(path) {
+            if let Ok(Some(m)) = crate::filetype::mismatch(path) {
                 return O2Error::Api(format!(
-                    "{} — it's {} image named .{}: `o2cloud fix-jpeg <file> --apply` renames \
-                     it to .{}",
+                    "{} — it's {} named .{}: `o2cloud fix <file> --apply` renames it to .{}",
                     msg.split(" — ").next().unwrap_or(msg),
-                    m.is.a(),
+                    m.is.described(),
                     path.extension()
                         .map(|e| e.to_string_lossy().into_owned())
                         .unwrap_or_default(),
@@ -1874,7 +1873,8 @@ fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
 
 /// Check the images in `paths` (files, or folders searched recursively):
 /// those whose extension doesn't match what they are (a WebP or HEIC photo
-/// named `.jpg`, see `crate::imagetype`), and JPEGs with a colour profile
+/// named `.jpg`, a MOV video named `.mp4`, see `crate::filetype`), and
+/// JPEGs with a colour profile
 /// O2 Cloud can't read (see `crate::jpeg`). With `apply`, the first are
 /// renamed to the right extension (unless that name is taken) and the
 /// second repaired: written next to the original and renamed over it,
@@ -1895,7 +1895,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
     }
     files.retain(|p| {
         p.extension()
-            .is_some_and(|e| crate::imagetype::Kind::of_extension(&e.to_string_lossy()).is_some())
+            .is_some_and(|e| crate::filetype::Kind::of_extension(&e.to_string_lossy()).is_some())
     });
 
     let (mut mislabelled, mut fixed, mut damaged, mut failed) = (0, 0, 0, 0);
@@ -1904,7 +1904,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
     for original in &files {
         // First its extension: what it says it is against what it is.
         let mut path = original.clone();
-        match crate::imagetype::mismatch(original) {
+        match crate::filetype::mismatch(original) {
             Err(e) => {
                 crate::warn!("  ⚠ Can't read {}: {}", original.display(), e);
                 failed += 1;
@@ -1927,9 +1927,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                 let target = target.unwrap_or_default();
                 if !apply {
                     crate::info!(
-                        "  • {}: it's {} image, not {} (its name should end in .{})",
+                        "  • {}: it's {}, not {} (its name should end in .{})",
                         original.display(),
-                        m.is.a(),
+                        m.is.described(),
                         m.named_as.name(),
                         m.is.extension()
                     );
@@ -1938,9 +1938,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                     // On a disk that ignores case, `a.webp` also finds `A.WEBP`.
                     failed += 1;
                     crate::warn!(
-                        "  ⚠ {}: it's {} image, but {} is already there; rename it yourself",
+                        "  ⚠ {}: it's {}, but {} is already there; rename it yourself",
                         original.display(),
-                        m.is.a(),
+                        m.is.described(),
                         target
                     );
                     entry["fixed"] = false.into();
@@ -1950,15 +1950,15 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                         Ok(()) => {
                             renamed += 1;
                             crate::info!(
-                                "  ✓ {} → {} (it's {} image)",
+                                "  ✓ {} → {} (it's {})",
                                 original.display(),
                                 target,
-                                m.is.a()
+                                m.is.described()
                             );
                             if !m.is.shown_by_o2() {
                                 crate::info!(
                                     "    (O2 Cloud keeps .{} files as plain files, without a \
-                                     preview)",
+                                     preview or player)",
                                     m.is.extension()
                                 );
                             }
@@ -1978,8 +1978,8 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         }
         // Then, for a JPEG (by its name, as it now is), its colour profile.
         let is_jpeg = path.extension().is_some_and(|e| {
-            crate::imagetype::Kind::of_extension(&e.to_string_lossy())
-                == Some(crate::imagetype::Kind::Jpeg)
+            crate::filetype::Kind::of_extension(&e.to_string_lossy())
+                == Some(crate::filetype::Kind::Jpeg)
         });
         if !is_jpeg {
             continue;
@@ -2042,7 +2042,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         results.push(entry);
     }
 
-    crate::info!("Checked {} image file(s).", files.len());
+    crate::info!("Checked {} file(s).", files.len());
     if wrong_extension == 0 && mislabelled == 0 && damaged == 0 {
         crate::info!(
             "✓ All of them are what their extension says, and none has a colour profile \
@@ -2057,9 +2057,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         );
     } else if wrong_extension > 0 {
         crate::info!(
-            "→ {} whose extension doesn't match what they are (Windows and other viewers \
-             may not open them, and O2 Cloud may reject them); run again with --apply to \
-             rename them (the files themselves don't change).",
+            "→ {} whose extension doesn't match what they are (the computer may open them \
+             with the wrong program or not at all, and O2 Cloud may reject them); run again \
+             with --apply to rename them (the files themselves don't change).",
             wrong_extension
         );
     }

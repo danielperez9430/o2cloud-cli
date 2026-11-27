@@ -4,7 +4,7 @@ mod cache;
 mod config;
 mod error;
 mod events;
-mod imagetype;
+mod filetype;
 mod jpeg;
 mod log;
 mod ops;
@@ -407,12 +407,15 @@ enum Commands {
         json: bool,
     },
 
-    /// Find images whose extension doesn't match what they are (a WebP or
-    /// HEIC photo named .jpg: viewers may not open them and O2 Cloud may
-    /// reject them) and JPEGs whose colour profile O2 Cloud can't read
-    /// (upload fails with MED-1000); with --apply, rename the first to the
-    /// right extension and repair the second, without touching the image.
-    /// Works on local files only; no login needed
+    /// Find files whose extension doesn't match what they are (photos,
+    /// videos, audio and PDFs: a WebP or HEIC photo named .jpg, a MOV video
+    /// named .mp4, an M4A named .mp3), which the computer opens with the
+    /// wrong program or not at all and O2 Cloud may reject, and JPEGs whose
+    /// colour profile O2 Cloud can't read (upload fails with MED-1000); with
+    /// --apply, rename the first to the right extension and repair the
+    /// second, without touching their contents. Works on local files only;
+    /// no login needed
+    #[command(name = "fix", visible_alias = "fix-jpeg")]
     FixJpeg {
         /// Files or folders to check (folders are searched recursively)
         #[arg(required = true)]
