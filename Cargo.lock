@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "o2cloud-cli"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
