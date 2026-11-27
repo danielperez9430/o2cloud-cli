@@ -256,8 +256,10 @@ impl Tree<'_> {
         // one: that is refused before), perhaps a disk not mounted or a
         // copy that didn't finish: its cloud contents stay.
         if !rel.is_empty() && !self.with_files.contains(rel) {
-            if has_content {
-                let (n, _) = count(folder, self.children, self.in_folder);
+            let (n, _) = count(folder, self.children, self.in_folder);
+            // Only empty folders in the cloud too: nothing to keep, nothing
+            // to say.
+            if has_content && n > 0 {
                 plan.kept.push(format!(
                     "{}/: no files in it locally, so its {} file(s) in the cloud were kept \
                      (delete the local folder itself to have it removed)",

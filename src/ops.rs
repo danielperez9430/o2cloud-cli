@@ -1833,6 +1833,23 @@ fn find_folder(folders: &[crate::api::FolderEntry], name: &str, parent: u64) -> 
 /// `err` with the reason, if O2 Cloud rejected the JPEG at `path`
 /// (`MED-1000`) because of a colour profile it can't read.
 fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
+    // An image that isn't what its extension says.
+    if let O2Error::Api(msg) = &err {
+        if msg.contains("MED-1050") || msg.contains("MED-1000") {
+            if let Ok(Some(m)) = crate::imagetype::mismatch(path) {
+                return O2Error::Api(format!(
+                    "{} — it's a {} image named .{}: `o2cloud fix-jpeg <file> --apply` renames \
+                     it to .{}",
+                    msg.split(" — ").next().unwrap_or(msg),
+                    m.is.name(),
+                    path.extension()
+                        .map(|e| e.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    m.is.extension()
+                ));
+            }
+        }
+    }
     let is_jpeg = path.extension().is_some_and(|e| {
         let e = e.to_string_lossy().to_lowercase();
         e == "jpg" || e == "jpeg"
@@ -1855,10 +1872,13 @@ fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
     }
 }
 
-/// Check the JPEGs in `paths` (files, or folders searched recursively)
-/// for colour profiles O2 Cloud can't read, and with `apply` repair the
-/// ones that can be (see `crate::jpeg`). A repaired file is written next
-/// to the original and renamed over it, keeping its modification date.
+/// Check the images in `paths` (files, or folders searched recursively):
+/// those whose extension doesn't match what they are (a WebP or HEIC photo
+/// named `.jpg`, see `crate::imagetype`), and JPEGs with a colour profile
+/// O2 Cloud can't read (see `crate::jpeg`). With `apply`, the first are
+/// renamed to the right extension (unless that name is taken) and the
+/// second repaired: written next to the original and renamed over it,
+/// keeping its modification date.
 pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Error> {
     let mut files = Vec::new();
     for path in paths {
@@ -1874,15 +1894,90 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         }
     }
     files.retain(|p| {
-        p.extension().is_some_and(|e| {
-            let e = e.to_string_lossy().to_lowercase();
-            e == "jpg" || e == "jpeg"
-        })
+        p.extension()
+            .is_some_and(|e| crate::imagetype::Kind::of_extension(&e.to_string_lossy()).is_some())
     });
 
     let (mut mislabelled, mut fixed, mut damaged, mut failed) = (0, 0, 0, 0);
+    let (mut wrong_extension, mut renamed) = (0, 0);
     let mut results = Vec::new();
-    for path in &files {
+    for original in &files {
+        // First its extension: what it says it is against what it is.
+        let mut path = original.clone();
+        match crate::imagetype::mismatch(original) {
+            Err(e) => {
+                crate::warn!("  ⚠ Can't read {}: {}", original.display(), e);
+                failed += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Ok(Some(m)) => {
+                wrong_extension += 1;
+                let mut entry = serde_json::json!({
+                    "path": original.display().to_string(),
+                    "problem": "extension",
+                    "named_as": m.named_as.name(),
+                    "is": m.is.name(),
+                    "rename_to": m.rename_to.display().to_string(),
+                });
+                let target = m
+                    .rename_to
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                let target = target.unwrap_or_default();
+                if !apply {
+                    crate::info!(
+                        "  • {}: it's a {} image, not {} (its name should end in .{})",
+                        original.display(),
+                        m.is.name(),
+                        m.named_as.name(),
+                        m.is.extension()
+                    );
+                    entry["fixed"] = false.into();
+                } else if m.rename_to.exists() {
+                    // On a disk that ignores case, `a.webp` also finds `A.WEBP`.
+                    failed += 1;
+                    crate::warn!(
+                        "  ⚠ {}: it's a {} image, but {} is already there; rename it yourself",
+                        original.display(),
+                        m.is.name(),
+                        target
+                    );
+                    entry["fixed"] = false.into();
+                    entry["error"] = format!("{} exists", target).into();
+                } else {
+                    match std::fs::rename(original, &m.rename_to) {
+                        Ok(()) => {
+                            renamed += 1;
+                            crate::info!(
+                                "  ✓ {} → {} (it's a {} image)",
+                                original.display(),
+                                target,
+                                m.is.name()
+                            );
+                            entry["fixed"] = true.into();
+                            path = m.rename_to.clone();
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            crate::warn!("  ⚠ {}: couldn't rename it: {}", original.display(), e);
+                            entry["fixed"] = false.into();
+                            entry["error"] = e.to_string().into();
+                        }
+                    }
+                }
+                results.push(entry);
+            }
+        }
+        // Then, for a JPEG (by its name, as it now is), its colour profile.
+        let is_jpeg = path.extension().is_some_and(|e| {
+            crate::imagetype::Kind::of_extension(&e.to_string_lossy())
+                == Some(crate::imagetype::Kind::Jpeg)
+        });
+        if !is_jpeg {
+            continue;
+        }
+        let path = &path;
         let Ok(bytes) = crate::jpeg::read_header(path) else {
             crate::warn!("  ⚠ Can't read {}", path.display());
             failed += 1;
@@ -1940,9 +2035,26 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
         results.push(entry);
     }
 
-    crate::info!("Checked {} JPEG file(s).", files.len());
-    if mislabelled == 0 && damaged == 0 {
-        crate::info!("✓ None has a colour profile O2 Cloud can't read.");
+    crate::info!("Checked {} image file(s).", files.len());
+    if wrong_extension == 0 && mislabelled == 0 && damaged == 0 {
+        crate::info!(
+            "✓ All of them are what their extension says, and none has a colour profile \
+             O2 Cloud can't read."
+        );
+    }
+    if wrong_extension > 0 && apply {
+        crate::info!(
+            "✓ Renamed {} of {} whose extension didn't match what they are.",
+            renamed,
+            wrong_extension
+        );
+    } else if wrong_extension > 0 {
+        crate::info!(
+            "→ {} whose extension doesn't match what they are (Windows and other viewers \
+             may not open them, and O2 Cloud may reject them); run again with --apply to \
+             rename them (the files themselves don't change).",
+            wrong_extension
+        );
     }
     if mislabelled > 0 && apply {
         crate::info!(
@@ -1968,7 +2080,7 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
     }
     if failed > 0 {
         return Err(O2Error::Invalid(format!(
-            "{} file(s) couldn't be read or repaired",
+            "{} file(s) couldn't be read, renamed or repaired",
             failed
         )));
     }
