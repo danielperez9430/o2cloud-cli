@@ -1838,10 +1838,10 @@ fn explain_rejection(err: O2Error, path: &Path) -> O2Error {
         if msg.contains("MED-1050") || msg.contains("MED-1000") {
             if let Ok(Some(m)) = crate::imagetype::mismatch(path) {
                 return O2Error::Api(format!(
-                    "{} — it's a {} image named .{}: `o2cloud fix-jpeg <file> --apply` renames \
+                    "{} — it's {} image named .{}: `o2cloud fix-jpeg <file> --apply` renames \
                      it to .{}",
                     msg.split(" — ").next().unwrap_or(msg),
-                    m.is.name(),
+                    m.is.a(),
                     path.extension()
                         .map(|e| e.to_string_lossy().into_owned())
                         .unwrap_or_default(),
@@ -1927,9 +1927,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                 let target = target.unwrap_or_default();
                 if !apply {
                     crate::info!(
-                        "  • {}: it's a {} image, not {} (its name should end in .{})",
+                        "  • {}: it's {} image, not {} (its name should end in .{})",
                         original.display(),
-                        m.is.name(),
+                        m.is.a(),
                         m.named_as.name(),
                         m.is.extension()
                     );
@@ -1938,9 +1938,9 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                     // On a disk that ignores case, `a.webp` also finds `A.WEBP`.
                     failed += 1;
                     crate::warn!(
-                        "  ⚠ {}: it's a {} image, but {} is already there; rename it yourself",
+                        "  ⚠ {}: it's {} image, but {} is already there; rename it yourself",
                         original.display(),
-                        m.is.name(),
+                        m.is.a(),
                         target
                     );
                     entry["fixed"] = false.into();
@@ -1950,11 +1950,18 @@ pub fn fix_jpeg(paths: &[PathBuf], apply: bool, json: bool) -> Result<(), O2Erro
                         Ok(()) => {
                             renamed += 1;
                             crate::info!(
-                                "  ✓ {} → {} (it's a {} image)",
+                                "  ✓ {} → {} (it's {} image)",
                                 original.display(),
                                 target,
-                                m.is.name()
+                                m.is.a()
                             );
+                            if !m.is.shown_by_o2() {
+                                crate::info!(
+                                    "    (O2 Cloud keeps .{} files as plain files, without a \
+                                     preview)",
+                                    m.is.extension()
+                                );
+                            }
                             entry["fixed"] = true.into();
                             path = m.rename_to.clone();
                         }

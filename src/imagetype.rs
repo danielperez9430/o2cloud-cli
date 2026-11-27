@@ -49,6 +49,22 @@ impl Kind {
         }
     }
 
+    /// Whether O2 Cloud shows a file with this kind's extension as a
+    /// photo, with thumbnails (checked live: `.avif`, `.bmp` and `.tif`
+    /// are kept as plain files).
+    pub fn shown_by_o2(self) -> bool {
+        matches!(
+            self,
+            Kind::Jpeg | Kind::Png | Kind::Gif | Kind::Webp | Kind::Heic
+        )
+    }
+
+    /// Its name with its article: "a JPEG", "an AVIF".
+    pub fn a(self) -> String {
+        let article = if self == Kind::Avif { "an" } else { "a" };
+        format!("{} {}", article, self.name())
+    }
+
     /// The kind an extension stands for (any case), if it's an image one.
     pub fn of_extension(ext: &str) -> Option<Kind> {
         Some(match ext.to_ascii_lowercase().as_str() {
@@ -146,6 +162,12 @@ pub fn mismatch(path: &Path) -> std::io::Result<Option<Mismatch>> {
 
 fn mismatch_of(path: &Path, named_as: Kind, head: &[u8]) -> Option<Mismatch> {
     let is = detect(head)?;
+    // A BMP or TIFF under a photo's name is left alone: O2 Cloud shows it
+    // as a photo (with thumbnails) only so; as `.bmp` or `.tif` it keeps
+    // it as a plain file (checked live), and viewers open it either way.
+    if matches!(is, Kind::Bmp | Kind::Tiff) && named_as.shown_by_o2() {
+        return None;
+    }
     (is != named_as).then(|| Mismatch {
         named_as,
         is,
@@ -211,6 +233,26 @@ mod tests {
         let heic = ftyp(b"heic", &[b"mif1"]);
         let m = mismatch_of(Path::new("IMG_2.JPG"), Kind::Jpeg, &heic).unwrap();
         assert_eq!(m.rename_to, PathBuf::from("IMG_2.heic"));
+        // A BMP or TIFF named .jpg is left alone: O2 Cloud only shows it
+        // as a photo so.
+        assert_eq!(
+            mismatch_of(
+                Path::new("a.jpg"),
+                Kind::Jpeg,
+                b"BM\0\0\0\0\0\0\0\0\0\0\0\0"
+            ),
+            None
+        );
+        assert_eq!(
+            mismatch_of(Path::new("a.png"), Kind::Png, b"II*\0\x08\0\0\0"),
+            None
+        );
+        // But a JPEG named .bmp gets its name.
+        let m = mismatch_of(Path::new("a.bmp"), Kind::Bmp, &[0xFF, 0xD8, 0xFF]).unwrap();
+        assert_eq!(m.rename_to, PathBuf::from("a.jpg"));
+        // An AVIF named .jpg is renamed (O2 Cloud rejects it so).
+        let avif = ftyp(b"avif", &[b"mif1"]);
+        assert!(mismatch_of(Path::new("a.jpg"), Kind::Jpeg, &avif).is_some());
         // Telling the truth, or nothing to tell: left alone.
         assert_eq!(
             mismatch_of(Path::new("a.jpeg"), Kind::Jpeg, &[0xFF, 0xD8, 0xFF]),

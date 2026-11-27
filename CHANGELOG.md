@@ -2,6 +2,22 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.4.1] — 2026-11-27
+
+### Fixed
+- `fix-jpeg` no longer renames a BMP or TIFF named `.jpg` (or another
+  photo extension): O2 Cloud shows those as photos only under such a
+  name, and keeps `.bmp` and `.tif` as plain files without a preview
+  (checked live). Renaming an AVIF (which O2 Cloud rejects as `.jpg`)
+  says it will be kept as a plain file.
+- "a AVIF image" now reads "an AVIF image".
+
+### Documented
+- What O2 Cloud shows as photos, videos and music, by extension (checked
+  live): `.avif`, `.bmp`, `.tif`, `.3gp`, `.flac`, `.ogg` and `.opus` are
+  kept as plain files; a video or song with the wrong extension is still
+  shown and played as what it is.
+
 ## [1.4.0] — 2026-11-27
 
 ### Added
