@@ -3770,6 +3770,10 @@ enum EntryKind {
     /// A symlink pointing at a directory. Never followed: a link back to
     /// an ancestor would otherwise recurse forever.
     SymlinkedDir,
+    /// A symlink pointing at nothing (its target is gone, as in a Python
+    /// venv whose interpreter was removed): nothing to read, so skipped
+    /// with a warning rather than failing the whole run (#61).
+    BrokenLink,
 }
 
 fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {
@@ -3777,6 +3781,10 @@ fn entry_kind(entry: &std::fs::DirEntry) -> EntryKind {
     match entry.file_type() {
         Ok(t) if t.is_dir() => EntryKind::Dir,
         Ok(t) if t.is_symlink() && entry.path().is_dir() => EntryKind::SymlinkedDir,
+        // `metadata` follows the link: it fails when there's nothing there.
+        Ok(t) if t.is_symlink() && std::fs::metadata(entry.path()).is_err() => {
+            EntryKind::BrokenLink
+        }
         _ => EntryKind::File,
     }
 }
@@ -3876,6 +3884,10 @@ fn walk_dir(
             EntryKind::SymlinkedDir => {
                 crate::warn!("  ⚠ Skipping symlinked directory {}", path.display())
             }
+            EntryKind::BrokenLink => crate::warn!(
+                "  ⚠ Skipping {}: a link to something that no longer exists",
+                path.display()
+            ),
         }
     }
     Ok(())
@@ -3899,7 +3911,7 @@ fn dir_size(dir: &Path) -> u64 {
                         total += meta.len();
                     }
                 }
-                EntryKind::SymlinkedDir => {}
+                EntryKind::SymlinkedDir | EntryKind::BrokenLink => {}
             }
         }
     }
@@ -4241,6 +4253,10 @@ fn add_dir_to_zip(
             EntryKind::SymlinkedDir => {
                 crate::warn!("  ⚠ Skipping symlinked directory {}", path.display())
             }
+            EntryKind::BrokenLink => crate::warn!(
+                "  ⚠ Skipping {}: a link to something that no longer exists",
+                path.display()
+            ),
             EntryKind::File => {
                 // ZIP entries always use `/` as the separator, regardless of
                 // the host OS path separator (important on Windows).
@@ -5936,6 +5952,46 @@ async fn delete_file(
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn test_broken_links_are_skipped() {
+        // #61: a link to something gone (a venv's removed interpreter) is
+        // skipped by the walk and by the zip, not fatal.
+        let tmp = std::env::temp_dir().join(format!("o2-broken-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("bin")).unwrap();
+        std::fs::write(tmp.join("a.txt"), b"hi").unwrap();
+        std::os::unix::fs::symlink("/does/not/exist", tmp.join("bin/python")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("a.txt"), tmp.join("ok-link.txt")).unwrap();
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        walk_dir(&tmp, &mut entries, &mut skipped).unwrap();
+        let files: Vec<String> = entries
+            .iter()
+            .filter(|(_, d)| !d)
+            .map(|(p, _)| p.strip_prefix(&tmp).unwrap().display().to_string())
+            .collect();
+        assert!(files.contains(&"a.txt".to_string()), "{files:?}");
+        // A link to a file that exists is still followed.
+        assert!(files.contains(&"ok-link.txt".to_string()), "{files:?}");
+        assert!(!files.iter().any(|f| f.ends_with("python")), "{files:?}");
+        let zip_path =
+            std::env::temp_dir().join(format!("o2-broken-link-{}.zip", std::process::id()));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        add_dir_to_zip(&mut zip, &tmp, &tmp, options).unwrap();
+        zip.finish().unwrap();
+        let names: Vec<String> = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap())
+            .unwrap()
+            .file_names()
+            .filter_map(|n| n.ok().map(|n| n.into_owned()))
+            .collect();
+        assert!(names.contains(&"a.txt".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.ends_with("python")), "{names:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(&zip_path);
+    }
 
     #[tokio::test]
     async fn test_waits_while_o2_validates() {

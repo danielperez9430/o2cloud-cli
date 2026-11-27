@@ -16,6 +16,12 @@ All notable changes to o2cloud-cli will be documented in this file.
   a `.docx` and a `.zip` start the same.
 - "a AVIF image" now reads "an AVIF image".
 
+### Fixed
+- A symlink pointing at nothing (a Python venv whose interpreter was
+  removed, say) aborted `upload-zip`, and failed in `upload-dir` (which
+  holds back `--delete`) and `fix`. Such links are now skipped with a
+  warning, as links to folders already were (#61).
+
 ### Documented
 - What O2 Cloud shows as photos, videos and music, by extension (checked
   live): `.avif`, `.bmp`, `.tif`, `.3gp`, `.flac`, `.ogg` and `.opus` are
