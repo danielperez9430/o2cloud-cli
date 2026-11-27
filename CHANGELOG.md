@@ -21,6 +21,10 @@ All notable changes to o2cloud-cli will be documented in this file.
   removed, say) aborted `upload-zip`, and failed in `upload-dir` (which
   holds back `--delete`) and `fix`. Such links are now skipped with a
   warning, as links to folders already were (#61).
+- `rm`, `mv`, `download` & co. given a path (`/folder/file`) said "Not
+  found" for a file uploaded moments before, though `ls` already listed
+  it: the folder's own listing takes 10–60 s to include it. They now
+  find it while this CLI's uploads are pending.
 
 ### Documented
 - What O2 Cloud shows as photos, videos and music, by extension (checked
