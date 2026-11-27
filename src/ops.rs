@@ -4868,12 +4868,12 @@ async fn media_for_target(
                 let media = client.get_folder_media(folder_id, auth).await?;
                 let has = |n: &str| media.iter().any(|m| m.name.as_deref() == Some(n));
                 // The folder's listing shows a new upload only after
-                // 10–60 s, while `ls` already lists what this CLI uploaded
-                // (see `cache::note_uploaded`): if the file isn't there
-                // and uploads are still pending, the account's listing
-                // (brought up to date first) has it.
-                let pending = !crate::cache::provisional_ids(&auth.msisdn).is_empty();
-                if !has(name) && !has(&part_name(name, 1)) && pending {
+                // 10–60 s, and the parts of a split file one by one, while
+                // `ls` already lists what this CLI uploaded (see
+                // `cache::note_uploaded`): if the file isn't there as such
+                // and uploads to this folder are still pending, the
+                // account's listing (brought up to date first) has it.
+                if !has(name) && crate::cache::provisional_in(&auth.msisdn, folder_id) {
                     None
                 } else {
                     Some(media)
