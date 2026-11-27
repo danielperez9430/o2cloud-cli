@@ -2,6 +2,16 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.4.2] — 2026-11-27
+
+### Fixed
+- `download-dir` into a folder uploaded from there took files and folders
+  with emoji in their names for missing: O2 Cloud stores `foto 😀.jpg` as
+  `foto .jpg`, so it would download a second copy under that name. It
+  now finds them under their own name, and puts what's new in a folder
+  such as `Viaje 🌍` there too, rather than in a new `Viaje ` next to it.
+- `download-dir --dry-run -v` lists the files it would download.
+
 ## [1.4.1] — 2026-11-27
 
 ### Changed

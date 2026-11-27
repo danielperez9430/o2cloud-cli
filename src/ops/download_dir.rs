@@ -170,8 +170,8 @@ async fn run_jobs(
     client: &O2Client,
     auth: &AuthConfig,
     source: &str,
-    dirs: Vec<PathBuf>,
-    jobs: Vec<Job<'_>>,
+    mut dirs: Vec<PathBuf>,
+    mut jobs: Vec<Job<'_>>,
     out_root: PathBuf,
     opts: &DownloadDirOptions,
     json: bool,
@@ -197,6 +197,30 @@ async fn run_jobs(
         dirs.len(),
         out_root.display()
     );
+    // Folders already here under a name O2 Cloud stores differently (with
+    // emoji) are used as they are, rather than made again next to them.
+    let aliases = Aliases::default();
+    let on_disk = |rel: &Path| {
+        aliases
+            .existing(&out_root, rel)
+            .and_then(|p| p.strip_prefix(&out_root).ok().map(Path::to_path_buf))
+    };
+    for dir in &mut dirs {
+        if let Some(real) = on_disk(dir) {
+            *dir = real;
+        }
+    }
+    for job in &mut jobs {
+        let (Some(parent), Some(name)) = (job.local.parent(), job.local.file_name()) else {
+            continue;
+        };
+        if parent.as_os_str().is_empty() {
+            continue;
+        }
+        if let Some(real) = on_disk(parent) {
+            job.local = real.join(name);
+        }
+    }
     if opts.dry_run {
         // What the real run would do with what's on disk now.
         let (mut new, mut resume, mut there, mut in_the_way) = (0usize, 0usize, 0usize, 0usize);
@@ -205,13 +229,15 @@ async fn run_jobs(
             let mut entry = job_json(job, &out_root);
             entry["dry_run"] = true.into();
             let size = job.size.unwrap_or(0);
-            let action = match local_state(job, &out_root, opts) {
+            let action = match local_state(job, &out_root, opts, &aliases) {
                 Local::Missing => {
+                    crate::detail!("  + {}", job.cloud);
                     new += 1;
                     to_get += size;
                     "download"
                 }
                 Local::Partial(have) => {
+                    crate::detail!("  + {} (resumed)", job.cloud);
                     resume += 1;
                     to_get += size.saturating_sub(have);
                     "resume"
@@ -284,7 +310,7 @@ async fn run_jobs(
     // for nothing but what's missing.
     let mut outcomes: Vec<Option<Outcome>> = jobs
         .iter()
-        .map(|job| already_there(job, &out_root, opts))
+        .map(|job| already_there(job, &out_root, opts, &aliases))
         .collect();
     for (job, outcome) in jobs.iter().zip(&outcomes) {
         if let Some(outcome) = outcome {
@@ -658,9 +684,65 @@ enum Local {
     InTheWay,
 }
 
-fn local_state(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> Local {
+/// Local names O2 Cloud stores differently (with emoji, which it drops:
+/// `foto 😀.jpg` is `foto .jpg` in the cloud), by directory, each read
+/// only when a name is missing there and only once.
+#[derive(Default)]
+struct Aliases(std::cell::RefCell<HashMap<PathBuf, Vec<(String, String)>>>);
+
+impl Aliases {
+    /// `rel` under `root` as it is on disk, if it is: a component that
+    /// isn't there is looked for among the names O2 Cloud would store as
+    /// it, when exactly one would. So a folder uploaded from here isn't
+    /// downloaded again under the cloud's name, next to the original.
+    fn existing(&self, root: &Path, rel: &Path) -> Option<PathBuf> {
+        let mut cur = root.to_path_buf();
+        for comp in rel.components() {
+            let next = cur.join(comp);
+            if std::fs::symlink_metadata(&next).is_ok() {
+                cur = next;
+                continue;
+            }
+            let name = comp.as_os_str().to_string_lossy();
+            let mut dirs = self.0.borrow_mut();
+            let names = dirs.entry(cur.clone()).or_insert_with(|| {
+                std::fs::read_dir(&cur)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter_map(|e| {
+                                let real = e.file_name().to_string_lossy().into_owned();
+                                let stored = crate::util::o2_name(&real).into_owned();
+                                (stored != real).then_some((stored, real))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            let mut hits = names.iter().filter(|(stored, _)| *stored == name);
+            let (_, real) = hits.next()?;
+            if hits.next().is_some() {
+                return None;
+            }
+            cur = cur.join(real);
+        }
+        Some(cur)
+    }
+}
+
+fn local_state(
+    job: &Job<'_>,
+    out_root: &Path,
+    opts: &DownloadDirOptions,
+    aliases: &Aliases,
+) -> Local {
     let path = out_root.join(&job.local);
-    if let Ok(meta) = std::fs::metadata(&path) {
+    let meta = std::fs::metadata(&path).ok().or_else(|| {
+        aliases
+            .existing(out_root, &job.local)
+            .and_then(|p| std::fs::metadata(p).ok())
+    });
+    if let Some(meta) = meta {
         return if opts.skip_existing && Some(meta.len()) == job.size {
             Local::Same
         } else {
@@ -679,8 +761,13 @@ fn local_state(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> Loc
 /// `Some` if the local file is already there: skipped if it has the
 /// same size and `--skip-existing` was given, otherwise refused (nothing
 /// is overwritten).
-fn already_there(job: &Job<'_>, out_root: &Path, opts: &DownloadDirOptions) -> Option<Outcome> {
-    match local_state(job, out_root, opts) {
+fn already_there(
+    job: &Job<'_>,
+    out_root: &Path,
+    opts: &DownloadDirOptions,
+    aliases: &Aliases,
+) -> Option<Outcome> {
+    match local_state(job, out_root, opts, aliases) {
         Local::Same => return Some(Outcome::Skipped),
         Local::InTheWay => {}
         Local::Missing | Local::Partial(_) => return None,
@@ -969,6 +1056,43 @@ mod tests {
     }
 
     #[test]
+    fn test_local_state_under_names_o2_stores_differently() {
+        // A file and a folder uploaded from here with emoji in their
+        // names come back without them: they are already there.
+        let dir = std::env::temp_dir().join(format!("o2cli_aliases_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Viaje 🌍")).unwrap();
+        std::fs::write(dir.join("foto 😀.txt"), b"abc").unwrap();
+        std::fs::write(dir.join("Viaje 🌍/a.txt"), b"abc").unwrap();
+        // Two local names O2 Cloud would store as one: no telling which.
+        std::fs::write(dir.join("b😀.txt"), b"abc").unwrap();
+        std::fs::write(dir.join("b😃.txt"), b"abc").unwrap();
+        let piece = item(7, "x", 2, 3);
+        let job = |local: &str| Job {
+            pieces: vec![&piece],
+            cloud: format!("/{local}"),
+            local: PathBuf::from(local),
+            size: Some(3),
+            mtime: None,
+            renamed: false,
+        };
+        let opts = DownloadDirOptions {
+            jobs: 1,
+            skip_existing: true,
+            extensions: Vec::new(),
+            dry_run: true,
+        };
+        let aliases = Aliases::default();
+        let state = |local: &str| local_state(&job(local), &dir, &opts, &aliases);
+        assert_eq!(state("foto .txt"), Local::Same);
+        assert_eq!(state("Viaje /a.txt"), Local::Same);
+        assert_eq!(state("Viaje /b.txt"), Local::Missing);
+        assert_eq!(state("b.txt"), Local::Missing);
+        assert_eq!(state("otra.txt"), Local::Missing);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_local_state() {
         let dir = std::env::temp_dir().join(format!("o2cli_local_state_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -987,17 +1111,35 @@ mod tests {
             extensions: Vec::new(),
             dry_run: true,
         };
-        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Missing);
+        assert_eq!(
+            local_state(&job, &dir, &opts(true), &Aliases::default()),
+            Local::Missing
+        );
         std::fs::write(dir.join(".7.o2part"), b"1234").unwrap();
-        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Partial(4));
+        assert_eq!(
+            local_state(&job, &dir, &opts(true), &Aliases::default()),
+            Local::Partial(4)
+        );
         // Bigger than the file: started over, as the real run does.
         std::fs::write(dir.join(".7.o2part"), b"12345678901").unwrap();
-        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Missing);
+        assert_eq!(
+            local_state(&job, &dir, &opts(true), &Aliases::default()),
+            Local::Missing
+        );
         std::fs::write(dir.join("f.bin"), b"0123456789").unwrap();
-        assert_eq!(local_state(&job, &dir, &opts(true)), Local::Same);
-        assert_eq!(local_state(&job, &dir, &opts(false)), Local::InTheWay);
+        assert_eq!(
+            local_state(&job, &dir, &opts(true), &Aliases::default()),
+            Local::Same
+        );
+        assert_eq!(
+            local_state(&job, &dir, &opts(false), &Aliases::default()),
+            Local::InTheWay
+        );
         std::fs::write(dir.join("f.bin"), b"012").unwrap();
-        assert_eq!(local_state(&job, &dir, &opts(true)), Local::InTheWay);
+        assert_eq!(
+            local_state(&job, &dir, &opts(true), &Aliases::default()),
+            Local::InTheWay
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
