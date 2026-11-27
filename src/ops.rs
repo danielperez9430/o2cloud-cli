@@ -4861,10 +4861,24 @@ async fn media_for_target(
         Some(vec![item])
     } else if is_folder {
         (needs == Needs::Item).then(Vec::new)
-    } else if let Some((dir, _)) = target.rsplit_once('/') {
+    } else if let Some((dir, name)) = target.rsplit_once('/') {
         let dir = if dir.is_empty() { "/" } else { dir };
         match resolve_target(Some(dir.to_string()), folders, &folder_name) {
-            Ok(folder_id) => Some(client.get_folder_media(folder_id, auth).await?),
+            Ok(folder_id) => {
+                let media = client.get_folder_media(folder_id, auth).await?;
+                let has = |n: &str| media.iter().any(|m| m.name.as_deref() == Some(n));
+                // The folder's listing shows a new upload only after
+                // 10–60 s, while `ls` already lists what this CLI uploaded
+                // (see `cache::note_uploaded`): if the file isn't there
+                // and uploads are still pending, the account's listing
+                // (brought up to date first) has it.
+                let pending = !crate::cache::provisional_ids(&auth.msisdn).is_empty();
+                if !has(name) && !has(&part_name(name, 1)) && pending {
+                    None
+                } else {
+                    Some(media)
+                }
+            }
             // No such folder: `find_file` says so without a listing.
             Err(_) => Some(Vec::new()),
         }
