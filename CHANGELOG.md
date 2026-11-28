@@ -2,6 +2,16 @@
 
 All notable changes to o2cloud-cli will be documented in this file.
 
+## [1.4.3] — 2026-11-28
+
+### Fixed
+- `download-dir` took files whose names hold characters U+0080–U+009F
+  for missing, and would download them again next to the originals.
+  Such names come from accents decoded twice (`CORRECCIÓN` saved as
+  `CORRECCIÃ` + an invisible U+0093 + `N`, as WhatsApp sometimes does).
+  It made them safe by changing those characters to `_`, though every
+  system allows them; now only U+0000–U+001F and U+007F are changed (#24).
+
 ## [1.4.2] — 2026-11-27
 
 ### Fixed
