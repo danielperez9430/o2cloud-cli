@@ -624,11 +624,13 @@ fn with_id(name: &str, id: u64, is_dir: bool) -> String {
 /// `<>:"|?*`, no trailing dots or spaces, and no reserved device names
 /// (`CON`, `NUL`, `COM1`…). Falls back to the ID if nothing is left.
 fn local_name(name: &str, id: u64, is_dir: bool, windows: bool) -> String {
-    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    // `\` separates folders only on Windows, where it can't be in a name;
+    // elsewhere it's an ordinary character (`back\slash.txt`).
+    let last = name.rsplit('/').next().unwrap_or("");
     let mut out: String = last
         .chars()
         .map(|c| {
-            if c < '\u{20}' || c == '\u{7f}' || (windows && "<>:\"|?*".contains(c)) {
+            if c < '\u{20}' || c == '\u{7f}' || (windows && "<>:\"|?*\\".contains(c)) {
                 '_'
             } else {
                 c
@@ -687,16 +689,18 @@ enum Local {
     InTheWay,
 }
 
-/// Local names O2 Cloud stores differently (with emoji, which it drops:
-/// `foto 😀.jpg` is `foto .jpg` in the cloud), by directory, each read
-/// only when a name is missing there and only once.
+/// Local names that a download wouldn't give as they are, by directory,
+/// each read only when a name is missing there and only once: with emoji,
+/// which O2 Cloud drops (`foto 😀.jpg` is `foto .jpg` in the cloud), or
+/// with characters a download changes to `_` (a tab, say).
 #[derive(Default)]
 struct Aliases(std::cell::RefCell<HashMap<PathBuf, Vec<(String, String)>>>);
 
 impl Aliases {
     /// `rel` under `root` as it is on disk, if it is: a component that
-    /// isn't there is looked for among the names O2 Cloud would store as
-    /// it, when exactly one would. So a folder uploaded from here isn't
+    /// isn't there is looked for among the names that would come back as
+    /// it (as O2 Cloud stores them, made safe as `local_name` does), when
+    /// exactly one would. So a folder uploaded from here isn't
     /// downloaded again under the cloud's name, next to the original.
     fn existing(&self, root: &Path, rel: &Path) -> Option<PathBuf> {
         let mut cur = root.to_path_buf();
@@ -715,8 +719,9 @@ impl Aliases {
                             .flatten()
                             .filter_map(|e| {
                                 let real = e.file_name().to_string_lossy().into_owned();
-                                let stored = crate::util::o2_name(&real).into_owned();
-                                (stored != real).then_some((stored, real))
+                                let stored = crate::util::o2_name(&real);
+                                let back = local_name(&stored, 0, false, cfg!(windows));
+                                (back != real).then_some((back, real))
                             })
                             .collect()
                     })
@@ -1010,6 +1015,15 @@ mod tests {
         assert_eq!(local_name("COMMENTS.txt", 1, false, true), "COMMENTS.txt");
         assert_eq!(local_name("tab\there", 1, false, false), "tab_here");
         assert_eq!(local_name("del\u{7f}.txt", 1, false, false), "del_.txt");
+        assert_eq!(
+            local_name("back\\slash.txt", 1, false, false),
+            "back\\slash.txt"
+        );
+        assert_eq!(
+            local_name("back\\slash.txt", 1, false, true),
+            "back_slash.txt"
+        );
+        assert_eq!(local_name("..\\..\\x.txt", 1, false, true), ".._.._x.txt");
         // Accents decoded twice (`Ó` → `Ã` + U+0093): kept as they are,
         // on every system, to match the file already there (#24).
         for windows in [false, true] {
@@ -1076,6 +1090,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("Viaje 🌍")).unwrap();
         std::fs::write(dir.join("foto 😀.txt"), b"abc").unwrap();
         std::fs::write(dir.join("Viaje 🌍/a.txt"), b"abc").unwrap();
+        // A tab, which a download changes to `_` (Windows allows none).
+        if cfg!(unix) {
+            std::fs::write(dir.join("tab\there.txt"), b"abc").unwrap();
+        }
         // Two local names O2 Cloud would store as one: no telling which.
         std::fs::write(dir.join("b😀.txt"), b"abc").unwrap();
         std::fs::write(dir.join("b😃.txt"), b"abc").unwrap();
@@ -1098,6 +1116,9 @@ mod tests {
         let state = |local: &str| local_state(&job(local), &dir, &opts, &aliases);
         assert_eq!(state("foto .txt"), Local::Same);
         assert_eq!(state("Viaje /a.txt"), Local::Same);
+        if cfg!(unix) {
+            assert_eq!(state("tab_here.txt"), Local::Same);
+        }
         assert_eq!(state("Viaje /b.txt"), Local::Missing);
         assert_eq!(state("b.txt"), Local::Missing);
         assert_eq!(state("otra.txt"), Local::Missing);

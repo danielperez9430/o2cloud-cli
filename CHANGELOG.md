@@ -11,6 +11,16 @@ All notable changes to o2cloud-cli will be documented in this file.
   `CORRECCIÃ` + an invisible U+0093 + `N`, as WhatsApp sometimes does).
   It made them safe by changing those characters to `_`, though every
   system allows them; now only U+0000–U+001F and U+007F are changed (#24).
+- On macOS and Linux, `download-dir` took a `\` in a name for a folder
+  separator (`back\slash.txt` came down as `slash.txt`), and didn't find
+  a file whose name has a tab, which it downloads as `_`, under its own
+  name. `\` is now an ordinary character there (on Windows, where names
+  can't hold it, it becomes `_`), and a name that comes down changed is
+  looked for under the one it came from, as names with emoji already
+  were. Checked with 45 files and folders with accents (also decomposed),
+  CJK, Arabic, symbols, emoji, flags, invisible characters, characters
+  Windows forbids and more: uploading, mirroring and downloading over
+  them find nothing to do.
 
 ## [1.4.2] — 2026-11-27
 
