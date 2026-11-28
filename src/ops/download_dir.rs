@@ -1115,11 +1115,14 @@ mod tests {
         let aliases = Aliases::default();
         let state = |local: &str| local_state(&job(local), &dir, &opts, &aliases);
         assert_eq!(state("foto .txt"), Local::Same);
-        assert_eq!(state("Viaje /a.txt"), Local::Same);
+        // As a download names the folder: `Viaje ` on Windows loses the
+        // space, which names there can't end in.
+        let viaje = local_name("Viaje ", 0, true, cfg!(windows));
+        assert_eq!(state(&format!("{viaje}/a.txt")), Local::Same);
         if cfg!(unix) {
             assert_eq!(state("tab_here.txt"), Local::Same);
         }
-        assert_eq!(state("Viaje /b.txt"), Local::Missing);
+        assert_eq!(state(&format!("{viaje}/b.txt")), Local::Missing);
         assert_eq!(state("b.txt"), Local::Missing);
         assert_eq!(state("otra.txt"), Local::Missing);
         std::fs::remove_dir_all(&dir).unwrap();
