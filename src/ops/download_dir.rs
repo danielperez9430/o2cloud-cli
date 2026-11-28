@@ -617,7 +617,10 @@ fn with_id(name: &str, id: u64, is_dir: bool) -> String {
 }
 
 /// A name from the server made safe to create locally: no directory
-/// parts, `.` or `..`, or control characters, and on Windows none of
+/// parts, `.` or `..`, or control characters U+0000–U+001F and U+007F
+/// (those from U+0080 on are kept: every system allows them, and a name
+/// whose accents were decoded twice, `CORRECCIÃ\u{93}N`, holds them, so
+/// changing them would miss the file already there), and on Windows none of
 /// `<>:"|?*`, no trailing dots or spaces, and no reserved device names
 /// (`CON`, `NUL`, `COM1`…). Falls back to the ID if nothing is left.
 fn local_name(name: &str, id: u64, is_dir: bool, windows: bool) -> String {
@@ -625,7 +628,7 @@ fn local_name(name: &str, id: u64, is_dir: bool, windows: bool) -> String {
     let mut out: String = last
         .chars()
         .map(|c| {
-            if c.is_control() || (windows && "<>:\"|?*".contains(c)) {
+            if c < '\u{20}' || c == '\u{7f}' || (windows && "<>:\"|?*".contains(c)) {
                 '_'
             } else {
                 c
@@ -1006,6 +1009,15 @@ mod tests {
         assert_eq!(local_name("com3", 1, true, true), "_com3");
         assert_eq!(local_name("COMMENTS.txt", 1, false, true), "COMMENTS.txt");
         assert_eq!(local_name("tab\there", 1, false, false), "tab_here");
+        assert_eq!(local_name("del\u{7f}.txt", 1, false, false), "del_.txt");
+        // Accents decoded twice (`Ó` → `Ã` + U+0093): kept as they are,
+        // on every system, to match the file already there (#24).
+        for windows in [false, true] {
+            assert_eq!(
+                local_name("CORRECCI\u{c3}\u{93}N.pdf", 1, false, windows),
+                "CORRECCI\u{c3}\u{93}N.pdf"
+            );
+        }
     }
 
     #[test]
